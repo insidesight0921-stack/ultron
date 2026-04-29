@@ -1,0 +1,55 @@
+# ===== AI Agent 프로젝트 .gitignore =====
+
+# API 키 및 민감 정보
+.env
+.env.*
+!.env.example
+
+# SQLite DB / 백업
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backup/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# LanceDB / 벡터 인덱스 (재인덱싱으로 복구 가능)
+*.lance/
+lancedb/
+
+# Ollama 모델 캐시 (절대 커밋 금지 — GB 단위)
+models/
+*.gguf
+
+# 로그
+*.log
+logs/
+
+# OS / 에디터
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

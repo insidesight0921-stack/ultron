@@ -1,0 +1,47 @@
+# ====================================================
+# AI Agent — Python 의존성
+# Apple Silicon 48GB / Python 3.11 ~ 3.12 권장
+# Python 3.9 이하: pandas-market-calendars / lancedb 호환 안 됨
+# ====================================================
+
+# 핵심 빌드 도구 (pykrx 등이 pkg_resources 요구)
+setuptools>=70
+wheel>=0.42
+
+# RAG / 벡터 DB (lance_namespace 충돌 회피)
+lancedb>=0.10,<0.15
+pyarrow>=15,<18
+
+# 데이터 (한국 주식)
+pykrx>=1.0
+pandas-market-calendars>=4.4
+pandas>=2.2
+
+# 모니터링 / 자동화
+watchdog>=4.0
+python-dotenv>=1.0
+
+# Web/API (모의투자 사이트, 텔레그램 봇 등)
+fastapi>=0.111
+uvicorn[standard]>=0.30
+httpx>=0.27
+requests>=2.32
+
+# 텔레그램 봇 (3단계)
+python-telegram-bot>=21.0
+
+# 외부 LLM API (4단계~, 선택)
+anthropic>=0.40
+openai>=1.40
+
+# 유틸리티
+beautifulsoup4>=4.12  # HTML 파싱 (수급/뉴스 크롤링)
+lxml>=5.1            # XML 파싱 (DART)
+numpy>=1.26
+matplotlib>=3.8
+plotly>=5.20         # 모의투자 사이트 차트
+
+# 개발/테스트 (선택)
+pytest>=8.0
+black>=24.0
+ruff>=0.5
