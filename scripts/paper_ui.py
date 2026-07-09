@@ -52,6 +52,13 @@ log = logging.getLogger("paper_ui")
 # 앱 시작 시 시드
 pdb.ensure_seed()
 
+# v3.47 — 나만의 퀀트 슬롯 보장(초기 자본 1,000만 · 필요시 DB에서 조정)
+MYQUANT_SLOT = "마이퀀트"
+try:
+    pdb.ensure_slot(MYQUANT_SLOT)
+except Exception:
+    log.exception("마이퀀트 슬롯 생성 실패")
+
 
 app = FastAPI(title="Paper Trading UI")
 
@@ -445,6 +452,44 @@ async def api_kium_scan(top_n: int = 10, market: str = "KOSPI200",
 
 
 
+# ─── 나만의 퀀트 (v3.47) ─────────────────────────────
+
+
+@app.get("/api/paper/myquant-scan")
+async def api_myquant_scan(market: str = "1028", refresh: bool = False):
+    """entry_backtest 진입 조건으로 현재 유니버스 스캔(당일 캐시, 수 분 소요 가능).
+
+    응답: {"items": [{ticker,name,price,matched,features}], "slot": "마이퀀트"}
+    """
+    try:
+        import entry_backtest as eb
+        if refresh:
+            from datetime import datetime
+            from pathlib import Path as _P
+            cpath = (PROJECT / "data" / "cache" /
+                     f"myquant_scan_{datetime.now().strftime('%Y%m%d')}.json")
+            cpath.unlink(missing_ok=True)
+        items = eb.scan_current(market_code=market)
+        return JSONResponse({"items": items, "slot": MYQUANT_SLOT,
+                             "conditions": list(eb.SCAN_CONDITIONS)})
+    except Exception as e:
+        log.exception("myquant-scan 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/paper/myquant-tags")
+async def api_myquant_tags():
+    """마이퀀트 태그별 실현 성과 (buy notes의 MQ[...] 기준)."""
+    try:
+        import trade_analytics as ta
+        rts = ta.compute_roundtrips(pdb.list_trades(limit=100000))
+        return JSONResponse({"tags": ta.tag_performance(rts),
+                             "text": ta.format_tag_performance(rts)})
+    except Exception as e:
+        log.exception("myquant-tags 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/performance")
 async def api_performance():
     """v3.31: 슬롯별 실현 성과 통계 (승률·수익률·MDD·샤프)."""
@@ -547,6 +592,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-signals">📊 키움봇 신호</button>
     <button class="tab" data-tab="tab-quant">🌐 콴텍봇</button>
     <button class="tab" data-tab="tab-ipo">🏷️ IPO봇</button>
+    <button class="tab" data-tab="tab-myquant">🧪 나만의 퀀트</button>
     <button class="tab" data-tab="tab-perf">📊 성과</button>
   </div>
 
@@ -730,6 +776,36 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
 </div>
+
+  <!-- 탭 6.5: 나만의 퀀트 (v3.47) -->
+  <div id="tab-myquant" class="tab-content">
+    <div class="card">
+      <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+        <button type="button" class="btn-scan" id="btn-myquant-scan">🔍 조건 스캔 (KOSPI200)</button>
+        <label class="muted"><input type="checkbox" id="myquant-refresh"> 캐시 무시(재스캔)</label>
+        <span id="myquant-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top: 0.4rem;">
+        진입 조건(추세위+눌림 / 정배열 / 신고가돌파 / 과낙폭반등) 충족 종목.
+        매수하면 선택 조건이 <b>MQ[태그]</b>로 기록돼 태그별 성과가 자동 축적됩니다.
+        슬롯: 마이퀀트 · 청산은 공용 자동 손절/트레일링 적용.
+      </p>
+      <table style="margin-top: 1rem;">
+        <thead><tr>
+          <th>종목</th><th class="num">현재가</th><th>충족 조건</th>
+          <th class="num">ma20</th><th class="num">dd20</th><th class="num">5일</th><th></th>
+        </tr></thead>
+        <tbody id="myquant-tbody">
+          <tr><td colspan="7" class="muted">스캔 실행 → 조건 충족 종목 (당일 캐시, 첫 실행은 수 분)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card" style="margin-top: 1rem;">
+      <h3 style="margin-top:0">🏷️ 태그별 실현 성과</h3>
+      <pre id="myquant-tags" class="muted" style="white-space: pre-wrap;">아직 마이퀀트 거래가 없습니다.</pre>
+      <p class="muted">※ 통계 관찰이며 투자 권유 아님. 표본 5건 미만(†)은 참고용.</p>
+    </div>
+  </div>
 
   <!-- 탭 6: 성과 통계 (v3.31) -->
   <div id="tab-perf" class="tab-content">
@@ -1414,6 +1490,66 @@ async function loadPerformance() {
 
 document.getElementById("btn-perf-refresh").addEventListener("click", loadPerformance);
 document.querySelector(".tab[data-tab='tab-perf']").addEventListener("click", loadPerformance);
+
+// ─── 나만의 퀀트 (v3.47) ──────────────────────────
+async function runMyquantScan() {
+  const status = document.getElementById("myquant-status");
+  const tbody = document.getElementById("myquant-tbody");
+  const refresh = document.getElementById("myquant-refresh").checked;
+  status.textContent = "스캔 중... (첫 실행은 수 분)";
+  try {
+    const data = await (await fetch(`/api/paper/myquant-scan?refresh=${refresh}`)).json();
+    if (data.error) throw new Error(data.error);
+    if (!data.items.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="muted">조건 충족 종목 없음</td></tr>`;
+    } else {
+      tbody.innerHTML = data.items.map((it, i) => {
+        const f = it.features || {};
+        const pct = v => (v === null || v === undefined) ? "—" : (v * 100).toFixed(1) + "%";
+        return `<tr>
+          <td>${it.name} <span class="muted">${it.ticker}</span></td>
+          <td class="num">${Number(it.price).toLocaleString()}</td>
+          <td>${it.matched.join(", ")}</td>
+          <td class="num">${pct(f.ma20_gap)}</td>
+          <td class="num">${pct(f.dd20)}</td>
+          <td class="num">${pct(f.ret5)}</td>
+          <td><button type="button" onclick="myquantBuy(${i})">매수</button></td>
+        </tr>`;
+      }).join("");
+      window._myquantItems = data.items;
+    }
+    status.textContent = `${data.items.length}종목 · ` + new Date().toLocaleTimeString();
+  } catch(e) { status.textContent = "오류: " + e.message; }
+}
+
+async function myquantBuy(idx) {
+  const it = (window._myquantItems || [])[idx];
+  if (!it) return;
+  const qty = prompt(`${it.name} (${it.ticker}) 매수 수량? (현재가 ${Number(it.price).toLocaleString()}원)`);
+  if (!qty || isNaN(parseInt(qty))) return;
+  const notes = `MQ[${it.matched.join(",")}] 스캔매수`;
+  try {
+    const res = await (await fetch("/api/paper/buy", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({slot: "마이퀀트", ticker: it.ticker, name: it.name,
+                            quantity: parseInt(qty), price: it.price, notes})
+    })).json();
+    if (res.error || res.ok === false) throw new Error(res.error || "실패");
+    alert(`매수 기록 완료 — 태그: ${it.matched.join(", ")}`);
+    loadMyquantTags();
+    if (typeof reload === "function") reload();
+  } catch(e) { alert("매수 실패: " + e.message); }
+}
+
+async function loadMyquantTags() {
+  try {
+    const data = await (await fetch("/api/paper/myquant-tags")).json();
+    if (data.text) document.getElementById("myquant-tags").textContent = data.text;
+  } catch(e) { /* 무시 */ }
+}
+
+document.getElementById("btn-myquant-scan").addEventListener("click", runMyquantScan);
+document.querySelector(".tab[data-tab='tab-myquant']").addEventListener("click", loadMyquantTags);
 
 </script>
 </body>

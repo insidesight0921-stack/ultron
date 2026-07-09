@@ -133,20 +133,12 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 - 예시:
     "다음주 화요일 오후 3시 콴텍봇 리뷰 잡아줘"
       → {{"tool":"schedule_bot","args":{{"action":"add","title":"콴텍봇 리뷰","when_at":"2026-05-12T15:00:00"}}}}
-    "내일 오후 3시 회의 5분 전 알려줘"
-      → {{"tool":"schedule_bot","args":{{"action":"add","title":"회의","when_at":"2026-05-02T15:00:00","pre_notify_minutes":5}}}}
     "내일 3시 회의 30분 전이랑 5분 전 둘 다 알림"
       → {{"tool":"schedule_bot","args":{{"action":"add","title":"회의","when_at":"2026-05-02T15:00:00","pre_notify_minutes":[30,5]}}}}
-    "매일 오전 7시 운동 알람"
-      → {{"tool":"schedule_bot","args":{{"action":"add","title":"운동","when_at":"2026-05-02T07:00:00","rrule_freq":"daily"}}}}
     "매주 월수금 오전 9시 주간 리뷰"
       → {{"tool":"schedule_bot","args":{{"action":"add","title":"주간 리뷰","when_at":"2026-05-04T09:00:00","rrule_freq":"weekly","rrule_byday":"MO,WE,FR"}}}}
-    "매달 1일 9시 월간 리포트, 6개월간"
-      → {{"tool":"schedule_bot","args":{{"action":"add","title":"월간 리포트","when_at":"2026-06-01T09:00:00","rrule_freq":"monthly","rrule_until":"2026-12-01T09:00:00"}}}}
-    "다가오는 일정 보여줘" / "내 일정 뭐 있어?"
-      → {{"tool":"schedule_bot","args":{{"action":"upcoming"}}}}
-    "3번 일정 삭제" / "#3 지워줘"
-      → {{"tool":"schedule_bot","args":{{"action":"delete","event_id":3}}}}
+    ("매일 N시 X"는 rrule_freq:"daily", "매달 N일"은 "monthly"+rrule_until 동일 요령)
+    "다가오는 일정" → action:"upcoming" / "3번 일정 삭제" → action:"delete",event_id:3
 
 ### 3. finance_bot(action, indicator?)
 - 목적: 외부 경제 지표 조회 + 사용자의 wiki 투자 원칙과 대조 평가
@@ -156,10 +148,8 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
     dashboard → 인자 없음 (위 6개 지표 한 번에)
     compare_with_principles → 인자 없음 (지표 + wiki 원칙 → 31B 통합 평가)
 - 예시:
-    "지금 환율 얼마야?" / "원달러 환율 알려줘"
-      → {{"tool":"finance_bot","args":{{"action":"latest","indicator":"USD/KRW"}}}}
-    "VIX 지금 몇이야"
-      → {{"tool":"finance_bot","args":{{"action":"latest","indicator":"VIX"}}}}
+    "지금 환율 얼마야?" / "VIX 지금 몇이야"
+      → {{"tool":"finance_bot","args":{{"action":"latest","indicator":"USD/KRW"}}}} (VIX면 indicator:"VIX")
     "경제 지표 한번 보여줘" / "대시보드"
       → {{"tool":"finance_bot","args":{{"action":"dashboard"}}}}
     "지금 시장이 내 매매 원칙이랑 어떻게 맞아?" / "포지션 점검 필요해?"
@@ -187,9 +177,7 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 - mode: 항상 fast (LLM 무호출, 순수 계산)
 - 예시:
     "키움봇 모멘텀 스캔" / "오늘 모멘텀 좋은 종목" / "Top 10 모멘텀"
-      → {{"tool":"kium_bot","args":{{"action":"scan"}},"mode":"fast"}}
-    "코스닥150 Top 20"
-      → {{"tool":"kium_bot","args":{{"action":"scan","top_n":20,"market":"KOSDAQ150"}},"mode":"fast"}}
+      → {{"tool":"kium_bot","args":{{"action":"scan"}},"mode":"fast"}} ("코스닥150 Top 20"이면 top_n/market 지정)
     "지금 시장 위험해? 크래시 감지 같이" / "모멘텀 스캔 + 시장 점검"
       → {{"tool":"kium_bot","args":{{"action":"scan","with_crash_signals":true}},"mode":"fast"}}
 
@@ -207,10 +195,8 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 - 예시:
     "지금 경기 국면 어때?" / "콴텍봇 국면 보여줘"
       → {{"tool":"quant_bot","args":{{"action":"phase"}},"mode":"fast"}}
-    "콴텍봇 종목 추천" / "지금 국면에 맞는 Top N" / "월간 리밸런싱"
-      → {{"tool":"quant_bot","args":{{"action":"recommend"}},"mode":"fast"}}
-    "콴텍봇 Top 5" / "5종목만 추천"
-      → {{"tool":"quant_bot","args":{{"action":"recommend","top_n":5}},"mode":"fast"}}
+    "콴텍봇 종목 추천" / "Top 5만" / "월간 리밸런싱"
+      → {{"tool":"quant_bot","args":{{"action":"recommend"}},"mode":"fast"}} (Top 5면 top_n:5)
     "Recovery 가정해서 코스닥 추천" / "강제로 Expansion 추천"
       → {{"tool":"quant_bot","args":{{"action":"recommend","phase_override":"Recovery","market":"KOSDAQ150"}},"mode":"fast"}}
 
@@ -240,8 +226,6 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 - 예시:
     "파이썬으로 장바구니 클래스 설계해줘"
       → {{"tool":"coding_bot","args":{{"action":"design","content":"파이썬 장바구니 클래스","language":"python"}},"mode":"accurate"}}
-    "이 함수 구현해 — input N → 피보나치 N번째"
-      → {{"tool":"coding_bot","args":{{"action":"code","content":"피보나치 N번째 (input N)"}},"mode":"fast"}}
     "피보나치 N번째 빠르게 짜줘" / "정렬 함수 만들어줘" / "Hello World 파이썬으로"
       → {{"tool":"coding_bot","args":{{"action":"code","content":"피보나치 N번째"}},"mode":"fast"}}
     "이진 탐색 구현해" / "URL 파싱하는 함수 짜줘" / "스택 클래스 만들어"
@@ -330,28 +314,15 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 | "RSI가 뭐야?" | fast | L3 (뭐야) |
 | "RSI가 뭐야 자세히 설명해" | accurate | L1 (자세히) |
 | "삼성전자 매수 조건 충족?" | accurate | L2 (compare_with_rules) |
-| "삼성전자 차트 봐줘" | fast | L2 (analyze) |
 | "VIX 지금 몇이야?" | fast | L2 (latest) |
-| "지금 시장이 내 원칙에 맞아?" | accurate | L2 (compare_with_principles) |
-| "내일 9시 회의 잡아줘" | fast | L2 (schedule_bot) |
-| "안녕" | fast | L2 (respond_directly) |
 | "포지션 점검 빠르게" | fast | L1 우선 (빠르게) |
-| "이거 메모해줘 ..." | fast | L2 (inbox_bot) |
 
 ## 응답 형식
 
 정확히 다음 JSON 한 줄만 출력. 다른 텍스트 절대 금지.
 
 ```json
-{{"tool": "knowledge_bot", "args": {{"query": "검색용 명료한 한국어 질문"}}}}
-```
-또는
-```json
-{{"tool": "schedule_bot", "args": {{"action": "add", "title": "...", "when_at": "...", "rrule_freq": "weekly", "rrule_byday": "MO,WE,FR", "pre_notify_minutes": 5}}, "mode": "fast"}}
-```
-또는
-```json
-{{"tool": "finance_bot", "args": {{"action": "latest", "indicator": "USD/KRW"}}, "mode": "fast"}}
+{{"tool": "knowledge_bot", "args": {{"query": "검색용 명료한 한국어 질문"}}, "mode": "accurate"}}
 ```
 또는
 ```json
@@ -359,16 +330,9 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 ```
 또는
 ```json
-{{"tool": "inbox_bot", "args": {{"content": "삼성전자 26.4Q 영업이익 ...", "hint": "투자_관찰"}}, "mode": "fast"}}
-```
-또는
-```json
-{{"tool": "coding_bot", "args": {{"action": "debug", "content": "TypeError: ...", "language": "python"}}, "mode": "accurate"}}
-```
-또는
-```json
 {{"tool": "respond_directly", "args": {{"answer": "직접 답변 텍스트"}}, "mode": "fast"}}
 ```
+(다른 도구도 동일 형식 — 위 도구별 예시의 args 구조를 그대로 따른다)
 
 ## 판단 규칙
 
@@ -956,7 +920,7 @@ def _validate_news_args(args: dict) -> dict:
 # ─── system_info (봇 자기/시스템 인식, v3.45) ─────
 _SI_TOPICS = {"access", "service", "bots", "automation",
               "signal", "rebalance", "scan", "performance", "feedback",
-              "analysis", "status"}
+              "analysis", "edge", "status"}
 
 
 def _detect_system_info(query: str):
@@ -968,6 +932,10 @@ def _detect_system_info(query: str):
     if not query:
         return None
     q = query
+    # v3.46 — 엣지/퀀트 규칙 발굴은 analysis보다 먼저(둘 다 "분석" 포함 가능)
+    if re.search(r"엣지|edge", q, re.I) and \
+            re.search(r"분석|찾|발굴|검증|보여|알려|규칙", q):
+        return {"topic": "edge"}
     if re.search(r"매매\s*습관|손익비|매매\s*패턴|보유\s*기간|심화\s*분석", q) or \
             (re.search(r"분석", q) and
              re.search(r"매매|거래|트레이딩|paper|페이퍼|포트폴리오|성과|슬롯", q, re.I)):

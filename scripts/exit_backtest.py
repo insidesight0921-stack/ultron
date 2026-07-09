@@ -105,8 +105,10 @@ def _load_real_paths() -> list[tuple[list[float], float]]:
         except Exception:
             continue
         if closes:
-            # 진입가 = 매수 시점 종가 근사(수수료 포함 cost/수량 정보가 없어 첫 종가 사용)
-            paths.append((closes, closes[0]))
+            # 진입가 = 실매수가(수수료 포함 cost/qty). qty 없으면 첫 종가 근사 폴백.
+            qty = r.get("qty") or 0
+            entry = (r["cost"] / qty) if qty else closes[0]
+            paths.append((closes, entry))
     return paths
 
 

@@ -342,3 +342,147 @@ def test_unmapped_sector_warning():
 def test_no_unmapped_warning_when_all_mapped():
     out = ta.format_correlation(ta.compute_roundtrips(_trades()))
     assert "미분류" not in out
+
+
+# ─── 엣지 분석 (v1.4) ────────────────────────────────
+
+
+def test_weekday_and_hold_bucket_labels():
+    rts = ta.compute_roundtrips(_trades())
+    by = {r["name"]: r for r in rts}
+    assert ta.weekday_label(by["삼성전자"]) == "금요일"   # 2026-05-01 매수
+    assert ta.weekday_label({"buy_at": "2026-07-09 10:00"}) == "목요일"
+    assert ta.hold_bucket_label(by["삼성전자"]) == "4-7일"  # 7일 보유
+    assert ta.weekday_label({"buy_at": None}) == ta.UNLABELED
+    assert ta.hold_bucket_label({"hold_days": None}) == ta.UNLABELED
+    assert ta.hold_bucket_label({"hold_days": 20}) == "15일+"
+
+
+def test_reentry_flags():
+    trades = [
+        {"slot_name": "키움", "ticker": "A", "name": "종목A", "side": "buy",
+         "quantity": 1, "price": 100, "fees": 0, "notes": "", "executed_at": "2026-06-01 10:00", "id": 1},
+        {"slot_name": "키움", "ticker": "A", "name": "종목A", "side": "sell",
+         "quantity": 1, "price": 90, "fees": 0, "notes": "손절", "executed_at": "2026-06-05 10:00", "id": 2},
+        {"slot_name": "키움", "ticker": "A", "name": "종목A", "side": "buy",
+         "quantity": 1, "price": 92, "fees": 0, "notes": "", "executed_at": "2026-06-15 10:00", "id": 3},
+        {"slot_name": "키움", "ticker": "A", "name": "종목A", "side": "sell",
+         "quantity": 1, "price": 95, "fees": 0, "notes": "익절", "executed_at": "2026-06-20 10:00", "id": 4},
+    ]
+    rts = ta.compute_roundtrips(trades)
+    flags = ta.reentry_flags(rts, days=30)
+    assert flags == [False, True]   # 두 번째 진입 = 손절 후 10일 내 재진입
+
+
+def test_edge_rules_report_forward_split():
+    rts = ta.compute_roundtrips(_trades())
+    rows = ta.edge_rules_report(rts)
+    r1 = next(r for r in rows if r["id"] == "R1")
+    # 재진입 없음 → 위반 0건, 전방(07-09 이후) 표본 0
+    assert r1["all_viol"]["n"] == 0 and r1["all_comp"]["n"] == 2
+    assert r1["fwd_viol"]["n"] == 0 and r1["fwd_comp"]["n"] == 0
+    r2 = next(r for r in rows if r["id"] == "R2")
+    # 대우건설 6월 매수 = Slowdown 위반
+    assert r2["all_viol"]["n"] == 1 and r2["all_viol"]["pnl"] == -100
+
+
+def test_edge_rules_phase_map_injection():
+    rts = ta.compute_roundtrips(_trades())
+    rows = ta.edge_rules_report(rts, phase_map={"2026-05": "Contraction",
+                                                "2026-06": "Recovery"})
+    r2 = next(r for r in rows if r["id"] == "R2")
+    assert r2["all_viol"]["n"] == 1 and r2["all_viol"]["pnl"] == 200  # 삼성전자만 위반
+
+
+def test_format_edge_sections():
+    out = ta.format_edge(ta.compute_roundtrips(_trades()))
+    assert "엣지 분석" in out and "보유기간" in out and "매수요일" in out
+    assert "규칙 전방검증" in out and "R1" in out and "투자 권유 아님" in out
+
+
+def test_format_edge_empty():
+    assert "거래가 아직" in ta.format_edge([])
+
+
+def test_router_detects_edge():
+    assert router._detect_system_info("엣지 분석해줘") == {"topic": "edge"}
+    assert router._detect_system_info("매매 엣지 찾아줘") == {"topic": "edge"}
+    assert router._detect_system_info("나만의 엣지 규칙 보여줘") == {"topic": "edge"}
+
+
+def test_edge_does_not_swallow_analysis():
+    assert router._detect_system_info("매매 습관 분석해줘") == {"topic": "analysis"}
+    assert router._detect_system_info("성과 분석해줘") == {"topic": "analysis"}
+
+
+def test_edge_topic_registered_and_dispatch(monkeypatch):
+    assert "edge" in router._SI_TOPICS
+    assert router._validate_system_info({"topic": "edge"}) == {"topic": "edge"}
+    import trade_analytics
+    monkeypatch.setattr(trade_analytics, "edge_report", lambda: "EDGE_OK")
+    assert si.answer("edge") == "EDGE_OK"
+
+
+def test_batch_entry_flags():
+    def t(i, tk, day):
+        return [
+            {"slot_name": "키움", "ticker": tk, "name": tk, "side": "buy", "quantity": 1,
+             "price": 100, "fees": 0, "notes": "", "executed_at": f"{day} 10:00", "id": i},
+            {"slot_name": "키움", "ticker": tk, "name": tk, "side": "sell", "quantity": 1,
+             "price": 110, "fees": 0, "notes": "익절", "executed_at": "2026-07-01 10:00", "id": i+100},
+        ]
+    trades = sum([t(1, "A", "2026-06-18"), t(2, "B", "2026-06-18"),
+                  t(3, "C", "2026-06-18"), t(4, "D", "2026-06-18"),
+                  t(5, "E", "2026-06-22")], [])
+    rts = ta.compute_roundtrips(trades)
+    flags = dict(zip([r["ticker"] for r in rts], ta.batch_entry_flags(rts, min_n=4)))
+    assert flags["A"] and flags["D"]        # 6/18 4종목 일괄 → 위반
+    assert not flags["E"]                   # 단독 진입 → 정상
+
+
+def test_roundtrip_includes_qty():
+    rts = ta.compute_roundtrips(_trades())
+    assert all(r["qty"] == 10 for r in rts)
+
+
+# ─── 마이퀀트 태그 (v1.5) ────────────────────────────
+
+
+def test_roundtrip_carries_buy_notes():
+    trades = _trades()
+    trades[0]["notes"] = "MQ[정배열,신고가돌파] 스캔매수"
+    rts = {r["name"]: r for r in ta.compute_roundtrips(trades)}
+    assert rts["삼성전자"]["buy_notes"] == "MQ[정배열,신고가돌파] 스캔매수"
+    assert rts["대우건설"]["buy_notes"] == ""
+
+
+def test_extract_tags():
+    assert ta.extract_tags("MQ[정배열,신고가돌파] 스캔매수") == ["정배열", "신고가돌파"]
+    assert ta.extract_tags("MQ[ 눌림 ]") == ["눌림"]
+    assert ta.extract_tags("일반 메모") == []
+    assert ta.extract_tags(None) == []
+    assert ta.extract_tags("MQ[]") == []
+
+
+def test_tag_performance_multi_tag_counted_each():
+    trades = _trades()
+    trades[0]["notes"] = "MQ[정배열,신고가돌파]"
+    trades[2]["notes"] = "MQ[정배열]"
+    tp = ta.tag_performance(ta.compute_roundtrips(trades))
+    assert tp["정배열"]["n"] == 2 and tp["정배열"]["pnl"] == 100  # +200-100
+    assert tp["신고가돌파"]["n"] == 1 and tp["신고가돌파"]["pnl"] == 200
+
+
+def test_format_tag_performance():
+    trades = _trades()
+    trades[0]["notes"] = "MQ[정배열]"
+    out = ta.format_tag_performance(ta.compute_roundtrips(trades))
+    assert "태그별 성과" in out and "정배열†" in out
+    assert ta.format_tag_performance(ta.compute_roundtrips(_trades())) == ""
+
+
+def test_format_edge_includes_tags_when_present():
+    trades = _trades()
+    trades[0]["notes"] = "MQ[정배열]"
+    out = ta.format_edge(ta.compute_roundtrips(trades))
+    assert "태그별 성과" in out

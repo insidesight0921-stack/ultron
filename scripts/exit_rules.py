@@ -65,6 +65,23 @@ def prune_peaks(peaks: dict, live_keys: set) -> dict:
     return {k: v for k, v in peaks.items() if k in live_keys}
 
 
+NAVER_WARN_STREAK = int(os.getenv("EXIT_NAVER_WARN_STREAK", "3"))  # 전멸 연속 경고 임계
+
+
+def naver_health(n_ok: int, n_total: int, streak: int,
+                 warn_streak: int = NAVER_WARN_STREAK) -> tuple[int, bool]:
+    """실시간 시세원 건강 판정(순수).
+
+    사이클마다 (성공 수, 시도 수, 직전 연속 전멸 수) → (새 연속 전멸 수, 경고 여부).
+    전멸(성공 0)이 warn_streak 연속 도달하는 '순간'에만 True(1회 경고).
+    회복하면 streak 리셋. n_total==0(포지션 없음)은 판정 보류.
+    """
+    if n_total <= 0:
+        return streak, False
+    streak = streak + 1 if n_ok == 0 else 0
+    return streak, streak == warn_streak
+
+
 MAX_PRICE_JUMP = float(os.getenv("EXIT_MAX_PRICE_JUMP", "0.15"))   # 직전 폴링 대비 의심 임계
 PRICE_CONFIRM_TOL = float(os.getenv("EXIT_PRICE_CONFIRM_TOL", "0.05"))  # 2차 소스 일치 허용
 

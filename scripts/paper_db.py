@@ -243,6 +243,22 @@ def _resolve_slot_id(con: sqlite3.Connection, slot) -> int | None:
     return None
 
 
+def ensure_slot(name: str, allocation_pct: float = 0.1,
+                capital: float = 10_000_000.0, portfolio_id: int = 1,
+                db_path: Path | str = DEFAULT_DB_PATH) -> int:
+    """이름으로 슬롯 보장(멱등) — 있으면 id 반환, 없으면 생성. v3.47 마이퀀트용."""
+    with _conn(db_path) as con:
+        sid = _resolve_slot_id(con, name)
+        if sid is not None:
+            return sid
+        cur = con.execute(
+            "INSERT INTO slots (portfolio_id, name, allocation_pct, current_capital) "
+            "VALUES (?, ?, ?, ?)",
+            (portfolio_id, name.strip(), allocation_pct, capital),
+        )
+        return int(cur.lastrowid)
+
+
 # ─── 조회 API ────────────────────────────────────────
 
 

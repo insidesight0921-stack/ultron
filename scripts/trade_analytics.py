@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
@@ -70,18 +71,19 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
             continue
         if t.get("side") == "buy":
             queues[key].append([qty, price, fees / qty, t.get("executed_at"),
-                                t.get("name")])
+                                t.get("name"), t.get("notes")])
         else:
             remaining, cost, matched = qty, 0.0, 0
-            buy_at, name = None, t.get("name")
+            buy_at, name, buy_notes = None, t.get("name"), None
             while remaining > 0 and queues[key]:
-                bq, bp, bfpu, bdt, bname = queues[key][0]
+                bq, bp, bfpu, bdt, bname, bnotes = queues[key][0]
                 take = min(remaining, bq)
                 cost += take * bp + take * bfpu
                 remaining -= take
                 matched += take
                 buy_at = buy_at or bdt
                 name = name or bname
+                buy_notes = buy_notes or bnotes
                 if take >= bq:
                     queues[key].popleft()
                 else:
@@ -93,8 +95,10 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
                 hold = (sd - bd).days if bd and sd else None
                 out.append({
                     "slot": key[0], "ticker": key[1], "name": name or key[1],
-                    "pnl": pnl, "cost": cost, "ret": (pnl / cost if cost else 0.0),
+                    "pnl": pnl, "cost": cost, "qty": matched,
+                    "ret": (pnl / cost if cost else 0.0),
                     "buy_at": buy_at, "sell_at": t.get("executed_at"),
+                    "buy_notes": buy_notes,
                     "hold_days": hold, "reason": _classify_reason(t.get("notes")),
                 })
     return out
@@ -334,6 +338,194 @@ def correlate_pnl_by(rts: list[dict],
         a["loss_share_pct"] = (round(a["loss"] / total_loss * 100)
                                if total_loss else None)
     return agg
+
+
+# ─── 엣지 분석 (v1.4, 순수) ──────────────────────────
+# 나만의 퀀트 규칙 발굴: 보유기간·매수요일·재진입 컷 + 규칙 후보 전방(forward) 검증.
+# ⚠️ 표본이 작을 땐(†) 가설일 뿐 — EDGE_RULES since 이후 표본으로 검증한다.
+
+_KOR_WD = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def weekday_label(rt: dict) -> str:
+    """매수요일 라벨. 파싱 실패 시 UNLABELED."""
+    d = _parse_dt(rt.get("buy_at"))
+    return f"{_KOR_WD[d.weekday()]}요일" if d else UNLABELED
+
+
+def hold_bucket_label(rt: dict) -> str:
+    """보유기간 버킷. hold_days 없으면 UNLABELED."""
+    h = rt.get("hold_days")
+    if h is None:
+        return UNLABELED
+    if h <= 3:
+        return "0-3일"
+    if h <= 7:
+        return "4-7일"
+    if h <= 14:
+        return "8-14일"
+    return "15일+"
+
+
+def batch_entry_flags(rts: list[dict], min_n: int = 4) -> list[bool]:
+    """같은 날 min_n종목 이상 일괄 신규 진입 여부(순수).
+
+    2026-07-09 교란 분석: '목요일의 저주'로 보였던 -836만의 실체는
+    6/18·7/2 두 날의 8종목 일괄 매수(타이밍 몰빵)였다.
+    """
+    per_day: dict[str, int] = defaultdict(int)
+    for r in rts:
+        per_day[(r.get("buy_at") or "")[:10]] += 1
+    return [per_day[(r.get("buy_at") or "")[:10]] >= min_n for r in rts]
+
+
+def reentry_flags(rts: list[dict], days: int = 30) -> list[bool]:
+    """각 라운드트립이 '같은 종목 손절 후 days일 내 재진입'인지 (rts 순서 정렬 무관, 순수)."""
+    stops: dict[str, list] = defaultdict(list)
+    for r in rts:
+        if r["reason"] == "손절":
+            d = _parse_dt(r.get("sell_at"))
+            if d:
+                stops[r["ticker"]].append(d)
+    out = []
+    for r in rts:
+        b = _parse_dt(r.get("buy_at"))
+        out.append(bool(b) and any(0 < (b - s).days <= days
+                                   for s in stops.get(r["ticker"], [])))
+    return out
+
+
+# 규칙 후보 — 2026-07-09 탐색 분석에서 도출·정제한 가설. since 이후 매수분이 전방 검증 표본.
+# 기각된 후보: '목요일 자제'(교란 — 실체는 6/18·7/2 일괄 매수), '일괄 진입 자제'(42건 중
+# 40건이 일괄이라 판별력 없음 — 봇이 원래 배치로 삼). 판별력 있는 2개만 유지.
+EDGE_RULES = [
+    {"id": "R1", "desc": "손절 후 30일 내 같은 종목 재진입 금지", "since": "2026-07-09",
+     "violate": lambda rt, ctx: ctx["reentry"].get(id(rt), False)},
+    {"id": "R2", "desc": "Slowdown/Contraction 국면 신규 진입 축소", "since": "2026-07-09",
+     "violate": lambda rt, ctx: ctx["phase_map"].get(
+         (rt.get("buy_at") or "")[:7]) in ("Slowdown", "Contraction")},
+]
+
+
+def _agg(rts: list[dict]) -> dict:
+    n = len(rts)
+    wins = sum(1 for r in rts if r["pnl"] > 0)
+    return {"n": n, "pnl": round(sum(r["pnl"] for r in rts)),
+            "win_rate": round(wins / n * 100, 1) if n else None}
+
+
+def edge_rules_report(rts: list[dict],
+                      phase_map: Optional[dict] = None) -> list[dict]:
+    """규칙별 위반/준수 성과 — 전체(참고)와 since 이후(전방 검증) 분리(순수).
+
+    반환 각 항목: {id, desc, since, all_viol, all_comp, fwd_viol, fwd_comp}
+    """
+    flags = reentry_flags(rts)
+    bflags = batch_entry_flags(rts)
+    ctx = {"reentry": {id(r): f for r, f in zip(rts, flags)},
+           "batch": {id(r): f for r, f in zip(rts, bflags)},
+           "phase_map": phase_map if phase_map is not None else PHASE_BY_MONTH}
+    out = []
+    for rule in EDGE_RULES:
+        viol = [r for r in rts if rule["violate"](r, ctx)]
+        comp = [r for r in rts if not rule["violate"](r, ctx)]
+        fwd = [r for r in rts if (r.get("buy_at") or "") >= rule["since"]]
+        fv = [r for r in fwd if rule["violate"](r, ctx)]
+        fc = [r for r in fwd if not rule["violate"](r, ctx)]
+        out.append({"id": rule["id"], "desc": rule["desc"], "since": rule["since"],
+                    "all_viol": _agg(viol), "all_comp": _agg(comp),
+                    "fwd_viol": _agg(fv), "fwd_comp": _agg(fc)})
+    return out
+
+
+def format_edge(rts: list[dict], phase_map: Optional[dict] = None) -> str:
+    """엣지 분석 섹션(순수). 빈 데이터면 안내문."""
+    if not rts:
+        return "🕵️ 엣지 분석: 완결된 거래가 아직 없습니다."
+    lines = ["🕵️ 엣지 분석 (나만의 퀀트 후보 — †는 참고용)"]
+    lines.append(f"• 보유기간: {_fmt_corr_line(correlate_pnl_by(rts, hold_bucket_label))}")
+    lines.append(f"• 매수요일: {_fmt_corr_line(correlate_pnl_by(rts, weekday_label))}")
+    flags = reentry_flags(rts)
+    re_ = _agg([r for r, f in zip(rts, flags) if f])
+    new = _agg([r for r, f in zip(rts, flags) if not f])
+    if re_["n"]:
+        lines.append(
+            f"• 손절 후 30일 내 재진입: {re_['n']}건 {_won(re_['pnl'])} "
+            f"승률{re_['win_rate']}% vs 신규 {new['n']}건 {_won(new['pnl'])} "
+            f"승률{new['win_rate']}%")
+    bflags = batch_entry_flags(rts)
+    ba = _agg([r for r, f in zip(rts, bflags) if f])
+    solo = _agg([r for r, f in zip(rts, bflags) if not f])
+    if ba["n"] and solo["n"]:
+        lines.append(
+            f"• 일괄 진입(같은날 4종목+): {ba['n']}건 {_won(ba['pnl'])} "
+            f"승률{ba['win_rate']}% vs 단독 {solo['n']}건 {_won(solo['pnl'])} "
+            f"승률{solo['win_rate']}%")
+    lines.append("• 규칙 전방검증:")
+    for r in edge_rules_report(rts, phase_map):
+        fwd_n = r["fwd_viol"]["n"] + r["fwd_comp"]["n"]
+        if fwd_n:
+            fwd = (f"등록후 위반 {r['fwd_viol']['n']}건 {_won(r['fwd_viol']['pnl'])} / "
+                   f"준수 {r['fwd_comp']['n']}건 {_won(r['fwd_comp']['pnl'])}")
+        else:
+            fwd = "등록후 표본 없음"
+        lines.append(
+            f"  {r['id']} {r['desc']} (등록 {r['since']}): {fwd}\n"
+            f"     과거참고 — 위반 {r['all_viol']['n']}건 {_won(r['all_viol']['pnl'])} "
+            f"승률{r['all_viol']['win_rate']}% / 준수 {r['all_comp']['n']}건 "
+            f"{_won(r['all_comp']['pnl'])} 승률{r['all_comp']['win_rate']}%")
+    tags = format_tag_performance(rts)
+    if tags:
+        lines.append(tags)
+    lines.append("  ※ 통계 관찰이며 투자 권유 아님. 전방 표본이 쌓인 뒤 규칙화 판단.")
+    return "\n".join(lines)
+
+
+def edge_report() -> str:
+    """실제 paper.db → 엣지 분석 리포트(I/O 경계)."""
+    try:
+        import paper_db
+        rts = compute_roundtrips(paper_db.list_trades(limit=100000))
+    except Exception as e:
+        log.exception("엣지 분석 조회 실패")
+        return f"🕵️ 엣지 분석 조회 실패: {e}"
+    return format_edge(rts, phase_map=merged_phase_map())
+
+
+# ─── 마이퀀트 태그 (v1.5, 순수) ──────────────────────
+# paper UI '나만의 퀀트' 탭 매수 시 notes에 "MQ[태그1,태그2]" 기록 → 태그별 성과 추적.
+
+_TAG_RE = re.compile(r"MQ\[([^\]]*)\]")
+
+
+def extract_tags(notes: Optional[str]) -> list[str]:
+    """매수 notes → 마이퀀트 태그 리스트(순수). 없으면 []."""
+    m = _TAG_RE.search(notes or "")
+    if not m:
+        return []
+    return [t.strip() for t in m.group(1).split(",") if t.strip()]
+
+
+def tag_performance(rts: list[dict]) -> dict[str, dict]:
+    """태그별 성과 집계 — 한 거래가 여러 태그를 가지면 각 태그에 중복 계상(순수)."""
+    by_tag: dict[str, list] = defaultdict(list)
+    for r in rts:
+        for tag in extract_tags(r.get("buy_notes")):
+            by_tag[tag].append(r)
+    return {tag: _agg(rs) for tag, rs in by_tag.items()}
+
+
+def format_tag_performance(rts: list[dict]) -> str:
+    """마이퀀트 태그별 성과 섹션(순수). 태그 거래 없으면 빈 문자열."""
+    tp = tag_performance(rts)
+    if not tp:
+        return ""
+    lines = ["🏷️ 마이퀀트 태그별 성과 (†는 표본 5건 미만)"]
+    for tag, a in sorted(tp.items(), key=lambda kv: -(kv[1]["pnl"])):
+        mark = "†" if a["n"] < MIN_SAMPLE_N else ""
+        lines.append(f"• {tag}{mark}: {a['n']}건 {_won(a['pnl'])} "
+                     f"승률 {a['win_rate']}%")
+    return "\n".join(lines)
 
 
 def top_loss_label(corr: dict[str, dict]) -> Optional[dict]:

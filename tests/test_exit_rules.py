@@ -143,3 +143,29 @@ def test_confirm_price_custom_thresholds():
     assert ex.confirm_price(93000, 100000, max_jump=0.05, tol=0.01,
                             fallback_fn=lambda: 93500) == 93000
     assert ex.confirm_price(93000, 100000, max_jump=0.10) == 93000  # 7% ≤ 10%
+
+
+# ─── 시세원 건강 감시 (naver_health) ─────────────────
+
+
+def test_naver_health_all_ok_resets():
+    assert ex.naver_health(5, 5, streak=2) == (0, False)
+
+
+def test_naver_health_partial_ok_resets():
+    assert ex.naver_health(1, 5, streak=2) == (0, False)
+
+
+def test_naver_health_streak_and_single_warn():
+    s, w = ex.naver_health(0, 5, streak=0)
+    assert (s, w) == (1, False)
+    s, w = ex.naver_health(0, 5, streak=s)
+    assert (s, w) == (2, False)
+    s, w = ex.naver_health(0, 5, streak=s)
+    assert (s, w) == (3, True)      # 임계 도달 순간 1회 경고
+    s, w = ex.naver_health(0, 5, streak=s)
+    assert (s, w) == (4, False)     # 이후엔 반복 경고 없음
+
+
+def test_naver_health_no_positions_holds():
+    assert ex.naver_health(0, 0, streak=2) == (2, False)

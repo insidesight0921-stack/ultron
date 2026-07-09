@@ -192,6 +192,16 @@ def analysis_info() -> str:
         return f"🔬 매매 분석 조회 실패: {e}"
 
 
+def edge_info() -> str:
+    """엣지 분석 — 나만의 퀀트 규칙 후보 + 전방 검증(trade_analytics 위임). 지연 import."""
+    try:
+        import trade_analytics
+        return trade_analytics.edge_report()
+    except Exception as e:
+        log.debug(f"엣지 분석 실패: {e}")
+        return f"🕵️ 엣지 분석 조회 실패: {e}"
+
+
 def feedback_info() -> str:
     """성과 기반 슬롯 비중 제안(strategy_feedback 위임, 추천 전용). 지연 import."""
     try:
@@ -234,6 +244,7 @@ _DISPATCH = {
     "performance": lambda c, s: performance_info(),
     "feedback": lambda c, s: feedback_info(),
     "analysis": lambda c, s: analysis_info(),
+    "edge": lambda c, s: edge_info(),
     "status": lambda c, s: status_summary(cache_dir=c, sched_path=s),
 }
 

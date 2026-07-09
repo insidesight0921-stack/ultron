@@ -80,9 +80,9 @@ def test_slots_after_seed(client):
     r = client.get("/api/paper/slots")
     assert r.status_code == 200
     slots = r.json()
-    assert len(slots) == 3
+    assert len(slots) == 4  # v3.47: 마이퀀트 슬롯 추가
     names = {s["name"] for s in slots}
-    assert names == {"콴텍", "키움", "IPO"}
+    assert names == {"콴텍", "키움", "IPO", "마이퀀트"}
 
 
 # ─── /api/paper/kium-scan ────────────────────────────

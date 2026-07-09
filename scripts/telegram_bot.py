@@ -1081,16 +1081,23 @@ def _get_realtime_price(ticker: str) -> float | None:
     return _get_naver_price(ticker) or _get_pykrx_price(ticker)
 
 
+def _now_kst():
+    """장중 게이트용 현재 시각 — 서버 타임존과 무관하게 KST(가능하면 aware)."""
+    from datetime import datetime as _dt
+    return _dt.now(_KST) if _KST else _dt.now()
+
+
 def _load_intraday_state() -> dict:
     """{"peaks": {포지션키: 피크수익률}, "px": {티커: 직전 폴링가}}. 구형(피크만) 마이그레이션."""
     import json as _json
     try:
         d = _json.loads(_INTRADAY_PEAKS_PATH.read_text(encoding="utf-8"))
         if "peaks" in d or "px" in d:
-            return {"peaks": d.get("peaks") or {}, "px": d.get("px") or {}}
-        return {"peaks": d, "px": {}}  # v3.44 초기 형식(피크 dict만)
+            return {"peaks": d.get("peaks") or {}, "px": d.get("px") or {},
+                    "naver_streak": int(d.get("naver_streak") or 0)}
+        return {"peaks": d, "px": {}, "naver_streak": 0}  # v3.44 초기 형식
     except Exception:
-        return {"peaks": {}, "px": {}}
+        return {"peaks": {}, "px": {}, "naver_streak": 0}
 
 
 def _save_intraday_state(state: dict) -> None:
@@ -1112,8 +1119,7 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     자동 청산 + 텔레그램 알림. 트레일링 피크는 json 캐시로 재시작에도 유지.
     장외 시간대에는 즉시 리턴.
     """
-    from datetime import datetime as _dt
-    now = _dt.now()
+    now = _now_kst()  # v3.46 — 서버 타임존 무관 KST 게이트
 
     # 평일(월~금)만
     if now.weekday() >= 5:
@@ -1135,11 +1141,29 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     live_keys: set = set()
     alerts: list[str] = []
 
-    # v3.45 — 유효 포지션 시세 병렬 조회(네이버 1차)
+    # v3.45 — 유효 포지션 시세 병렬 조회(네이버 1차) / v3.46 — 시세원 건강 감시
     valid = [p for p in positions
              if int(p["quantity"]) > 0 and float(p["avg_price"]) > 0]
-    raw_prices = await asyncio.gather(
-        *(asyncio.to_thread(_get_realtime_price, p["ticker"]) for p in valid))
+    naver_prices = await asyncio.gather(
+        *(asyncio.to_thread(_get_naver_price, p["ticker"]) for p in valid))
+    n_naver_ok = sum(1 for x in naver_prices if x)
+    raw_prices = list(naver_prices)
+    for i, (p, nv) in enumerate(zip(valid, naver_prices)):
+        if not nv:  # 네이버 실패분만 pykrx 폴백
+            raw_prices[i] = await asyncio.to_thread(_get_pykrx_price, p["ticker"])
+
+    streak, warn = exit_rules.naver_health(
+        n_naver_ok, len(valid), int(state.get("naver_streak") or 0))
+    if warn:
+        alerts_health = (
+            f"⚠️ *실시간 시세원 이상* — 네이버 시세가 {streak}사이클 연속 전멸, "
+            f"pykrx 종가 폴백으로 동작 중입니다(손절 실행 지연 재발 위험). "
+            f"네트워크/API 응답 형식을 확인하세요.")
+    else:
+        alerts_health = None
+    if n_naver_ok < len(valid):
+        log.info(f"  시세원: 네이버 {n_naver_ok}/{len(valid)} 성공 "
+                 f"(전멸 연속 {streak}회)")
 
     new_px: dict[str, float] = {}
     for pos, raw_price in zip(valid, raw_prices):
@@ -1195,8 +1219,10 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning(f"{action} 기록 실패 {ticker}: {e}")
             live_keys.add(key)  # 청산 실패 → 피크 유지
 
+    if alerts_health:
+        alerts.append(alerts_health)
     _save_intraday_state({"peaks": exit_rules.prune_peaks(peaks, live_keys),
-                          "px": new_px})
+                          "px": new_px, "naver_streak": streak})
 
     if alerts:
         msg = "\n\n".join(alerts)
@@ -1217,8 +1243,7 @@ async def technical_signal_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     같은 (종목·전략·액션) 신호는 당일 1회만 전송(멱등, signal_last.json).
     장외/주말 즉시 리턴. 실주문 없음 — 알림만.
     """
-    from datetime import datetime as _dt
-    now = _dt.now()
+    now = _now_kst()  # v3.46 — 서버 타임존 무관 KST 게이트
     if now.weekday() >= 5:
         return
     open_t = now.replace(hour=SIGNAL_OPEN_HOUR, minute=SIGNAL_OPEN_MIN, second=0, microsecond=0)
