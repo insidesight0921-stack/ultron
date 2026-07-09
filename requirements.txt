@@ -30,6 +30,12 @@ requests>=2.32
 # 텔레그램 봇 (3단계)
 python-telegram-bot>=21.0
 
+# URL 본문 추출 (3단계 후속 — /note URL 자동 인식)
+trafilatura>=1.12
+
+# PDF 텍스트 추출 (3단계 후속 — 파일 업로드)
+pdfminer.six>=20231228
+
 # 외부 LLM API (4단계~, 선택)
 anthropic>=0.40
 openai>=1.40
@@ -45,3 +51,6 @@ plotly>=5.20         # 모의투자 사이트 차트
 pytest>=8.0
 black>=24.0
 ruff>=0.5
+yfinance  # v3.40 signal_bot 1시간봉 (Korean ETF intraday)
+feedparser  # v3.41 news_bot RSS 파싱
+finance-datareader  # v3.40 signal_bot ETF 코드 확인용
