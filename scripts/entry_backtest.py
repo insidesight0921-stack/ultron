@@ -242,25 +242,75 @@ def format_conditions(rows: list[dict]) -> str:
 
 
 def _universe_tickers(market_code: str = "1028") -> list[tuple[str, str]]:
-    """지수 구성종목 [(ticker, name)] — kium_bot 캐시 경로 재사용(검증된 방식).
+    """지수 구성종목 [(ticker, name)] — 3단 폴백.
 
-    직접 get_index_portfolio_deposit_file() 무인자 호출은 최신 pykrx에서
-    KRX 로그인(get_nearest_business_day...)을 타므로 사용하지 않는다.
+    1) kium_bot.fetch_universe (캐시)
+    2) 지수 PDF 직접 조회 — 최신 pykrx에서 KRX 로그인(KRX_ID/PW) 요구 시 실패
+    3) 시가총액 상위 200 근사 (로그인 불필요 엔드포인트, KOSPI200≈시총 Top200)
     """
     name_map = {"1028": "KOSPI200", "2203": "KOSDAQ150"}
+    m_name = name_map.get(market_code, "KOSPI200")
     try:
         import kium_bot
-        lst = kium_bot.fetch_universe(name_map.get(market_code, "KOSPI200"))
+        lst = kium_bot.fetch_universe(m_name)
         if lst:
             return [(str(t), str(n)) for t, n in lst]
     except Exception:
         pass
-    # 폴백: 날짜 명시 직접 조회(로그인 경로 우회)
-    from datetime import datetime
+
+    # 최신 디스크 캐시(오늘자 아니어도 OK — 구성종목은 분기 단위 변동이라 근사로 충분)
+    try:
+        import glob
+        import json
+        from pathlib import Path
+        cdir = Path(__file__).resolve().parent.parent / "data" / "cache"
+        files = sorted(glob.glob(str(cdir / f"universe_{m_name}_*.json")))
+        if files:
+            lst = json.loads(Path(files[-1]).read_text(encoding="utf-8"))
+            if lst:
+                print(f"⚠️ 유니버스: 최신 캐시 사용 ({Path(files[-1]).name})")
+                return [(str(t), str(n)) for t, n in lst]
+    except Exception:
+        pass
+
+    from datetime import datetime, timedelta
     from pykrx import stock as stk
-    date = datetime.now().strftime("%Y%m%d")
-    tickers = stk.get_index_portfolio_deposit_file(market_code, date)
-    return [(str(t), str(t)) for t in tickers]
+    today = datetime.now()
+
+    try:
+        tickers = stk.get_index_portfolio_deposit_file(
+            market_code, today.strftime("%Y%m%d"))
+        if tickers:
+            return [(str(t), str(t)) for t in tickers]
+    except Exception:
+        pass
+
+    # 시총 Top200 근사 — 휴장일 대비 최근 7일 역탐색
+    market = "KOSDAQ" if market_code == "2203" else "KOSPI"
+    cap_fn = getattr(stk, "get_market_cap", None) or \
+        getattr(stk, "get_market_cap_by_ticker")
+    for back in range(7):
+        d = (today - timedelta(days=back)).strftime("%Y%m%d")
+        try:
+            df = cap_fn(d, market=market)
+            if df is None or len(df) < 50:
+                continue
+            top = df.sort_values("시가총액", ascending=False).head(200)
+            out = []
+            for t in top.index:
+                try:
+                    n = stk.get_market_ticker_name(t)
+                except Exception:
+                    n = str(t)
+                out.append((str(t), str(n)))
+            print(f"⚠️ 지수 PDF 조회 불가(KRX 로그인 필요) — "
+                  f"{market} 시총 Top200 근사 유니버스 사용 (기준일 {d})")
+            return out
+        except Exception:
+            continue
+    raise RuntimeError(
+        "유니버스 조회 실패 — KRX 데이터 계정(.env에 KRX_ID/KRX_PW) 설정 "
+        "또는 네트워크 확인 필요")
 
 
 def _fetch_universe_series(market_code: str = "1028",
@@ -325,4 +375,6 @@ if __name__ == "__main__":
             if "--market" in sys.argv else "1028"
         series = _fetch_universe_series(market, years)
         print(f"유니버스 {len(series)}종목 × {years}년 로드")
+        if not series:
+            sys.exit("❌ 유니버스 0종목 — 조회 실패. 위 오류 로그 확인.")
         print(format_conditions(run_conditions(series)))
