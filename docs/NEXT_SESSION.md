@@ -42,7 +42,7 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 
 **추천**:
 - 코드만으로 자기완결적인 작업을 원하면 **후보 3 (DART 정규식 정밀화)** — 캐시된 증권신고서 텍스트(`data/ipo_samples/*.txt`)를 회귀 테스트로 묶어 패턴을 보강할 수 있음
-- 실환경 확인부터 하려면 **후보 4 (paper_ui 브라우저 점검)** — `agent_services.sh status`로 paper(8081) 떠 있는지 확인 후 `http://localhost:8081/` → IPO 탭
+- 실환경 확인부터 하려면 **후보 4 (paper_ui 브라우저 점검)** — `agent_services.sh status`로 paper(8080) 떠 있는지 확인 후 `http://localhost:8080/` → IPO 탭
 
 **세션 첫 행동 권장**:
 1. NEXT_SESSION.md(이 파일) 끝까지 읽기
@@ -183,7 +183,7 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 - **telegram v3.45**: `elif tool == "system_info"` 분기 + import. knowledge 웹폴백 가드.
 - **테스트**: tests/test_system_info.py 41개(모듈·라우터 감지·단락·research 가드) PASS.
   hermetic 회귀 672 PASS(이전 631 + 41, 무회귀). lancedb/pykrx 필요 모듈은 샌드박스 제외(변경 없음).
-- **사용자 액션**: 봇 재시작 후 텔레그램에서 "paper 주소 뭐야"(→8081)·"리밸런싱 됐어?"·
+- **사용자 액션**: 봇 재시작 후 텔레그램에서 "paper 주소 뭐야"(→8080)·"리밸런싱 됐어?"·
   "무슨 봇 돌고 있어?"·"마지막 신호 언제?" 검증. (실환경에서 quant_rebalance_last.json은
   아직 없을 수 있음 → "기록 없음"이 정상)
 
@@ -441,7 +441,7 @@ IPO 탭 골격(엔드포인트·HTML·JS)은 v3.29에 있었으나 버그 3종�
 2. **score_demand 구간 세분화**: 현재 1000~1500 사이 단일 구간(17점) — 실데이터로 튜닝
 3. **DART 밴드 정규식 정밀화**: `offer_band_high` 패턴 2종이 일부 증권신고서 형식을
    놓칠 수 있음 — 실제 공시 샘플로 패턴 검증·보강
-4. **IPO 탭 실환경 확인**: paper_ui 8081 구동 → 스캔→청약등록→상장결과 흐름 브라우저 점검
+4. **IPO 탭 실환경 확인**: paper_ui 8080 구동 → 스캔→청약등록→상장결과 흐름 브라우저 점검
 
 ## 파일 구조
 

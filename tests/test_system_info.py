@@ -15,16 +15,18 @@ import research_bot as rb
 # ─── system_info: access / service / bots ───────────
 
 
-def test_access_info_has_ports():
+def test_access_info_has_paper_port():
     out = si.access_info()
-    assert "8080" in out and "8081" in out
+    assert "8080" in out
+    assert "8081" not in out
     assert "localhost" in out
 
 
-def test_service_info_lists_four():
+def test_service_info_lists_active_services():
     out = si.service_info()
-    for name in ("web-ui", "watch-raw", "telegram", "paper"):
+    for name in ("watch-raw", "telegram", "paper"):
         assert name in out
+    assert "web-ui" not in out
 
 
 def test_bots_info_lists_core_bots():

@@ -2,7 +2,7 @@
 """
 raw/inbox/ 저장 + 외부 컨텐츠 추출 헬퍼.
 
-telegram_bot.py와 web_ui.py가 공용으로 사용.
+telegram_bot.py가 메모·외부 콘텐츠 수집에 사용.
 - save_to_inbox(): 텍스트 → raw/inbox/{prefix}_{ts}.md
 - extract_url_content(): URL → trafilatura로 본문 추출
 - extract_pdf_text(): PDF 파일 → pdfminer.six로 텍스트 추출
@@ -30,7 +30,7 @@ def save_to_inbox(content: str, prefix: str = "메모", source: str = "unknown")
     파라미터:
       content: 저장할 본문 (메타 헤더는 자동 추가)
       prefix:  파일명 prefix (제목 또는 종류). 부적합 문자 자동 치환.
-      source:  메타 헤더의 출처 (예: "telegram /note", "web_ui modal")
+      source:  메타 헤더의 출처 (예: "telegram /note")
     """
     RAW_INBOX.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")

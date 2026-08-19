@@ -23,13 +23,11 @@ PROJECT = Path(__file__).resolve().parent.parent
 CACHE_DIR = PROJECT / "data" / "cache"
 LOG_DIR = PROJECT / "data" / "logs"
 
-# 접속 정보 (web_ui.py / paper_ui.py 기본 포트와 동기화)
-WEB_UI_PORT = 8080
-PAPER_PORT = 8081
+# 접속 정보 (paper_ui.py 기본 포트와 동기화)
+PAPER_PORT = 8080
 
-# launchd 서비스 4종 (agent_services.sh LABEL_* 와 동기화)
+# 상시 실행 서비스 (agent_services.sh LABEL_* 와 동기화)
 SERVICES = [
-    ("web-ui", f"http://localhost:{WEB_UI_PORT}", "채팅 UI"),
     ("watch-raw", "-", "raw/ 폴더 감시 → 정제 → 인덱싱"),
     ("telegram", "-", "텔레그램 봇 (라우터 → 도구)"),
     ("paper", f"http://localhost:{PAPER_PORT}", "paper trading 사이트"),
@@ -88,7 +86,6 @@ def _latest_period_key(data: dict) -> Optional[str]:
 def access_info() -> str:
     return (
         "🔌 접속 정보\n"
-        f"• 채팅 웹 UI: http://localhost:{WEB_UI_PORT}\n"
         f"• Paper 트레이딩: http://localhost:{PAPER_PORT}\n"
         f"• 로그 경로: {LOG_DIR}\n"
         f"• watch_raw 로그: {PROJECT / 'data' / 'watch_raw.log'}"
@@ -96,7 +93,7 @@ def access_info() -> str:
 
 
 def service_info() -> str:
-    lines = ["🖥 서비스(launchd 4종) — 상태는 `bash agent_services.sh status`로 확인"]
+    lines = ["🖥 서비스(launchd) — 상태는 `bash agent_services.sh status`로 확인"]
     for name, url, desc in SERVICES:
         tail = f" · {url}" if url and url != "-" else ""
         lines.append(f"• {name}: {desc}{tail}")

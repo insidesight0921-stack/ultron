@@ -13,15 +13,15 @@
 wiki RAG/웹으로 새지 않고 **실제 시스템 상태에서 결정론적으로** 답하게 한다.
 
 ## 1. 왜 (이번 세션 실측 실패 사례)
-- "내 paper trading 로컬 사이트 주소 줘봐" → wiki RAG로 가서 "노트 없음"으로 실패. (정답: http://localhost:8081)
+- "내 paper trading 로컬 사이트 주소 줘봐" → wiki RAG로 가서 "노트 없음"으로 실패. (정답: http://localhost:8080)
 - "리밸런싱 완료된거야?" → wiki 없음 → **웹 검색**까지 가서 "못 찾음". (정답: data/cache/quant_rebalance_last.json·action_scheduler last_fired에 있음)
 - 근본 원인: 라우팅에 **"내 시스템/내 상태"** 갈래가 없음. 메타 질문이 투자 RAG·웹으로 오발동.
 
 ## 2. 만들 것 (4개 개선이 이걸로 한 번에 해결)
 ### (A) `scripts/system_info.py` 신규 — 결정론 자기인식 응답기
 질문 유형별로 실제 상태를 읽어 문자열로 답하는 순수/저의존 함수들:
-- **접속 정보**: 웹 UI http://localhost:8080, Paper http://localhost:8081, 로그 경로. (telegram_bot 상수/포트에서)
-- **서비스 상태**: `agent_services.sh status` 파싱 또는 launchd 4개(web-ui/watch-raw/telegram/paper) 안내.
+- **접속 정보**: Paper http://localhost:8080, 로그 경로. (telegram_bot 상수/포트에서)
+- **서비스 상태**: `agent_services.sh status` 파싱 또는 launchd 서비스(watch-raw/telegram/paper) 안내.
 - **등록된 봇/도구 목록**: knowledge/schedule/finance/invest/kium/quant/ipo/news/action_schedule/agent.
 - **자동작업 상태**: action_scheduler.load_schedules() + last_fired, 그리고 플래그 파일들
   (quant_rebalance_last.json / kium_weekly_last.json / ipo_weekly_last.json / signal_last.json) 읽어 "마지막 실행 시각".

@@ -54,7 +54,7 @@ DEFAULT_DB_PATH = PROJECT / "data" / "schedule.db"
 
 log = logging.getLogger("schedule_bot")
 
-# 동시성 — telegram 핸들러는 asyncio + to_thread, web_ui는 단일 프로세스라
+# 동시성 — telegram 핸들러는 asyncio + to_thread를 사용하므로
 # SQLite 자체 락으로 충분하지만 안전을 위해 모듈 락도 둠.
 _LOCK = Lock()
 

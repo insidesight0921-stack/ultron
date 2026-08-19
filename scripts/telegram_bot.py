@@ -1927,7 +1927,7 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         f"✅ {week_key} 키움봇 paper 완료\n"
         f"슬롯: {slot_name} ({slot_cap:,.0f}원 / {len(results)}종목)\n\n"
         + sep.join(lines_result)
-        + "\n\n📊 http://localhost:8081 → 📊 키움봇 신호 탭"
+        + "\n\n📊 http://localhost:8080 → 📊 키움봇 신호 탭"
     )
     for part in split_for_telegram(result_msg):
         await query.message.reply_text(part, disable_web_page_preview=True)
@@ -2066,7 +2066,7 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
         f"✅ {month_key} 콴텍봇 paper 리밸런싱 완료\n"
         f"슬롯: {slot_name} ({slot_cap:,.0f}원 / {n_recs}종목)\n\n"
         + sep.join(lines_result)
-        + "\n\n📊 http://localhost:8081 → 🌐 콴텍봇 탭"
+        + "\n\n📊 http://localhost:8080 → 🌐 콴텍봇 탭"
     )
     for part in split_for_telegram(result_msg):
         await query.message.reply_text(part, disable_web_page_preview=True)
@@ -2267,7 +2267,7 @@ async def handle_ipo_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
         f"✅ {week_key} IPO봇 paper 구독 완료\n"
         f"IPO 슬롯 자본 {slot_cap:,.0f}원 / {len(hot)}종목 균등\n\n"
         + sep.join(lines_result)
-        + "\n\n📊 http://localhost:8081 → 🏷️ IPO봇 탭"
+        + "\n\n📊 http://localhost:8080 → 🏷️ IPO봇 탭"
     )
     for part in split_for_telegram(result_msg):
         await query.message.reply_text(part, disable_web_page_preview=True)

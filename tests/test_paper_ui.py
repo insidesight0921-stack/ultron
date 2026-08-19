@@ -1,7 +1,7 @@
 """
 paper_ui v3.19 단위 테스트 — /api/paper/kium-scan 엔드포인트 + HTML 탭 sanity.
 
-paper_ui는 FastAPI라 TestClient 사용 가능. lancedb 의존 없음 (web_ui와 독립).
+paper_ui는 FastAPI라 TestClient 사용 가능. LanceDB 의존 없음.
 kium_bot의 외부 호출(pykrx)만 monkeypatch.
 """
 from __future__ import annotations

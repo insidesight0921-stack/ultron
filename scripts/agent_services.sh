@@ -2,14 +2,13 @@
 # ===============================================================
 # AI Agent 서비스 관리 (macOS launchd)
 #
-# 세 서비스를 launchd로 등록하면 부팅/로그인 시 자동 시작.
+# 서비스를 launchd로 등록하면 부팅/로그인 시 자동 시작.
 # 크래시 나도 자동 재시작. 터미널 안 열어도 됨.
 #
-#   1. ai-agent.web-ui    : http://localhost:8080 (+ Tailscale IP) 채팅 UI
-#   2. ai-agent.watch-raw : raw/ 폴더 자동 감시 → 정제 → 인덱싱
-#   3. ai-agent.telegram  : 텔레그램 봇 (3단계, 폰에서 RAG 질의)
-#   4. ai-agent.paper     : http://localhost:8081 paper trading 사이트 (5단계, v3.18~)
-#   5. ai-agent.weekly-kium-scan : 매주 월요일 09:00 모멘텀 스캔 + 텔레그램 푸시 (v3.24~)
+#   1. ai-agent.watch-raw : raw/ 폴더 자동 감시 → 정제 → 인덱싱
+#   2. ai-agent.telegram  : 텔레그램 봇 (3단계, 폰에서 RAG 질의)
+#   3. ai-agent.paper     : http://localhost:8080 paper trading 사이트 (5단계, v3.18~)
+#   4. ai-agent.weekly-kium-scan : 매주 월요일 09:00 모멘텀 스캔 + 텔레그램 푸시 (v3.24~)
 #
 # 사용:
 #   bash agent_services.sh install     # 최초 설치 + 시작
@@ -29,22 +28,18 @@ PYTHON="$PROJECT/.venv/bin/python"
 
 LA_DIR="$HOME/Library/LaunchAgents"
 
-LABEL_WEB="com.hyunjun.ai-agent.web-ui"
 LABEL_WATCH="com.hyunjun.ai-agent.watch-raw"
 LABEL_TG="com.hyunjun.ai-agent.telegram"
 LABEL_PAPER="com.hyunjun.ai-agent.paper"
 LABEL_WEEKLY="com.hyunjun.ai-agent.weekly-kium-scan"
 LABEL_LOG_ROTATE="com.hyunjun.ai-agent.log-rotation"
 
-PLIST_WEB="$LA_DIR/${LABEL_WEB}.plist"
 PLIST_WATCH="$LA_DIR/${LABEL_WATCH}.plist"
 PLIST_TG="$LA_DIR/${LABEL_TG}.plist"
 PLIST_PAPER="$LA_DIR/${LABEL_PAPER}.plist"
 PLIST_WEEKLY="$LA_DIR/${LABEL_WEEKLY}.plist"
 PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
 
-LOG_WEB_OUT="$DATA_DIR/logs/web_ui.out.log"
-LOG_WEB_ERR="$DATA_DIR/logs/web_ui.err.log"
 LOG_WATCH_OUT="$DATA_DIR/logs/watch_raw.out.log"
 LOG_WATCH_ERR="$DATA_DIR/logs/watch_raw.err.log"
 LOG_TG_OUT="$DATA_DIR/logs/telegram.out.log"
@@ -57,50 +52,6 @@ LOG_WEEKLY_ERR="$DATA_DIR/logs/weekly_kium.err.log"
 mkdir -p "$LA_DIR" "$DATA_DIR/logs"
 
 # ─── plist 생성 ──────────────────────────────────────
-
-write_plist_web() {
-    cat > "$PLIST_WEB" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${LABEL_WEB}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${PYTHON}</string>
-        <string>${SCRIPTS}/web_ui.py</string>
-        <string>--host</string>
-        <string>0.0.0.0</string>
-        <string>--port</string>
-        <string>8080</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>WorkingDirectory</key>
-    <string>${PROJECT}</string>
-    <key>StandardOutPath</key>
-    <string>${LOG_WEB_OUT}</string>
-    <key>StandardErrorPath</key>
-    <string>${LOG_WEB_ERR}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>LANG</key>
-        <string>ko_KR.UTF-8</string>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-</dict>
-</plist>
-EOF
-}
 
 write_plist_watch() {
     cat > "$PLIST_WATCH" <<EOF
@@ -197,7 +148,7 @@ write_plist_paper() {
         <string>--host</string>
         <string>0.0.0.0</string>
         <string>--port</string>
-        <string>8081</string>
+        <string>8080</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -338,14 +289,12 @@ cmd_install() {
     fi
 
     # 스크립트 존재 검증
-    if [ ! -f "$SCRIPTS/web_ui.py" ] || [ ! -f "$SCRIPTS/watch_raw.py" ]; then
-        echo "❌ 스크립트 없음. web_ui.py / watch_raw.py 확인 필요"
+    if [ ! -f "$SCRIPTS/watch_raw.py" ]; then
+        echo "❌ 스크립트 없음: watch_raw.py"
         exit 1
     fi
 
-    write_plist_web
     write_plist_watch
-    echo "  ✅ plist 생성: $PLIST_WEB"
     echo "  ✅ plist 생성: $PLIST_WATCH"
 
     # paper trading (5단계 v3.18+) — 항상 등록 (외부 키 무관)
@@ -375,9 +324,8 @@ cmd_install() {
     echo ""
     echo "🎉 설치 완료. 부팅/로그인 시 자동 시작됩니다."
     echo ""
-    echo "  웹 UI:  http://localhost:8080"
     if [ -f "$PLIST_PAPER" ]; then
-        echo "  Paper:  http://localhost:8081"
+        echo "  Paper:  http://localhost:8080"
     fi
     if [ "$TG_ENABLED" = "1" ]; then
         echo "  텔레그램: 봇 채팅창에서 /start 입력"
@@ -388,7 +336,6 @@ cmd_install() {
 
 cmd_start() {
     # 기존 로드 해제 (재시작 위해)
-    launchctl unload "$PLIST_WEB" 2>/dev/null || true
     launchctl unload "$PLIST_WATCH" 2>/dev/null || true
     [ -f "$PLIST_TG" ] && launchctl unload "$PLIST_TG" 2>/dev/null || true
     [ -f "$PLIST_PAPER" ] && launchctl unload "$PLIST_PAPER" 2>/dev/null || true
@@ -397,7 +344,6 @@ cmd_start() {
     sleep 1
 
     # 로드
-    launchctl load "$PLIST_WEB"
     launchctl load "$PLIST_WATCH"
     if [ -f "$PLIST_TG" ]; then
         launchctl load "$PLIST_TG"
@@ -419,7 +365,6 @@ cmd_start() {
 }
 
 cmd_stop() {
-    launchctl unload "$PLIST_WEB" 2>/dev/null && echo "⏸  웹 UI 중지" || echo "(웹 UI 이미 중지됨)"
     launchctl unload "$PLIST_WATCH" 2>/dev/null && echo "⏸  watch_raw 중지" || echo "(watch_raw 이미 중지됨)"
     if [ -f "$PLIST_TG" ]; then
         launchctl unload "$PLIST_TG" 2>/dev/null && echo "⏸  텔레그램 봇 중지" || echo "(텔레그램 봇 이미 중지됨)"
@@ -446,7 +391,7 @@ cmd_status() {
     echo "📊 AI Agent 서비스 상태"
     echo "============================================"
 
-    LABELS=("$LABEL_WEB" "$LABEL_WATCH")
+    LABELS=("$LABEL_WATCH")
     [ -f "$PLIST_TG" ] && LABELS+=("$LABEL_TG")
     [ -f "$PLIST_PAPER" ] && LABELS+=("$LABEL_PAPER")
     [ -f "$PLIST_WEEKLY" ] && LABELS+=("$LABEL_WEEKLY")
@@ -472,14 +417,13 @@ cmd_status() {
     done
 
     echo ""
-    echo "📍 웹 UI:  http://localhost:8080"
     if [ -f "$PLIST_PAPER" ]; then
-        echo "📍 Paper:  http://localhost:8081"
+        echo "📍 Paper:  http://localhost:8080"
     fi
     if command -v tailscale >/dev/null 2>&1; then
         TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
         if [ -n "$TS_IP" ]; then
-            echo "📍 Tailscale: http://${TS_IP}:8080  ·  http://${TS_IP}:8081"
+            echo "📍 Tailscale: http://${TS_IP}:8080"
         fi
     fi
     echo "📍 로그:   $DATA_DIR/logs/"
@@ -487,12 +431,6 @@ cmd_status() {
 
 cmd_logs() {
     echo "📜 마지막 30줄 (Ctrl+C로 종료)"
-    echo ""
-    echo "── web_ui.out ──"
-    tail -n 30 "$LOG_WEB_OUT" 2>/dev/null || echo "(없음)"
-    echo ""
-    echo "── web_ui.err ──"
-    tail -n 30 "$LOG_WEB_ERR" 2>/dev/null || echo "(없음)"
     echo ""
     echo "── watch_raw.out ──"
     tail -n 30 "$LOG_WATCH_OUT" 2>/dev/null || echo "(없음)"
@@ -527,7 +465,7 @@ cmd_logs() {
 
 cmd_logs_follow() {
     echo "📜 실시간 로그 (Ctrl+C로 종료)"
-    FILES=("$LOG_WEB_OUT" "$LOG_WEB_ERR" "$LOG_WATCH_OUT" "$LOG_WATCH_ERR")
+    FILES=("$LOG_WATCH_OUT" "$LOG_WATCH_ERR")
     [ -f "$LOG_TG_OUT" ] && FILES+=("$LOG_TG_OUT")
     [ -f "$LOG_TG_ERR" ] && FILES+=("$LOG_TG_ERR")
     [ -f "$LOG_PAPER_OUT" ] && FILES+=("$LOG_PAPER_OUT")
@@ -556,7 +494,7 @@ cmd_uninstall() {
     echo "🗑  AI Agent 서비스 제거 중..."
     cmd_stop
     launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
-    rm -f "$PLIST_WEB" "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_LOG_ROTATE"
+    rm -f "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_LOG_ROTATE"
     echo "  ✅ plist 파일 삭제"
     echo ""
     echo "완전히 제거되었습니다. 데이터(wiki, LanceDB, 로그)는 그대로 보존됩니다."
@@ -581,8 +519,7 @@ AI Agent 서비스 관리
 설치 후:
   - 부팅/로그인 시 자동 시작
   - 크래시 나면 자동 재시작
-  - 웹 UI:  http://localhost:8080  (+ Tailscale IP:8080)
-  - Paper:  http://localhost:8081  (5단계 검증 사이트, v3.18~)
+  - Paper:  http://localhost:8080  (5단계 검증 사이트, v3.18~)
   - 텔레그램: 봇 채팅창 (.env에 토큰 + user_id 설정 시)
   - 터미널 안 열어도 됨
 EOF

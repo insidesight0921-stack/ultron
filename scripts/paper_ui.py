@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Paper Trading Web UI — 5단계 검증 사이트 골격 (v3.18 MVP).
+Paper Trading UI — 5단계 검증 사이트 골격 (v3.18 MVP).
 
-브라우저 http://localhost:8081 (또는 Tailscale IP).
+브라우저 http://localhost:8080 (또는 Tailscale IP).
 
 기능 (MVP):
 - 슬롯별 자본·포지션 대시보드
@@ -16,7 +16,7 @@ Paper Trading Web UI — 5단계 검증 사이트 골격 (v3.18 MVP).
 - 검증 대시보드 (성과·MDD·샤프)
 
 사용:
-    python paper_ui.py                   # 기본: localhost:8081
+    python paper_ui.py                   # 기본: localhost:8080
     python paper_ui.py --host 0.0.0.0    # Tailscale 모바일 접속
 """
 from __future__ import annotations
@@ -1569,7 +1569,7 @@ async def health():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8081)
+    parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
