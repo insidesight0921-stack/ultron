@@ -13,6 +13,7 @@ Gemma 4 26B MoE (gemma4:26b)가 라우팅 전담:
   schedule_bot(action, ...)   일정 등록/조회/삭제 (SQLite 백엔드)
   finance_bot(action, ...)    ECOS/FRED 지표 + Wiki 원칙 대조
   invest_bot(action, ...)     pykrx 차트 분석 + 매매 원칙 대조 (단일 종목)
+  watchlist_bot(action, ...)  개인 관심종목 추가·삭제·조회 (로컬 private DB)
   inbox_bot(content, hint)    명시적 메모 의도를 raw/inbox/에 자동 저장
   coding_bot(action, ...)     코드 설계/구현/디버깅/리뷰. 하이브리드 LLM
   respond_directly(answer)    LLM 출력 그대로 사용 (인사/잡담/메타)
@@ -69,7 +70,7 @@ def _override_mode_by_keywords(query: str, current_mode: str) -> str:
 
 
 # 등록된 도구 (라우터가 이 안에서만 선택)
-KNOWN_TOOLS = {"knowledge_bot", "schedule_bot", "finance_bot", "invest_bot", "kium_bot", "quant_bot", "inbox_bot", "coding_bot", "ipo_bot", "news_bot", "action_schedule", "system_info", "respond_directly"}
+KNOWN_TOOLS = {"knowledge_bot", "schedule_bot", "finance_bot", "invest_bot", "watchlist_bot", "kium_bot", "quant_bot", "inbox_bot", "coding_bot", "ipo_bot", "news_bot", "action_schedule", "system_info", "respond_directly"}
 
 # schedule_bot.action 허용값
 SCHEDULE_ACTIONS = {"add", "list", "upcoming", "delete", "complete"}
@@ -81,6 +82,9 @@ FINANCE_INDICATORS = {"기준금리", "CPI", "USD/KRW", "FED", "DGS10", "VIX"}
 
 # invest_bot.action 허용값
 INVEST_ACTIONS = {"analyze", "compare_with_rules"}
+
+# watchlist_bot.action 허용값 (개인 데이터 — MCP 미노출)
+WATCHLIST_ACTIONS = {"add", "remove", "list"}
 
 # kium_bot.action 허용값 (v3.16 신규)
 KIUM_ACTIONS = {"scan"}
@@ -166,6 +170,15 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
       → {{"tool":"invest_bot","args":{{"action":"analyze","ticker_or_name":"삼성전자"}}}}
     "삼성전자 지금 매수 조건 충족해?" / "내 원칙 기준 평가해"
       → {{"tool":"invest_bot","args":{{"action":"compare_with_rules","ticker_or_name":"삼성전자"}}}}
+
+### 4b. watchlist_bot(action, ticker_or_name?)
+- 목적: 개인 관심종목 로컬 DB 추가·삭제·조회. 실주문·자산배분 변경 없음.
+- action ∈ {{"add", "remove", "list"}}
+- add/remove는 ticker_or_name(종목명 또는 6자리 코드) 필수. list는 추가 인자 없음. 항상 fast.
+- 예시:
+    "삼성전자 관심종목에 추가해줘" → {{"tool":"watchlist_bot","args":{{"action":"add","ticker_or_name":"삼성전자"}},"mode":"fast"}}
+    "삼성전자 관심종목에서 빼줘" → {{"tool":"watchlist_bot","args":{{"action":"remove","ticker_or_name":"삼성전자"}},"mode":"fast"}}
+    "내 관심종목 보여줘" → {{"tool":"watchlist_bot","args":{{"action":"list"}},"mode":"fast"}}
 
 ### 5. kium_bot(action, top_n?, market?, with_crash_signals?)
 - 목적: 시장 universe(KOSPI200 등) 12-1 모멘텀 Top N 스캔 + (옵션) 3중 크래시 감지·VKOSPI 비중 권고
@@ -293,6 +306,7 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 - finance_bot.compare_with_principles → accurate (포지션 점검)
 - invest_bot.analyze → fast (지표만, LLM 무호출)
 - invest_bot.compare_with_rules → accurate (매매 평가)
+- watchlist_bot 모든 action → fast (로컬 private DB CRUD)
 - inbox_bot → fast (저장 작업)
 - kium_bot.scan → fast (지표 계산만, LLM 무호출)
 - quant_bot.phase → fast (거시지표 → 국면 분류, LLM 무호출)
@@ -340,14 +354,15 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
    ▸ 코딩 동사: "짜줘"·"만들어줘"·"구현해"·"작성해"·"코드"·"함수로"·"스크립트로"·"프로그램"·"디버깅"·"리뷰"·"리팩토링"
    ▸ 알고리즘·자료구조·언어 일반 지식(피보나치/정렬/스택/큐/이진 탐색/HashMap/URL 파싱 등)에 코딩 동사가 붙으면 → 항상 coding_bot.
    ▸ wiki/에는 사용자 투자 원칙·메모만 있어 코드/알고리즘 노트가 없음. 코드 작성 의도면 knowledge_bot으로 절대 보내지 말 것.
-2. "메모해/기록해/일지에 추가/저장해줘" 등 명백한 저장 의도 → inbox_bot. 헷갈리면 inbox_bot 안 씀.
-3. 한국 주식 단일 종목 분석·매매 조건 평가 → invest_bot.
-4. 환율·금리·CPI·VIX·"경제지표"·"포지션 점검" 같이 외부 시장 지표가 필요한 질문이면 finance_bot.
-5. 일정·약속·미팅·알림 관련이면 schedule_bot. ("잡아줘", "등록", "내 일정", "#N 삭제" 등)
-6. 그 외 사용자의 지식·원칙·메모 관련이면 knowledge_bot.
-7. 멀티턴 컨텍스트(직전 대화)를 보고 모호한 표현("그거", "방금", "더") 해석.
-8. respond_directly는 wiki·일정·지표 참조가 명백히 불필요한 경우만 (인사/잡담).
-9. JSON 외 어떤 설명·코드블록도 추가하지 않음.
+2. "관심종목/워치리스트" 추가·삭제·조회 의도 → watchlist_bot. 일반 메모 저장과 혼동하지 말 것.
+3. "메모해/기록해/일지에 추가/저장해줘" 등 명백한 저장 의도 → inbox_bot. 헷갈리면 inbox_bot 안 씀.
+4. 한국 주식 단일 종목 분석·매매 조건 평가 → invest_bot.
+5. 환율·금리·CPI·VIX·"경제지표"·"포지션 점검" 같이 외부 시장 지표가 필요한 질문이면 finance_bot.
+6. 일정·약속·미팅·알림 관련이면 schedule_bot. ("잡아줘", "등록", "내 일정", "#N 삭제" 등)
+7. 그 외 사용자의 지식·원칙·메모 관련이면 knowledge_bot.
+8. 멀티턴 컨텍스트(직전 대화)를 보고 모호한 표현("그거", "방금", "더") 해석.
+9. respond_directly는 wiki·일정·지표 참조가 명백히 불필요한 경우만 (인사/잡담).
+10. JSON 외 어떤 설명·코드블록도 추가하지 않음.
 """
 
 
@@ -381,6 +396,20 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
     # v3.39: 구조화된 IPO analyze 질문은 LLM 없이 결정론적으로 단락 처리.
     # (26B 라우터가 잘못된 JSON을 뱉어 knowledge_bot으로 early-return 하는 실환경 문제 우회.
     #  LLM 호출/지연도 없어 더 빠르고 재현 가능.)
+    _wl = _detect_watchlist(query)
+    if _wl:
+        valid = _validate_watchlist_args(_wl)
+        if valid:
+            log.info(f"🎯 watchlist_bot short-circuit: {valid['action']} (명시적 관심종목 발화)")
+            return {"tool": "watchlist_bot", "args": valid, "mode": "fast"}
+        action = _wl.get("action")
+        verb = "추가할" if action == "add" else "삭제할"
+        return {
+            "tool": "respond_directly",
+            "args": {"answer": f"{verb} 종목명이나 6자리 종목코드를 알려주세요."},
+            "mode": "fast",
+        }
+
     _as = _detect_action_schedule(query)
     if _as:
         log.info(f"🎯 action_schedule short-circuit: {_as.get('op')} (정규식, LLM 미호출)")
@@ -493,6 +522,22 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
             log.warning(f"invest_bot args 유효성 실패 → knowledge_bot fallback. args: {args}")
             return {"tool": "knowledge_bot", "args": {"query": query}, "mode": DEFAULT_MODE}
         args = valid
+
+    elif tool == "watchlist_bot":
+        valid = _validate_watchlist_args(args)
+        if not valid:
+            action = (args.get("action") or "").strip().lower()
+            verb = "추가할" if action == "add" else "삭제할"
+            if action in {"add", "remove"}:
+                return {
+                    "tool": "respond_directly",
+                    "args": {"answer": f"{verb} 종목명이나 6자리 종목코드를 알려주세요."},
+                    "mode": "fast",
+                }
+            log.warning(f"watchlist_bot args 유효성 실패 → knowledge_bot fallback. args: {args}")
+            return {"tool": "knowledge_bot", "args": {"query": query}, "mode": DEFAULT_MODE}
+        args = valid
+        mode = "fast"
 
     elif tool == "kium_bot":
         valid = _validate_kium_args(args)
@@ -686,6 +731,62 @@ def _validate_invest_args(args: dict) -> dict | None:
         return None
     out["ticker_or_name"] = ton
     return out
+
+
+# ─── watchlist_bot 결정론 라우팅·args 검증 ───────────
+
+
+_WATCHLIST_CUE_RE = re.compile(r"관심\s*종목|워치\s*리스트|watchlist", re.IGNORECASE)
+_WATCHLIST_MARKER_RE = re.compile(
+    r"(?:관심\s*종목|워치\s*리스트|watchlist)(?:\s*(?:에서|으로|에|을|를|은|는))?",
+    re.IGNORECASE,
+)
+_WATCHLIST_ADD_END_RE = re.compile(
+    r"(?:추가|등록|넣어|담아)(?:\s*(?:해|해줘|해주세요|시켜줘|줘))?\s*[.!?]*$"
+)
+_WATCHLIST_REMOVE_END_RE = re.compile(
+    r"(?:삭제|제거|빼)(?:\s*(?:줘|주세요|버려줘|해|해줘|해주세요))?\s*[.!?]*$"
+)
+_WATCHLIST_LIST_RE = re.compile(r"목록|보여|조회|알려|뭐|확인")
+
+
+def _watchlist_target(query: str, action_re: re.Pattern) -> str:
+    text = _WATCHLIST_MARKER_RE.sub(" ", query or "")
+    text = action_re.sub("", text)
+    text = re.sub(r"^(?:내|나의)\s+", "", text.strip())
+    text = re.sub(r"(?:을|를)$", "", text.strip())
+    return " ".join(text.split())
+
+
+def _detect_watchlist(query: str) -> dict | None:
+    """명백한 관심종목 CRUD 발화만 LLM 전에 결정론적으로 분기."""
+    if not query or not _WATCHLIST_CUE_RE.search(query):
+        return None
+    if _WATCHLIST_REMOVE_END_RE.search(query):
+        return {
+            "action": "remove",
+            "ticker_or_name": _watchlist_target(query, _WATCHLIST_REMOVE_END_RE),
+        }
+    if _WATCHLIST_ADD_END_RE.search(query):
+        return {
+            "action": "add",
+            "ticker_or_name": _watchlist_target(query, _WATCHLIST_ADD_END_RE),
+        }
+    if _WATCHLIST_LIST_RE.search(query):
+        return {"action": "list"}
+    return None
+
+
+def _validate_watchlist_args(args: dict) -> dict | None:
+    action = (args.get("action") or "").strip().lower()
+    if action not in WATCHLIST_ACTIONS:
+        return None
+    if action == "list":
+        return {"action": "list"}
+    ticker_or_name = " ".join(str(args.get("ticker_or_name") or "").split())
+    if not ticker_or_name or len(ticker_or_name) > 100:
+        return None
+    return {"action": action, "ticker_or_name": ticker_or_name}
 
 
 # ─── ipo_bot analyze 인자 결정론 정규식 추출 (v3.37) ──────

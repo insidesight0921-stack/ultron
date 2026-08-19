@@ -17,7 +17,7 @@ import router
 def test_system_prompt_has_all_tools():
     sp = router._build_system_prompt()
     for tool in ("knowledge_bot", "schedule_bot", "finance_bot",
-                 "invest_bot", "respond_directly"):
+                 "invest_bot", "watchlist_bot", "respond_directly"):
         assert tool in sp, f"{tool} 누락"
 
 
@@ -62,6 +62,67 @@ def test_validate_invest_args_strips_whitespace():
     v = router._validate_invest_args(
         {"action": "analyze", "ticker_or_name": "  삼성전자  "})
     assert v["ticker_or_name"] == "삼성전자"
+
+
+# ─── watchlist_bot validator / 결정론 라우팅 ─────────
+
+
+def test_validate_watchlist_args():
+    assert router._validate_watchlist_args({"action": "list"}) == {"action": "list"}
+    assert router._validate_watchlist_args(
+        {"action": "add", "ticker_or_name": "  삼성전자  "}
+    ) == {"action": "add", "ticker_or_name": "삼성전자"}
+    assert router._validate_watchlist_args(
+        {"action": "remove", "ticker_or_name": "005930"}
+    ) == {"action": "remove", "ticker_or_name": "005930"}
+
+
+def test_validate_watchlist_args_rejects_missing_target():
+    assert router._validate_watchlist_args({"action": "add"}) is None
+    assert router._validate_watchlist_args({"action": "remove"}) is None
+    assert router._validate_watchlist_args({"action": "delete", "ticker_or_name": "x"}) is None
+
+
+@pytest.mark.parametrize(
+    ("query", "action", "target"),
+    [
+        ("삼성전자 관심종목에 추가해줘", "add", "삼성전자"),
+        ("관심종목에 005930 등록해줘", "add", "005930"),
+        ("에코프로 관심종목에 넣어줘", "add", "에코프로"),
+        ("카카오를 관심종목에 추가해줘", "add", "카카오"),
+        ("삼성전자 관심종목에서 빼줘", "remove", "삼성전자"),
+    ],
+)
+def test_detect_watchlist_mutation(query, action, target):
+    out = router._detect_watchlist(query)
+    assert out == {"action": action, "ticker_or_name": target}
+
+
+def test_detect_watchlist_list():
+    assert router._detect_watchlist("내 관심종목 목록 보여줘") == {"action": "list"}
+
+
+def test_route_watchlist_short_circuits_without_llm(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("명백한 관심종목 명령은 LLM을 호출하면 안 됨")
+
+    monkeypatch.setattr(router, "urlopen", boom)
+    result = router.route("삼성전자 관심종목에 추가해줘")
+    assert result == {
+        "tool": "watchlist_bot",
+        "args": {"action": "add", "ticker_or_name": "삼성전자"},
+        "mode": "fast",
+    }
+
+
+def test_route_watchlist_missing_target_asks_user(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("명백한 관심종목 명령은 LLM을 호출하면 안 됨")
+
+    monkeypatch.setattr(router, "urlopen", boom)
+    result = router.route("관심종목에 추가해줘")
+    assert result["tool"] == "respond_directly"
+    assert "종목명" in result["args"]["answer"]
 
 
 # ─── route()에 mode 포함 ──────────────────────────────
