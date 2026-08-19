@@ -29,7 +29,7 @@ ai-agent/
 - macOS (Apple Silicon, 48GB)
 - Python 3.11+
 - Ollama (MLX 백엔드)
-- 의존 vault: `~/obsidian-vault/` (별도 git repo)
+- 의존 vault: `~/울트론/obsidian-vault/` (별도 git repo)
 
 ## 단계별 진행 상황
 

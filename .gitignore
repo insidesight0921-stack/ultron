@@ -3,6 +3,7 @@
 # API 키 및 민감 정보
 .env
 .env.*
+.envcd
 !.env.example
 
 # SQLite DB / 백업
@@ -54,10 +55,4 @@ logs/
 *.swp
 *~
 *.bak*
-__pycache__/
 data/
-.env*
-*.bak*
-__pycache__/
-data/
-.env*
