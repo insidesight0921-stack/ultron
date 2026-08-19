@@ -139,6 +139,7 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Updater").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("trafilatura").setLevel(logging.WARNING)
 logging.getLogger("pdfminer").setLevel(logging.WARNING)
 log = logging.getLogger("telegram_bot")
@@ -2432,7 +2433,7 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ─── main ────────────────────────────────────────────
 
 def main() -> None:
-    log.info(f"🤖 텔레그램 봇 시작 (허용 user_id: {sorted(ALLOWED_IDS)})")
+    log.info(f"🤖 텔레그램 봇 시작 (허용 사용자: {len(ALLOWED_IDS)}명)")
     log.info(f"   마스터: {MASTER_MODEL} (라우팅)")
     log.info(f"   하위:   {LLM_MODEL} (지식봇)")
     log.info(f"   inbox:  {RAW_INBOX}")

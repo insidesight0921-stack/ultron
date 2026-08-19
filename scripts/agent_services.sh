@@ -34,12 +34,14 @@ LABEL_WATCH="com.hyunjun.ai-agent.watch-raw"
 LABEL_TG="com.hyunjun.ai-agent.telegram"
 LABEL_PAPER="com.hyunjun.ai-agent.paper"
 LABEL_WEEKLY="com.hyunjun.ai-agent.weekly-kium-scan"
+LABEL_LOG_ROTATE="com.hyunjun.ai-agent.log-rotation"
 
 PLIST_WEB="$LA_DIR/${LABEL_WEB}.plist"
 PLIST_WATCH="$LA_DIR/${LABEL_WATCH}.plist"
 PLIST_TG="$LA_DIR/${LABEL_TG}.plist"
 PLIST_PAPER="$LA_DIR/${LABEL_PAPER}.plist"
 PLIST_WEEKLY="$LA_DIR/${LABEL_WEEKLY}.plist"
+PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
 
 LOG_WEB_OUT="$DATA_DIR/logs/web_ui.out.log"
 LOG_WEB_ERR="$DATA_DIR/logs/web_ui.err.log"
@@ -271,6 +273,37 @@ write_plist_weekly() {
 EOF
 }
 
+write_plist_log_rotation() {
+    cat > "$PLIST_LOG_ROTATE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL_LOG_ROTATE}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${SCRIPTS}/rotate_logs.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT}</string>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+</dict>
+</plist>
+EOF
+}
+
 
 # ─── .env 검증 (텔레그램 키) ─────────────────────────
 
@@ -335,6 +368,9 @@ cmd_install() {
         echo "  ✅ plist 생성: $PLIST_WEEKLY (매주 월요일 09:00)"
     fi
 
+    write_plist_log_rotation
+    echo "  ✅ plist 생성: $PLIST_LOG_ROTATE (매일 03:10)"
+
     cmd_start
     echo ""
     echo "🎉 설치 완료. 부팅/로그인 시 자동 시작됩니다."
@@ -357,6 +393,7 @@ cmd_start() {
     [ -f "$PLIST_TG" ] && launchctl unload "$PLIST_TG" 2>/dev/null || true
     [ -f "$PLIST_PAPER" ] && launchctl unload "$PLIST_PAPER" 2>/dev/null || true
     [ -f "$PLIST_WEEKLY" ] && launchctl unload "$PLIST_WEEKLY" 2>/dev/null || true
+    [ -f "$PLIST_LOG_ROTATE" ] && launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
     sleep 1
 
     # 로드
@@ -371,6 +408,10 @@ cmd_start() {
     if [ -f "$PLIST_WEEKLY" ]; then
         launchctl load "$PLIST_WEEKLY"
         echo "  ✅ 주간 스캔 스케줄 등록 (매주 월 09:00)"
+    fi
+    if [ -f "$PLIST_LOG_ROTATE" ]; then
+        launchctl load "$PLIST_LOG_ROTATE"
+        echo "  ✅ 로그 회전 스케줄 등록 (매일 03:10)"
     fi
     echo "▶️  서비스 시작됨"
     sleep 2
@@ -389,6 +430,9 @@ cmd_stop() {
     if [ -f "$PLIST_WEEKLY" ]; then
         launchctl unload "$PLIST_WEEKLY" 2>/dev/null && echo "⏸  weekly-kium-scan 중지" || echo "(weekly-kium-scan 이미 중지됨)"
     fi
+    if [ -f "$PLIST_LOG_ROTATE" ]; then
+        launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null && echo "⏸  로그 회전 중지" || echo "(로그 회전 이미 중지됨)"
+    fi
 }
 
 cmd_restart() {
@@ -406,6 +450,7 @@ cmd_status() {
     [ -f "$PLIST_TG" ] && LABELS+=("$LABEL_TG")
     [ -f "$PLIST_PAPER" ] && LABELS+=("$LABEL_PAPER")
     [ -f "$PLIST_WEEKLY" ] && LABELS+=("$LABEL_WEEKLY")
+    [ -f "$PLIST_LOG_ROTATE" ] && LABELS+=("$LABEL_LOG_ROTATE")
 
     for label in "${LABELS[@]}"; do
         info=$(launchctl list | grep "$label" || echo "")
@@ -413,7 +458,11 @@ cmd_status() {
             pid=$(echo "$info" | awk '{print $1}')
             status=$(echo "$info" | awk '{print $2}')
             if [ "$pid" = "-" ]; then
-                printf "  ❌ %-40s 중지됨 (마지막 종료 코드: %s)\n" "$label" "$status"
+                if [ "$status" = "0" ]; then
+                    printf "  🕒 %-40s 로드됨 (다음 실행 대기)\n" "$label"
+                else
+                    printf "  ❌ %-40s 중지됨 (마지막 종료 코드: %s)\n" "$label" "$status"
+                fi
             else
                 printf "  ✅ %-40s PID %s 실행 중\n" "$label" "$pid"
             fi
@@ -488,10 +537,26 @@ cmd_logs_follow() {
     tail -F "${FILES[@]}" 2>/dev/null
 }
 
+cmd_install_log_rotation() {
+    if [ ! -x "$SCRIPTS/rotate_logs.sh" ]; then
+        echo "❌ 실행 파일 없음: $SCRIPTS/rotate_logs.sh"
+        exit 1
+    fi
+    write_plist_log_rotation
+    launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
+    launchctl load "$PLIST_LOG_ROTATE"
+    echo "✅ 로그 회전 설치: 매일 03:10, 10MiB, 압축 백업 5개"
+}
+
+cmd_rotate_logs() {
+    bash "$SCRIPTS/rotate_logs.sh"
+}
+
 cmd_uninstall() {
     echo "🗑  AI Agent 서비스 제거 중..."
     cmd_stop
-    rm -f "$PLIST_WEB" "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY"
+    launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
+    rm -f "$PLIST_WEB" "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_LOG_ROTATE"
     echo "  ✅ plist 파일 삭제"
     echo ""
     echo "완전히 제거되었습니다. 데이터(wiki, LanceDB, 로그)는 그대로 보존됩니다."
@@ -509,6 +574,8 @@ AI Agent 서비스 관리
   bash $0 restart     재시작
   bash $0 logs        최근 로그 보기
   bash $0 follow      실시간 로그 (Ctrl+C로 종료)
+  bash $0 install-log-rotation  로그 회전만 설치 (매일 03:10)
+  bash $0 rotate-logs 현재 10MiB 이상 로그 즉시 회전
   bash $0 uninstall   서비스 제거 (데이터는 보존)
 
 설치 후:
@@ -531,6 +598,8 @@ case "${1:-help}" in
     status)     cmd_status ;;
     logs)       cmd_logs ;;
     follow)     cmd_logs_follow ;;
+    install-log-rotation) cmd_install_log_rotation ;;
+    rotate-logs) cmd_rotate_logs ;;
     uninstall)  cmd_uninstall ;;
     *)          cmd_help ;;
 esac
