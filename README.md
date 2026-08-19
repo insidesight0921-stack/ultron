@@ -34,12 +34,14 @@ ai-agent/
 ## 단계별 진행 상황
 
 - [x] 모델 다운로드 (gemma4:26b-moe, gemma4:31b)
-- [ ] 1단계: 모델 실측 + Python 환경 + Obsidian/GitHub
-- [ ] 2단계: 지식봇 + RAG (LanceDB)
-- [ ] 3단계: 텔레그램 봇 + Tailscale
-- [ ] 4단계: 마스터 에이전트 + 전체 봇
-- [ ] 5단계: 투자봇 고도화 + 모의투자 사이트
+- [x] 1단계: 모델 실측 + Python 환경 + Obsidian/GitHub
+- [x] 2단계: 지식봇 + RAG (LanceDB)
+- [x] 3단계: 텔레그램 봇 + Tailscale
+- [x] 4단계: 마스터 라우팅 + 개인 관심종목 자연어 관리
+- [ ] 5단계: 투자봇 고도화 + 모의투자 사이트 (진행 중)
 - [ ] 6단계: 외부 API + 팩터 리서치봇
+
+관심종목은 `data/private.db`에만 저장되며 Git/MCP에 노출하지 않습니다.
 
 ## 보안
 

@@ -56,6 +56,7 @@ from knowledge_bot import run as knowledge_run  # noqa: E402
 from schedule_bot import run as schedule_run  # noqa: E402
 from finance_bot import run as finance_run  # noqa: E402
 from invest_bot import run as invest_run  # noqa: E402
+from watchlist_bot import run as watchlist_run  # noqa: E402
 from kium_bot import run as kium_run, scan_universe as kium_scan  # noqa: E402
 from quant_bot import run as quant_run, recommend_top_n as quant_recommend, snapshot as quant_snapshot  # noqa: E402  # v3.22 콴텍봇
 from ipo_bot import run as ipo_run, scan_upcoming as ipo_scan  # noqa: E402  # v3.26 IPO봇
@@ -819,6 +820,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.exception("invest_bot 실패")
             await notice.edit_text(f"❌ 투자봇 오류: {e}")
+            return
+
+    elif tool == "watchlist_bot":
+        wl_action = args.get("action", "")
+        await notice.edit_text(f"{mode_emoji}⭐ 관심종목 처리 중... ({wl_action})")
+        try:
+            answer, chunks = await asyncio.to_thread(watchlist_run, **args)
+        except Exception as e:
+            log.exception("watchlist_bot 실패")
+            await notice.edit_text(f"❌ 관심종목 처리 오류: {e}")
             return
 
     elif tool == "kium_bot":
