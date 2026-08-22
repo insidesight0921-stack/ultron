@@ -143,7 +143,7 @@ def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _database_signature(con: sqlite3.Connection) -> dict:
+def database_signature(con: sqlite3.Connection) -> dict:
     integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
     if integrity != "ok":
         raise RuntimeError(f"SQLite integrity_check 실패: {integrity}")
@@ -167,6 +167,22 @@ def _database_signature(con: sqlite3.Connection) -> dict:
     }
 
 
+def verify_database(path: Path) -> dict:
+    """SQLite 파일을 메모리 DB로 복구하고 원본 사본과 서명을 비교한다."""
+    with sqlite3.connect(path) as stored:
+        stored_signature = database_signature(stored)
+        restored = sqlite3.connect(":memory:")
+        try:
+            stored.backup(restored)
+            restored_signature = database_signature(restored)
+        finally:
+            restored.close()
+
+    if stored_signature != restored_signature:
+        raise RuntimeError(f"메모리 복구 결과 불일치: {path.name}")
+    return {**stored_signature, "restore_verified": True}
+
+
 def _create_private_file(path: Path) -> None:
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
@@ -185,17 +201,7 @@ def backup_database(source: Path, target: Path) -> dict:
             dst.commit()
 
     target.chmod(0o600)
-    with sqlite3.connect(target) as stored:
-        stored_signature = _database_signature(stored)
-        restored = sqlite3.connect(":memory:")
-        try:
-            stored.backup(restored)
-            restored_signature = _database_signature(restored)
-        finally:
-            restored.close()
-
-    if stored_signature != restored_signature:
-        raise RuntimeError(f"메모리 복구 결과 불일치: {source.name}")
+    verification = verify_database(target)
 
     digest = hashlib.sha256()
     with target.open("rb") as handle:
@@ -206,8 +212,7 @@ def backup_database(source: Path, target: Path) -> dict:
         "backup_file": target.name,
         "bytes": target.stat().st_size,
         "sha256": digest.hexdigest(),
-        **stored_signature,
-        "restore_verified": True,
+        **verification,
     }
 
 

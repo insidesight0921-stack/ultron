@@ -1,6 +1,6 @@
 # Private / Shareable 물리 분리 실행서
 
-> 상태: 1차 호환 코드 완료, 실제 레이아웃은 `legacy`  
+> 상태: 1차 호환 코드 + 2차 전용 마이그레이션 도구 완료, 실제 레이아웃은 `legacy`
 > 원칙: 복사 → 검증 → 전환. 기존 파일 삭제는 별도 승인 전까지 금지한다.
 
 ## 1. 레이아웃 선택 방식
@@ -31,6 +31,23 @@
 전환은 별도 스키마 변경으로 다룬다.
 
 ## 3. 2차 복사·전환 절차
+
+전용 도구는 `scripts/migrate_storage.py`다. 기본 `plan`은 읽기 전용이며 실제 적용은
+복구 검증을 통과한 24시간 이내 백업과 서비스 중지 확인을 모두 요구한다.
+
+```bash
+# 읽기 전용 분류·사전점검
+python scripts/migrate_storage.py plan
+
+# 실제 전환 — 별도 승인과 AI-agent 서비스 중지 후에만 실행
+python scripts/migrate_storage.py apply \
+  --backup-manifest /absolute/path/to/manifest.json \
+  --confirm-services-stopped
+```
+
+미분류 캐시, symlink, 기존 target, 누락 DB, 해시 불일치가 하나라도 있으면 레이아웃
+설정을 쓰기 전에 중단한다. 실패 시 일부 새 파일이 남을 수 있지만 활성 레이아웃은
+`legacy`로 유지되고 원본은 변경되지 않는다.
 
 1. 최신 Private SQLite 온라인 백업을 만들고 메모리 복구를 검증한다.
 2. AI-agent 서비스만 중지한다. Tapnow와 Ollama는 유지한다.
@@ -72,5 +89,9 @@
 - RAG·상태: `ask.py`, `index_wiki.py`, `refine_raw.py`, `telegram_bot.py`, 분석·스케줄 모듈
 - Shareable: quant/signal/invest/kium/IPO/DART 캐시·샘플 모듈
 - 운영: `agent_services.sh`, `rotate_logs.sh`, `private_data_security.py`
+- 전환: `migrate_storage.py`(원본 보존·DB 병합·해시 검증·설정 마지막 기록)
 
 경로를 직접 받는 테스트 API는 그대로 유지해 실제 DB와 테스트 DB의 격리를 보존한다.
+
+2026-08-22 실제 프로젝트에서 `plan` 모드가 legacy DB 3개, Private 캐시 7개와
+Shareable 캐시 32개를 모두 분류했다. 새 디렉터리나 레이아웃 설정은 생성하지 않았다.
