@@ -261,6 +261,7 @@ def test_load_watchlist_fallback_on_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "WIKI_PORTFOLIO_PATH", tmp_path / "nope.md")
     wl = sb.load_watchlist()
     assert wl is sb._FALLBACK_WATCHLIST
+    assert sum(item.weight for item in wl) == 95.0
 
 
 def test_load_watchlist_parses_real_file(monkeypatch, tmp_path):

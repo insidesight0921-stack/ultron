@@ -2,7 +2,7 @@
 
 [[기술적_분석_활용지침]] + [[핵심_자산배분_포트폴리오]] 연동.
 
-핵심 자산배분(위험70/안전30) 워치리스트에 대해 **1시간봉** 기준으로
+핵심 자산배분(위험65/안전30/현금5) 중 투자 종목 95%에 대해 **1시간봉** 기준으로
 자산군별 보조 지표를 계산해 매매 신호를 산출한다. 실주문은 절대 하지 않으며
 텔레그램 알림(telegram_bot의 장중 JobQueue)으로 전송만 한다.
 
@@ -45,7 +45,7 @@ class WatchItem:
 
 
 _FALLBACK_WATCHLIST: list[WatchItem] = [
-    # 위험자산 (70%) — 코드는 FinanceDataReader ETF/KR로 확정(2026-06)
+    # 위험자산 (65%) — 코드는 FinanceDataReader ETF/KR로 확정(2026-06)
     WatchItem("KODEX 미국나스닥100", 5, "macd", "해외주식_지수", code="379810"),
     WatchItem("TIGER 미국필라델피아반도체나스닥", 5, "macd", "해외주식_지수", code="381180"),
     WatchItem("KODEX 미국AI전력핵심인프라", 4, "stochrsi", "해외주식_섹터", code="487230"),
@@ -62,6 +62,7 @@ _FALLBACK_WATCHLIST: list[WatchItem] = [
     WatchItem("TIGER 미국달러SOFR금리액티브(합성)", 15, "monitor", "금리연계", code="456610"),
     WatchItem("KODEX KOFR금리액티브(합성)", 5, "monitor", "금리연계", code="423160"),
     WatchItem("TIGER 미국달러단기채권액티브", 10, "monitor", "해외채권", code="329750"),
+    # 나머지 5%는 현금 대기자금 — 시세·신호 대상이 아니므로 목록에 넣지 않음.
 ]
 
 # 하위호환 별칭 (테스트·직접 참조용). 런타임 스캔은 load_watchlist() 사용.

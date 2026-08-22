@@ -219,18 +219,66 @@ def process_file(md_path: Path) -> list[dict]:
             "vector": [],  # 나중에 채움
         })
         idx += 1
+
+    # 모든 H2가 짧은 메모라 개별 기준을 넘지 못한 경우 문서 전체를 한 청크로
+    # 묶는다. 일정·체크 메모처럼 짧지만 검색 가치가 있는 노트의 유실 방지.
+    if not records:
+        combined_parts: list[str] = []
+        for section, body in sections:
+            if section == "__intro__":
+                combined_parts.append(body)
+            elif body:
+                combined_parts.append(f"{section}\n{body}")
+        combined = f"[{title}]\n" + "\n\n".join(combined_parts)
+        if len(combined.strip()) >= MIN_CHUNK_CHARS:
+            records.append({
+                "id": f"{rel_path}#0",
+                "file": rel_path,
+                "section": "__document__",
+                "content": combined,
+                "tags": file_tags,
+                "links": file_links,
+                "mtime": mtime,
+                "vector": [],
+            })
     return records
 
 
 def needs_reindex(table, file_path: str, mtime: float) -> bool:
     """기존 인덱스의 mtime과 비교"""
     try:
-        existing = table.search().where(f"file = '{file_path}'").limit(1).to_list()
+        existing = table.search().where(
+            f"file = {_filter_string(file_path)}"
+        ).limit(1).to_list()
         if not existing:
             return True
         return existing[0]["mtime"] < mtime
     except Exception:
         return True
+
+
+def _filter_string(value: str) -> str:
+    """LanceDB SQL 필터용 문자열 리터럴을 안전하게 만든다."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def stale_index_files(
+    indexed_files: set[str], actual_files: set[str]
+) -> list[str]:
+    """인덱스에만 남아 있고 wiki에는 없는 파일 경로를 정렬해 반환한다."""
+    return sorted(indexed_files - actual_files)
+
+
+def purge_deleted_files(table, actual_files: set[str]) -> list[str]:
+    """wiki에서 삭제된 파일의 모든 기존 청크를 인덱스에서도 제거한다."""
+    if table.count_rows() == 0:
+        return []
+    rows = table.to_pandas()
+    indexed = {str(v) for v in rows["file"].dropna().tolist()}
+    stale = stale_index_files(indexed, actual_files)
+    for rel in stale:
+        table.delete(f"file = {_filter_string(rel)}")
+    return stale
 
 
 def index_all(rebuild: bool = False) -> tuple[int, int, int]:
@@ -243,6 +291,13 @@ def index_all(rebuild: bool = False) -> tuple[int, int, int]:
     if not md_files:
         print(f"⚠️ {WIKI}에 .md 파일 없음")
         return 0, 0, 0
+
+    actual_files = {str(md.relative_to(VAULT)) for md in md_files}
+    purged: list[str] = []
+    if not rebuild:
+        purged = purge_deleted_files(table, actual_files)
+        for rel in purged:
+            print(f"  🗑️ 인덱스에서 삭제: {rel}")
 
     scanned, embedded, skipped = 0, 0, 0
     new_records = []
@@ -260,7 +315,7 @@ def index_all(rebuild: bool = False) -> tuple[int, int, int]:
         # 변경됨 — 기존 청크 제거 후 재처리
         if not rebuild:
             try:
-                table.delete(f"file = '{rel}'")
+                table.delete(f"file = {_filter_string(rel)}")
             except Exception:
                 pass
 
@@ -281,7 +336,10 @@ def index_all(rebuild: bool = False) -> tuple[int, int, int]:
     if new_records:
         table.add(new_records)
 
-    print(f"\n📊 결과: 스캔 {scanned} / 임베딩 {embedded} / 스킵 {skipped}")
+    print(
+        f"\n📊 결과: 스캔 {scanned} / 임베딩 {embedded} "
+        f"/ 스킵 {skipped} / 삭제 동기화 {len(purged)}"
+    )
     print(f"📍 LanceDB: {DB_PATH}")
     return scanned, embedded, skipped
 

@@ -1,8 +1,9 @@
-> ✅ **2026-08-19 현재**: private 관심종목 저장소 + Function Calling 라우팅 + 텔레그램 실행 경로 구현 완료.
+> ✅ **2026-08-22 현재**: private 관심종목 저장소 + Function Calling 라우팅 + 텔레그램 실행 경로 구현 완료.
 > 자연어 예: "삼성전자 관심종목에 추가해줘", "관심종목 보여줘", "삼성전자 관심종목에서 빼줘".
 > 데이터는 `data/private.db`에만 저장되며 git/MCP에 노출하지 않는다.
 >
-> ⏭️ **다음 작업은 원칙 Wiki/RAG 정합성 점검**: `context.md` 2순위에 따라 콴텍·키움 원칙 노트와 LanceDB 인덱싱 상태를 확인한다.
+> ✅ **원칙 Wiki/RAG 정합성 점검 완료**: 22개 Wiki가 125청크로 모두 인덱싱되며 삭제·누락·구버전 청크가 없다.
+> ⏭️ **다음 작업은 데이터 분류 Phase 1**: 코드·DB·노트를 private/shareable로 전수 매핑하고 API/MCP 접근 경계를 확정한다.
 > 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
@@ -56,13 +57,21 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 
 ## 완료된 작업
 
+### ✅ 원칙 Wiki/RAG 정합성 정리 (2026-08-22) ← NEW
+- DB GAPS 대회 자료 2건 제거, LanceDB 잔존 청크도 동기화 삭제.
+- 깨진 Wiki 링크 교정 + `IPO_매력지수_기준.md`를 현재 코드 기준으로 추가.
+- 핵심 자산배분을 위험 65% / 안전 30% / 현금 5%로 정합화.
+- 증분 인덱서가 삭제된 파일 청크와 짧은 Wiki 노트를 자동 동기화하도록 보강.
+- Wiki 22개 = 인덱스 22개, 125청크, stale/missing/outdated 0건.
+- 전체 회귀 테스트 1,030개 통과.
+
 ### ✅ 개인 관심종목 자연어 관리 (watchlist v1) ← NEW
 - `watchlist_store.py`: ignored `data/private.db`에 ticker PK로 멱등 추가·삭제·조회. MCP 미노출.
 - `watchlist_bot.py`: 기존 KRX 종목 해석기를 재사용해 유효 종목만 저장.
 - `router.py`: `watchlist_bot(add/remove/list)` Function Calling 등록 + 명백한 발화 결정론 안전망.
 - `telegram_bot.py`: 라우팅 결과를 실행하고 추가·중복·목록·삭제 응답.
-- 핵심 자산배분 100% 워치리스트(`핵심_자산배분_포트폴리오.md`)와 개인 관심종목을 분리.
-- 전체 회귀 테스트 1,025개 통과.
+- 핵심 자산배분 투자 종목 95% + 현금 5%(`핵심_자산배분_포트폴리오.md`)와 개인 관심종목을 분리.
+- 구현 시점 전체 회귀 테스트 1,025개 통과.
 
 ### ✅ 매매 정밀 진단 추가 (trade_analytics v1.1) ← NEW
 - **요청**: "손절선이 너무 타이트한지, 손실이 특정 종목/시기에 몰렸는지" 파고드는 분석.
