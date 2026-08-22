@@ -1,14 +1,15 @@
 > ✅ **2026-08-22 현재**: private 관심종목 저장소 + Function Calling 라우팅 + 텔레그램 실행 경로 구현 완료.
 > 자연어 예: "삼성전자 관심종목에 추가해줘", "관심종목 보여줘", "삼성전자 관심종목에서 빼줘".
-> 데이터는 `data/private.db`에만 저장되며 git/MCP에 노출하지 않는다.
+> 데이터는 `data/private/assistant.db`에만 저장되며 git/MCP에 노출하지 않는다.
 >
-> ✅ **원칙 Wiki/RAG 정합성 점검 완료**: 22개 Wiki가 125청크로 모두 인덱싱되며 삭제·누락·구버전 청크가 없다.
-> 🚧 **데이터 분류 Phase 1 진행 중**: `docs/DATA_CLASSIFICATION.md`에 코드·DB·노트 전수 분류와 목표 스키마를 확정했다.
+> ✅ **원칙 Wiki/RAG 정합성 점검 완료**: 현재 24개 Wiki가 134청크로 모두 인덱싱되며 삭제·누락·구버전 청크가 없다.
+> ✅ **데이터 분류 Phase 1 완료**: `docs/DATA_CLASSIFICATION.md`의 분류·보호·물리 경계를 실제 `private-v1` 레이아웃에 적용했다.
 > ✅ **P0 노출 경로 차단 완료**: Paper UI는 `127.0.0.1:8080`만 사용하고 agent bot 파일 읽기는 프로젝트 scripts/docs/README와 vault wiki의 허용 텍스트만 접근한다.
 > ✅ **P1 로컬 보호 완료**: Private 파일 600/디렉터리 700, FileVault 로컬 SQLite 온라인 백업과 메모리 복구 검증, 매주 일요일 03:30 자동 실행을 적용했다.
-> ✅ **물리 분리 1차 호환 코드 완료**: `storage_paths.py`가 `legacy`/`private-v1`을 중앙 관리하며 현재는 설정 파일 없이 `legacy`를 유지한다. 데이터 이동·서비스 재시작은 하지 않았다.
-> ✅ **2차 전환 도구 준비 완료**: `migrate_storage.py`가 최근 복구 백업·서비스 중지 확인을 강제하고 원본 보존, assistant DB 병합, 파일 해시 검증, 설정 마지막 기록을 수행한다. 실제 프로젝트에서는 읽기 전용 plan만 확인했다.
-> 다음 작업은 별도 승인 후 최신 백업 생성 → AI-agent 서비스 중지 → 실제 복사·검증·전환이다. Time Machine이 없어 디스크 고장 대비 외부 사본은 별도로 마련해야 한다.
+> ✅ **물리 분리 전환 완료**: `storage_paths.py`가 선택한 활성 레이아웃은 `private-v1`이다. `paper.db`와 통합 `assistant.db`, RAG·상태·로그는 `data/private`, 공개 캐시·샘플은 `data/shareable`을 사용한다.
+> ✅ **비파괴 전환 검증 완료**: 최신 legacy 백업 → AI-agent 서비스 중지 → 복사·DB 병합·해시 검증 → 레이아웃 활성화 → 서비스 재기동을 완료했다. legacy 원본은 삭제하지 않고 보존한다.
+> ✅ **운영 검증**: Paper UI 8080 HTTP 200, Telegram/watch_raw 정상, Tapnow 8082·Ollama 11434 유지, DB 행 수 일치, 전환 후 2개 DB 복구 백업 성공, 전체 테스트 1,048개 통과.
+> 🚧 **다음 단계는 Phase 2 서버화**: 데이터 접근 API의 private/shareable 경계를 먼저 고정하고, 직접 파일·DB 접근을 작은 단위로 API 경유로 전환한다. Time Machine이 없어 디스크 고장 대비 외부 사본은 별도 운영 과제다.
 > 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
@@ -67,11 +68,22 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 - 깨진 Wiki 링크 교정 + `IPO_매력지수_기준.md`를 현재 코드 기준으로 추가.
 - 핵심 자산배분을 위험 65% / 안전 30% / 현금 5%로 정합화.
 - 증분 인덱서가 삭제된 파일 청크와 짧은 Wiki 노트를 자동 동기화하도록 보강.
-- Wiki 22개 = 인덱스 22개, 125청크, stale/missing/outdated 0건.
+- 정리 당시 Wiki 22개 = 인덱스 22개, 125청크였고, 현재는 24개/134청크로 증가했으며 stale/missing/outdated 0건을 유지한다.
 - 전체 회귀 테스트 1,030개 통과.
 
+### ✅ Phase 1 Private/Shareable 물리 분리 완료 (2026-08-22) ← NEW
+- 활성 레이아웃을 `legacy`에서 `private-v1`으로 전환했다.
+- `data/private/paper.db`는 legacy와 행 수가 일치한다: portfolios 1 / positions 2 / trades 155 / slots 4 / ipo_records 0.
+- `data/private/assistant.db`에 events 5 / event_pre_notifications 4 / watchlist 0을 병합했다.
+- RAG는 현재 Vault 기준 24문서 / 134청크이며 missing/stale/outdated 0건이다.
+- `data/shareable`에서 chat_id·포트폴리오·거래·개인 상태 파일이 발견되지 않았다.
+- Private 파일 600 / 디렉터리 700, 전환 후 `paper.db`·`assistant.db` 온라인 백업과 메모리 복구를 검증했다.
+- Paper UI 8080, Telegram, watch_raw를 새 경로로 재기동했다. Tapnow 8082와 Ollama 11434는 중단하지 않았다.
+- legacy DB·RAG·로그는 롤백용으로 보존하며 삭제는 별도 승인 사항이다.
+- 전환 직후 전체 회귀 테스트 1,048개 통과. 다음 트랙은 Phase 2 API 서버화다.
+
 ### ✅ 개인 관심종목 자연어 관리 (watchlist v1) ← NEW
-- `watchlist_store.py`: ignored `data/private.db`에 ticker PK로 멱등 추가·삭제·조회. MCP 미노출.
+- `watchlist_store.py`: 당시 ignored `data/private.db`에 구현했고 현재는 `data/private/assistant.db`로 병합·전환. ticker PK 멱등 추가·삭제·조회, MCP 미노출.
 - `watchlist_bot.py`: 기존 KRX 종목 해석기를 재사용해 유효 종목만 저장.
 - `router.py`: `watchlist_bot(add/remove/list)` Function Calling 등록 + 명백한 발화 결정론 안전망.
 - `telegram_bot.py`: 라우팅 결과를 실행하고 추가·중복·목록·삭제 응답.

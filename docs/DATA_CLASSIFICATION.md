@@ -33,16 +33,15 @@
 
 | 자산 | 현재 위치·스키마 | 이유 | 소비 주체 |
 |---|---|---|---|
-| 모의투자 | `data/paper.db`: portfolios, slots, positions, trades, ipo_records | 자산 규모·포지션·155건 거래 이력 | paper UI, Telegram, analytics/backtest |
-| 일정 | `data/schedule.db`: events, event_pre_notifications | 일정 제목·메모·chat_id | Telegram 일정봇 |
-| 관심종목 | `data/private.db`: watchlist | 개인 관심사 | watchlist bot |
-| 자연어 자동작업 | `data/action_schedules.json` | 개인 루틴·발송 이력 | action scheduler |
+| 모의투자 | `data/private/paper.db`: portfolios, slots, positions, trades, ipo_records | 자산 규모·포지션·155건 거래 이력 | paper UI, Telegram, analytics/backtest |
+| 일정·관심종목 | `data/private/assistant.db`: events, event_pre_notifications, watchlist | 일정·chat_id·개인 관심사 | Telegram 일정·watchlist bot |
+| 자연어 자동작업 | `data/private/state/action_schedules.json` | 개인 루틴·발송 이력 | action scheduler |
 | 개인 RAG 원본 | `obsidian-vault/wiki`, `raw` | 투자 원칙·판단·메모 | local Gemma, indexer |
-| 개인 RAG 파생 | `data/lancedb` | Private 원문의 청크·임베딩 | knowledge/invest/finance bot |
+| 개인 RAG 파생 | `data/private/rag` | Private 원문의 청크·임베딩 | knowledge/invest/finance bot |
 | 성과·판단 상태 | `perf_history.json`, `phase_by_month.json`, `intraday_peaks.json` | 성과·국면 판단·현재 포지션 파생 | analytics/monitor |
 | 발송·행동 이력 | `*_last.json`, `signal_last.json`, `news_seen.json` | chat별 발송 및 관심 행동 이력 | Telegram jobs |
-| 정제 이력 | `data/raw_processed.json` | 개인 노트 경로·처리 결과 | refine/watch raw |
-| 로그·리포트 | `data/logs`, `data/*.log`, `data/reports` | 사용자 요청·종목·오류·운영 메타 포함 가능 | 운영 진단 |
+| 정제 이력 | `data/private/state/raw_processed.json` | 개인 노트 경로·처리 결과 | refine/watch raw |
+| 로그·리포트 | `data/private/logs`, `data/private/reports` | 사용자 요청·종목·오류·운영 메타 포함 가능 | 운영 진단 |
 
 Vault 전체는 현재 하나의 Private 지식창고로 취급한다. 공개 가능한 팩터 설명이 섞여
 있더라도 원칙·자산배분·개인 메모와 같은 인덱스에 들어가므로, 원본이나 LanceDB를
@@ -54,8 +53,8 @@ Vault 전체는 현재 하나의 Private 지식창고로 취급한다. 공개 �
 |---|---|---|---|
 | 종목·법인 마스터 | `corp_codes.json`, `ticker_map_*.json`, `etf_map_*.json` | 공개 거래소·DART 데이터 | instrument lookup |
 | 시장 universe | `universe_*.json` | 공개 종목 구성 | list instruments |
-| OHLCV | `data/cache/ohlcv/*.json` | 공개 시세 | get price/history |
-| DART/KIND 원천·검증 샘플 | `dart_finance_validation.csv`, `ipo_samples/*`, `dart_metrics_cache.json` | 공개 공시·공개 웹 | get fundamentals/IPO facts |
+| OHLCV | `data/shareable/cache/ohlcv/*.json` | 공개 시세 | get price/history |
+| DART/KIND 원천·검증 샘플 | `data/shareable/samples/*`, `data/shareable/cache/dart_metrics_cache.json` | 공개 공시·공개 웹 | get fundamentals/IPO facts |
 | 경제지표 원천 | 런타임 ECOS/FRED 응답 | 공개 통계 | get macro indicator |
 | 순수 계산 로직 | RSI/MACD, 팩터 계산, 국면 분류, 백테스트 엔진 | 일반화 가능 | calc indicator/factor/backtest |
 
@@ -89,8 +88,8 @@ Vault 전체는 현재 하나의 Private 지식창고로 취급한다. 공개 �
 
 ## 4. 목표 물리 경계와 DB 스키마
 
-Phase 1에서는 아래 경계를 확정한다. 실제 경로 이동은 서비스 중단과 데이터 마이그레이션이
-필요하므로 별도 승인 후 수행한다.
+Phase 1에서 아래 경계를 확정했고, 2026-08-22 승인된 비파괴 마이그레이션으로 실제
+`private-v1` 레이아웃에 적용했다.
 
 ```text
 data/
@@ -160,7 +159,7 @@ MCP 구현 시 데이터 경로를 인자로 받지 않고, 서버 내부의 Sha
 | P1 | ✅ | Private DB·RAG·상태 파일 권한 | 파일 600, 디렉터리 700 적용. launchd 서비스 기본 `umask 077` |
 | P1 | ✅ | Private SQLite 손상·오삭제 복구 | FileVault 로컬 경로에 주간 online backup, integrity check와 메모리 복구 검증 적용 |
 | P1 | ⚠️ | 같은 디스크에만 백업 | Time Machine 대상 없음. 암호화된 외부·원격 사본 추가 필요 |
-| P1 | ⚠️ | Private/Shareable 파일이 같은 `data/` 아래 혼재 | 위 목표 디렉터리로 단계적 이동, 호환 경로 기간 운영 |
+| P1 | ✅ | Private/Shareable 파일이 같은 `data/` 아래 혼재 | `data/private`와 `data/shareable`로 물리 분리, legacy 원본은 롤백용 보존 |
 | P2 | ⚠️ | SQLite SHM로 확인된 고아 `.fuse_hidden*` 25개(800KB) | 서비스 미사용 확인 후 승인받아 삭제 |
 | P2 | ⚠️ | 삭제된 web UI의 로그 약 847KB 잔존 | 보존 기간 확인 후 승인받아 삭제 |
 
@@ -175,9 +174,12 @@ MCP 구현 시 데이터 경로를 인자로 받지 않고, 서버 내부의 Sha
 - [x] 로컬 SQLite 백업·복구 절차 구현 및 검증
 - [x] legacy/private-v1 경로 호환 계층 적용
 - [x] 비파괴 마이그레이션·검증 도구 구현
-- [ ] 물리 경로 마이그레이션
+- [x] 물리 경로 마이그레이션
 
-분류·스키마 설계, P0 차단, 로컬 권한·DB 백업과 경로 호환 계층은 완료됐다. 현재 활성 레이아웃은 `legacy`이며 실제 데이터는 이동하지 않았다. `docs/STORAGE_MIGRATION.md`의 복사·검증·전환까지 끝나야 Phase 2 서버화로 넘어간다. 같은 디스크 장애 대비 사본은 별도 운영 과제로 남는다.
+Phase 1은 완료됐다. 현재 활성 레이아웃은 `private-v1`이며 Paper DB, 통합 assistant DB,
+RAG·상태·로그와 공개 캐시·샘플이 물리적으로 분리됐다. 전환 시 legacy 원본은 보존했고
+DB 행 수·파일 해시·RAG 정합성·서비스·복구 백업·전체 테스트를 검증했다. 다음 단계는
+Phase 2 서버화이며, 같은 디스크 장애 대비 외부 사본은 별도 운영 과제로 남는다.
 
 ## 8. Private 보호 운영
 
@@ -186,8 +188,10 @@ MCP 구현 시 데이터 경로를 인자로 받지 않고, 서버 내부의 Sha
 - 권한 + 백업: `python scripts/private_data_security.py all`
 - 기본 백업 위치: `~/울트론/private-backups/ai-agent/<timestamp>/`
 - 자동 실행: launchd `com.hyunjun.ai-agent.private-backup`, 매주 일요일 03:30
-- 대상 DB: `paper.db`, `schedule.db`, `private.db`
+- 대상 DB: 활성 `private-v1`에서는 `paper.db`, `assistant.db` (legacy 백업은 기존 3개 DB)
 - 검증: 각 사본에 `PRAGMA integrity_check`를 실행하고 메모리 DB로 복구한 뒤 스키마와 테이블 행 수를 비교한다.
 - 보존: 기존 스냅샷을 자동 삭제하지 않는다.
 
-2026-08-22 첫 스냅샷은 세 DB 모두 `integrity=ok`, `restore_verified=true`를 통과했다. FileVault는 켜져 있으나 Time Machine 대상은 설정되어 있지 않다.
+2026-08-22 전환 전 스냅샷은 legacy 세 DB, 전환 후 스냅샷은 `paper.db`와
+`assistant.db` 모두 `integrity=ok`, `restore_verified=true`를 통과했다. FileVault는 켜져
+있으나 Time Machine 대상은 설정되어 있지 않다.

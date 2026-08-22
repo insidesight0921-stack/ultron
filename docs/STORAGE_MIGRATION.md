@@ -1,6 +1,6 @@
 # Private / Shareable 물리 분리 실행서
 
-> 상태: 1차 호환 코드 + 2차 전용 마이그레이션 도구 완료, 실제 레이아웃은 `legacy`
+> 상태: 2026-08-22 실제 전환 및 운영 검증 완료, 활성 레이아웃은 `private-v1`
 > 원칙: 복사 → 검증 → 전환. 기존 파일 삭제는 별도 승인 전까지 금지한다.
 
 ## 1. 레이아웃 선택 방식
@@ -11,8 +11,9 @@
 2. 없으면 ignored 로컬 파일 `data/storage-layout.json`을 읽는다.
 3. 파일이 없거나 값이 잘못되면 안전하게 `legacy`를 선택한다.
 
-지원 값은 `legacy`, `private-v1` 두 개뿐이다. 현재 설정 파일이 없으므로 기존
-`data/` 경로를 그대로 사용한다. 코드 배포만으로 데이터 위치가 바뀌지 않는다.
+지원 값은 `legacy`, `private-v1` 두 개뿐이다. 현재 ignored 로컬 설정 파일이
+`private-v1`을 선택한다. 설정 파일을 Git에 넣지 않아 worktree가 운영 데이터 경로를
+암묵적으로 활성화하지 않도록 한다.
 
 ## 2. 목표 매핑
 
@@ -55,7 +56,7 @@ python scripts/migrate_storage.py apply \
 4. `paper.db`는 SQLite online backup으로 새 위치에 복제한다.
 5. `schedule.db`와 `private.db`를 새 `assistant.db`에 테이블 단위로 병합한다.
 6. RAG·상태·로그·리포트·공개 캐시는 복사하고 파일 해시를 비교한다.
-7. DB integrity, 스키마, 테이블 행 수와 RAG 22문서/125청크를 검증한다.
+7. DB integrity, 스키마, 테이블 행 수와 현재 Vault/RAG 문서·청크 정합성을 검증한다.
 8. `data/storage-layout.json`에 `{"layout":"private-v1"}`을 mode 600으로 기록한다.
 9. 서비스 설정을 다시 생성하고 AI-agent 서비스를 시작한다.
 10. Paper UI, 텔레그램, watch_raw, 백업 스케줄과 새 로그 경로를 확인한다.
@@ -69,7 +70,7 @@ python scripts/migrate_storage.py apply \
 - 텔레그램과 watch_raw 정상 기동
 - `paper.db`: 기존 테이블별 행 수와 일치
 - `assistant.db`: 일정·알림·관심종목 행 수와 일치
-- RAG: Wiki 22개, 125청크, missing/stale/outdated 0
+- RAG: 현재 Wiki 24개, 134청크, missing/stale/outdated 0
 - 새 로그가 `data/private/logs`에만 생성
 - 새 온라인 백업이 `paper.db`, `assistant.db` 모두 복구 검증 통과
 - 전체 테스트 통과
@@ -93,5 +94,10 @@ python scripts/migrate_storage.py apply \
 
 경로를 직접 받는 테스트 API는 그대로 유지해 실제 DB와 테스트 DB의 격리를 보존한다.
 
-2026-08-22 실제 프로젝트에서 `plan` 모드가 legacy DB 3개, Private 캐시 7개와
-Shareable 캐시 32개를 모두 분류했다. 새 디렉터리나 레이아웃 설정은 생성하지 않았다.
+2026-08-22 실제 프로젝트에서 legacy DB 3개, Private 캐시 7개와 Shareable 캐시
+32개를 분류한 뒤 승인된 전환을 실행했다. Paper DB는 portfolios 1 / positions 2 /
+trades 155 / slots 4 / ipo_records 0으로 일치했고, 통합 assistant DB는 events 5 /
+event_pre_notifications 4 / watchlist 0으로 일치했다. Paper UI는 8080에서 HTTP 200,
+Telegram과 watch_raw는 새 경로로 기동했으며 Tapnow 8082와 Ollama 11434는 유지됐다.
+전환 후 `paper.db`·`assistant.db` 백업은 메모리 복구 검증을 통과했고 전체 테스트는
+1,048개 통과했다. legacy 원본은 삭제하지 않고 보존한다.

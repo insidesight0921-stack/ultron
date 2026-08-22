@@ -41,7 +41,13 @@ ai-agent/
 - [ ] 5단계: 투자봇 고도화 + 모의투자 사이트 (진행 중)
 - [ ] 6단계: 외부 API + 팩터 리서치봇
 
-목표 아키텍처의 Phase 1 데이터 경계는 [`docs/DATA_CLASSIFICATION.md`](docs/DATA_CLASSIFICATION.md)에서 관리합니다. 현재 분류·목표 스키마, P0 노출 차단, Private 권한과 로컬 DB 백업이 완료됐습니다. 물리 분리는 [`docs/STORAGE_MIGRATION.md`](docs/STORAGE_MIGRATION.md)의 복사·검증·전환 절차를 따릅니다.
+목표 아키텍처 진행 상태:
+
+- [x] Phase 1: Private/Shareable 분류·보호·물리 분리 (`private-v1`)
+- [ ] Phase 2: 데이터 API 서버화 (Shareable 읽기 API 골격 진행 중)
+- [ ] Phase 3: Shareable 도구만 MCP 서버로 노출
+
+목표 아키텍처의 Phase 1 데이터 경계는 [`docs/DATA_CLASSIFICATION.md`](docs/DATA_CLASSIFICATION.md)에서 관리합니다. 실제 전환 결과와 보존·롤백 절차는 [`docs/STORAGE_MIGRATION.md`](docs/STORAGE_MIGRATION.md), Phase 2 API 경계와 점진 전환 순서는 [`docs/API_SERVERIZATION.md`](docs/API_SERVERIZATION.md)를 따릅니다.
 
 관심종목은 `storage_paths.py`가 선택한 Private DB에만 저장되며 Git/MCP에 노출하지 않습니다.
 
