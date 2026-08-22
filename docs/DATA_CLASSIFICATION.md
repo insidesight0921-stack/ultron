@@ -157,8 +157,9 @@ MCP 구현 시 데이터 경로를 인자로 받지 않고, 서버 내부의 Sha
 |---|---|---|---|
 | P0 | ✅ | Paper UI 외부 인터페이스 노출 | 자동 실행을 `127.0.0.1:8080`으로 제한. 원격 필요 시 Tailscale IP + 인증 적용 |
 | P0 | ✅ | agent bot의 광범위한 파일 읽기 | scripts/docs/README/wiki와 텍스트 확장자 allowlist 적용, `.env`·DB·로그·숨김 경로 차단 |
-| P1 | ⚠️ | Private DB·RAG·상태 파일 권한이 644/755 | `data/private` 700, 파일 600 기본값 적용 |
-| P1 | ⚠️ | Private DB 백업 없음 | SQLite online backup으로 암호화된 주간 백업 + 복구 테스트 |
+| P1 | ✅ | Private DB·RAG·상태 파일 권한 | 파일 600, 디렉터리 700 적용. launchd 서비스 기본 `umask 077` |
+| P1 | ✅ | Private SQLite 손상·오삭제 복구 | FileVault 로컬 경로에 주간 online backup, integrity check와 메모리 복구 검증 적용 |
+| P1 | ⚠️ | 같은 디스크에만 백업 | Time Machine 대상 없음. 암호화된 외부·원격 사본 추가 필요 |
 | P1 | ⚠️ | Private/Shareable 파일이 같은 `data/` 아래 혼재 | 위 목표 디렉터리로 단계적 이동, 호환 경로 기간 운영 |
 | P2 | ⚠️ | SQLite SHM로 확인된 고아 `.fuse_hidden*` 25개(800KB) | 서비스 미사용 확인 후 승인받아 삭제 |
 | P2 | ⚠️ | 삭제된 web UI의 로그 약 847KB 잔존 | 보존 기간 확인 후 승인받아 삭제 |
@@ -170,8 +171,21 @@ MCP 구현 시 데이터 경로를 인자로 받지 않고, 서버 내부의 Sha
 - [x] MCP allow/deny 경계 초안
 - [x] Private/Shareable 목표 DB 스키마 확정
 - [x] P0 노출 경로 2건 차단
-- [ ] Private 파일 권한 정책 적용
-- [ ] 백업·복구 절차 구현 및 검증
+- [x] Private 파일 권한 정책 적용
+- [x] 로컬 SQLite 백업·복구 절차 구현 및 검증
 - [ ] 물리 경로 마이그레이션
 
-분류·스키마 설계와 P0 차단은 완료됐다. 권한·백업·물리 분리까지 끝나야 Phase 2 서버화로 넘어간다.
+분류·스키마 설계, P0 차단, 로컬 권한·DB 백업은 완료됐다. 물리 분리까지 끝나야 Phase 2 서버화로 넘어간다. 같은 디스크 장애 대비 사본은 별도 운영 과제로 남는다.
+
+## 8. Private 보호 운영
+
+- 권한 적용: `python scripts/private_data_security.py secure`
+- 즉시 백업: `python scripts/private_data_security.py backup`
+- 권한 + 백업: `python scripts/private_data_security.py all`
+- 기본 백업 위치: `~/울트론/private-backups/ai-agent/<timestamp>/`
+- 자동 실행: launchd `com.hyunjun.ai-agent.private-backup`, 매주 일요일 03:30
+- 대상 DB: `paper.db`, `schedule.db`, `private.db`
+- 검증: 각 사본에 `PRAGMA integrity_check`를 실행하고 메모리 DB로 복구한 뒤 스키마와 테이블 행 수를 비교한다.
+- 보존: 기존 스냅샷을 자동 삭제하지 않는다.
+
+2026-08-22 첫 스냅샷은 세 DB 모두 `integrity=ok`, `restore_verified=true`를 통과했다. FileVault는 켜져 있으나 Time Machine 대상은 설정되어 있지 않다.

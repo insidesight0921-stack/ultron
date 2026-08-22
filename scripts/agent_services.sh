@@ -20,6 +20,7 @@
 #   bash agent_services.sh uninstall   # 완전 제거
 # ===============================================================
 set -euo pipefail
+umask 077
 
 PROJECT="$HOME/울트론/ai-agent"
 SCRIPTS="$PROJECT/scripts"
@@ -33,12 +34,14 @@ LABEL_TG="com.hyunjun.ai-agent.telegram"
 LABEL_PAPER="com.hyunjun.ai-agent.paper"
 LABEL_WEEKLY="com.hyunjun.ai-agent.weekly-kium-scan"
 LABEL_LOG_ROTATE="com.hyunjun.ai-agent.log-rotation"
+LABEL_PRIVATE_BACKUP="com.hyunjun.ai-agent.private-backup"
 
 PLIST_WATCH="$LA_DIR/${LABEL_WATCH}.plist"
 PLIST_TG="$LA_DIR/${LABEL_TG}.plist"
 PLIST_PAPER="$LA_DIR/${LABEL_PAPER}.plist"
 PLIST_WEEKLY="$LA_DIR/${LABEL_WEEKLY}.plist"
 PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
+PLIST_PRIVATE_BACKUP="$LA_DIR/${LABEL_PRIVATE_BACKUP}.plist"
 
 LOG_WATCH_OUT="$DATA_DIR/logs/watch_raw.out.log"
 LOG_WATCH_ERR="$DATA_DIR/logs/watch_raw.err.log"
@@ -48,6 +51,8 @@ LOG_PAPER_OUT="$DATA_DIR/logs/paper_ui.out.log"
 LOG_PAPER_ERR="$DATA_DIR/logs/paper_ui.err.log"
 LOG_WEEKLY_OUT="$DATA_DIR/logs/weekly_kium.out.log"
 LOG_WEEKLY_ERR="$DATA_DIR/logs/weekly_kium.err.log"
+LOG_PRIVATE_BACKUP_OUT="$DATA_DIR/logs/private_backup.out.log"
+LOG_PRIVATE_BACKUP_ERR="$DATA_DIR/logs/private_backup.err.log"
 
 mkdir -p "$LA_DIR" "$DATA_DIR/logs"
 
@@ -73,6 +78,8 @@ write_plist_watch() {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>Umask</key>
+    <integer>63</integer>
     <key>WorkingDirectory</key>
     <string>${PROJECT}</string>
     <key>StandardOutPath</key>
@@ -113,6 +120,8 @@ write_plist_telegram() {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>Umask</key>
+    <integer>63</integer>
     <key>WorkingDirectory</key>
     <string>${PROJECT}</string>
     <key>StandardOutPath</key>
@@ -157,6 +166,8 @@ write_plist_paper() {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>Umask</key>
+    <integer>63</integer>
     <key>WorkingDirectory</key>
     <string>${PROJECT}</string>
     <key>StandardOutPath</key>
@@ -204,6 +215,8 @@ write_plist_weekly() {
         <key>Minute</key>
         <integer>0</integer>
     </dict>
+    <key>Umask</key>
+    <integer>63</integer>
     <key>WorkingDirectory</key>
     <string>${PROJECT}</string>
     <key>StandardOutPath</key>
@@ -244,12 +257,57 @@ write_plist_log_rotation() {
         <key>Minute</key>
         <integer>10</integer>
     </dict>
+    <key>Umask</key>
+    <integer>63</integer>
     <key>WorkingDirectory</key>
     <string>${PROJECT}</string>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
+</dict>
+</plist>
+EOF
+}
+
+write_plist_private_backup() {
+    cat > "$PLIST_PRIVATE_BACKUP" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL_PRIVATE_BACKUP}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${SCRIPTS}/private_data_security.py</string>
+        <string>all</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT}</string>
+    <key>StandardOutPath</key>
+    <string>${LOG_PRIVATE_BACKUP_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_PRIVATE_BACKUP_ERR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>ko_KR.UTF-8</string>
+    </dict>
 </dict>
 </plist>
 EOF
@@ -320,6 +378,9 @@ cmd_install() {
     write_plist_log_rotation
     echo "  ✅ plist 생성: $PLIST_LOG_ROTATE (매일 03:10)"
 
+    write_plist_private_backup
+    echo "  ✅ plist 생성: $PLIST_PRIVATE_BACKUP (매주 일 03:30)"
+
     cmd_start
     echo ""
     echo "🎉 설치 완료. 부팅/로그인 시 자동 시작됩니다."
@@ -341,6 +402,7 @@ cmd_start() {
     [ -f "$PLIST_PAPER" ] && launchctl unload "$PLIST_PAPER" 2>/dev/null || true
     [ -f "$PLIST_WEEKLY" ] && launchctl unload "$PLIST_WEEKLY" 2>/dev/null || true
     [ -f "$PLIST_LOG_ROTATE" ] && launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
+    [ -f "$PLIST_PRIVATE_BACKUP" ] && launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
     sleep 1
 
     # 로드
@@ -358,6 +420,10 @@ cmd_start() {
     if [ -f "$PLIST_LOG_ROTATE" ]; then
         launchctl load "$PLIST_LOG_ROTATE"
         echo "  ✅ 로그 회전 스케줄 등록 (매일 03:10)"
+    fi
+    if [ -f "$PLIST_PRIVATE_BACKUP" ]; then
+        launchctl load "$PLIST_PRIVATE_BACKUP"
+        echo "  ✅ Private 백업 스케줄 등록 (매주 일 03:30)"
     fi
     echo "▶️  서비스 시작됨"
     sleep 2
@@ -378,6 +444,9 @@ cmd_stop() {
     if [ -f "$PLIST_LOG_ROTATE" ]; then
         launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null && echo "⏸  로그 회전 중지" || echo "(로그 회전 이미 중지됨)"
     fi
+    if [ -f "$PLIST_PRIVATE_BACKUP" ]; then
+        launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null && echo "⏸  Private 백업 중지" || echo "(Private 백업 이미 중지됨)"
+    fi
 }
 
 cmd_restart() {
@@ -396,6 +465,7 @@ cmd_status() {
     [ -f "$PLIST_PAPER" ] && LABELS+=("$LABEL_PAPER")
     [ -f "$PLIST_WEEKLY" ] && LABELS+=("$LABEL_WEEKLY")
     [ -f "$PLIST_LOG_ROTATE" ] && LABELS+=("$LABEL_LOG_ROTATE")
+    [ -f "$PLIST_PRIVATE_BACKUP" ] && LABELS+=("$LABEL_PRIVATE_BACKUP")
 
     for label in "${LABELS[@]}"; do
         info=$(launchctl list | grep "$label" || echo "")
@@ -486,6 +556,17 @@ cmd_install_log_rotation() {
     echo "✅ 로그 회전 설치: 매일 03:10, 10MiB, 압축 백업 5개"
 }
 
+cmd_install_private_backup() {
+    if [ ! -f "$SCRIPTS/private_data_security.py" ]; then
+        echo "❌ 실행 파일 없음: $SCRIPTS/private_data_security.py"
+        exit 1
+    fi
+    write_plist_private_backup
+    launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
+    launchctl load "$PLIST_PRIVATE_BACKUP"
+    echo "✅ Private 백업 설치: 매주 일요일 03:30, 자동 삭제 없음"
+}
+
 cmd_rotate_logs() {
     bash "$SCRIPTS/rotate_logs.sh"
 }
@@ -505,7 +586,8 @@ cmd_uninstall() {
     echo "🗑  AI Agent 서비스 제거 중..."
     cmd_stop
     launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
-    rm -f "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_LOG_ROTATE"
+    launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
+    rm -f "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_LOG_ROTATE" "$PLIST_PRIVATE_BACKUP"
     echo "  ✅ plist 파일 삭제"
     echo ""
     echo "완전히 제거되었습니다. 데이터(wiki, LanceDB, 로그)는 그대로 보존됩니다."
@@ -525,6 +607,7 @@ AI Agent 서비스 관리
   bash $0 logs        최근 로그 보기
   bash $0 follow      실시간 로그 (Ctrl+C로 종료)
   bash $0 install-log-rotation  로그 회전만 설치 (매일 03:10)
+  bash $0 install-private-backup  Private DB 주간 백업만 설치
   bash $0 rotate-logs 현재 10MiB 이상 로그 즉시 회전
   bash $0 uninstall   서비스 제거 (데이터는 보존)
 
@@ -549,6 +632,7 @@ case "${1:-help}" in
     logs)       cmd_logs ;;
     follow)     cmd_logs_follow ;;
     install-log-rotation) cmd_install_log_rotation ;;
+    install-private-backup) cmd_install_private_backup ;;
     rotate-logs) cmd_rotate_logs ;;
     uninstall)  cmd_uninstall ;;
     *)          cmd_help ;;

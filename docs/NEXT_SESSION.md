@@ -5,7 +5,8 @@
 > ✅ **원칙 Wiki/RAG 정합성 점검 완료**: 22개 Wiki가 125청크로 모두 인덱싱되며 삭제·누락·구버전 청크가 없다.
 > 🚧 **데이터 분류 Phase 1 진행 중**: `docs/DATA_CLASSIFICATION.md`에 코드·DB·노트 전수 분류와 목표 스키마를 확정했다.
 > ✅ **P0 노출 경로 차단 완료**: Paper UI는 `127.0.0.1:8080`만 사용하고 agent bot 파일 읽기는 프로젝트 scripts/docs/README와 vault wiki의 허용 텍스트만 접근한다.
-> 다음 작업은 Private 파일 권한 600/700, 백업·복구 검증, 물리 경로 분리다.
+> ✅ **P1 로컬 보호 완료**: Private 파일 600/디렉터리 700, FileVault 로컬 SQLite 온라인 백업과 메모리 복구 검증, 매주 일요일 03:30 자동 실행을 적용했다.
+> 다음 작업은 `data/private`/`data/shareable` 물리 경로 분리다. Time Machine이 없어 디스크 고장 대비 외부 사본은 별도로 마련해야 한다.
 > 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
