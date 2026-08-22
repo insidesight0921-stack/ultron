@@ -3,7 +3,9 @@
 > 데이터는 `data/private.db`에만 저장되며 git/MCP에 노출하지 않는다.
 >
 > ✅ **원칙 Wiki/RAG 정합성 점검 완료**: 22개 Wiki가 125청크로 모두 인덱싱되며 삭제·누락·구버전 청크가 없다.
-> ⏭️ **다음 작업은 데이터 분류 Phase 1**: 코드·DB·노트를 private/shareable로 전수 매핑하고 API/MCP 접근 경계를 확정한다.
+> 🚧 **데이터 분류 Phase 1 진행 중**: `docs/DATA_CLASSIFICATION.md`에 코드·DB·노트 전수 분류와 목표 스키마를 확정했다.
+> ✅ **P0 노출 경로 차단 완료**: Paper UI는 `127.0.0.1:8080`만 사용하고 agent bot 파일 읽기는 프로젝트 scripts/docs/README와 vault wiki의 허용 텍스트만 접근한다.
+> 다음 작업은 Private 파일 권한 600/700, 백업·복구 검증, 물리 경로 분리다.
 > 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
@@ -288,8 +290,8 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 - **요청**: 새 봇 코딩 없이 텔레그램 명령으로 임의 작업 수행("너처럼"). 사용자가 **로컬 Gemma 기반** 선택.
 - **scripts/agent_bot.py 신규**: ReAct JSON 액션 루프(라우터와 동일 검증된 Gemma JSON 방식). 도구 레지스트리 +
   step cap(5) + 파싱실패/도구오류/LLM실패 graceful + 관찰 길이 제한.
-- **안전(v1 경계)**: 임의 셸/코드 실행·파일 쓰기 **제외**. 읽기 전용 + 경로 샌드박스(ALLOWED_ROOTS=프로젝트/볼트,
-  경로 탈출 차단). 등록 도구: read_file, list_files, news, signal_scan, ipo_scan, quant_phase, rag_search.
+- **안전(v1 경계)**: 임의 셸/코드 실행·파일 쓰기 **제외**. 읽기 전용 + allowlist(프로젝트 scripts/docs/README,
+  vault wiki의 허용 텍스트만 접근, 경로 탈출·숨김 파일·DB 차단). 등록 도구: read_file, list_files, news, signal_scan, ipo_scan, quant_phase, rag_search.
 - **telegram v3.42**: `/agent <명령>` 핸들러 + `_setup_agent_tools()`(기존 봇을 에이전트 도구로 등록). /help 갱신.
 - **테스트**: test_agent_bot 17(루프·파싱·샌드박스·step cap·예외). 전체 회귀 416 PASS.
 - **한계(정직)**: Gemma는 다단계 도구 사용 신뢰도가 중간. 기존 도구 조합·파일 읽기·요약엔 적합, novel 코딩/실행은 약함.

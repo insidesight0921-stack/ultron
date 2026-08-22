@@ -2,7 +2,7 @@
 """
 Paper Trading UI — 5단계 검증 사이트 골격 (v3.18 MVP).
 
-브라우저 http://localhost:8080 (또는 Tailscale IP).
+브라우저 http://localhost:8080.
 
 기능 (MVP):
 - 슬롯별 자본·포지션 대시보드
@@ -17,7 +17,8 @@ Paper Trading UI — 5단계 검증 사이트 골격 (v3.18 MVP).
 
 사용:
     python paper_ui.py                   # 기본: localhost:8080
-    python paper_ui.py --host 0.0.0.0    # Tailscale 모바일 접속
+    # 원격 접속은 인증을 적용한 뒤 Tailscale IPv4를 명시적으로 지정한다.
+    python paper_ui.py --host <Tailscale IPv4>
 """
 from __future__ import annotations
 

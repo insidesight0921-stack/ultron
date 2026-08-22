@@ -106,6 +106,20 @@ def test_read_file_within_sandbox(tmp_path, monkeypatch):
     assert ab._tool_read_file({"path": str(f)}) == "안녕"
 
 
+def test_read_file_disallowed_extension_blocked(tmp_path, monkeypatch):
+    f = tmp_path / "private.db"
+    f.write_bytes(b"sqlite")
+    monkeypatch.setattr(ab, "ALLOWED_ROOTS", [tmp_path])
+    assert "오류" in ab._tool_read_file({"path": str(f)})
+
+
+def test_read_file_hidden_path_blocked(tmp_path, monkeypatch):
+    hidden = tmp_path / ".env"
+    hidden.write_text("TOKEN=secret", encoding="utf-8")
+    monkeypatch.setattr(ab, "ALLOWED_ROOTS", [tmp_path])
+    assert "오류" in ab._tool_read_file({"path": str(hidden)})
+
+
 def test_read_file_outside_sandbox_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr(ab, "ALLOWED_ROOTS", [tmp_path])
     # /etc/passwd 같은 외부 경로 차단
@@ -127,6 +141,22 @@ def test_list_files_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(ab, "ALLOWED_ROOTS", [tmp_path])
     out = ab._tool_list_files({"dir": str(tmp_path), "pattern": "*.md"})
     assert "x.md" in out and "y.md" in out
+
+
+def test_list_files_filters_private_and_hidden_files(tmp_path, monkeypatch):
+    (tmp_path / "safe.md").write_text("ok", encoding="utf-8")
+    (tmp_path / "private.db").write_bytes(b"sqlite")
+    (tmp_path / ".env").write_text("TOKEN=secret", encoding="utf-8")
+    monkeypatch.setattr(ab, "ALLOWED_ROOTS", [tmp_path])
+    out = ab._tool_list_files({"dir": str(tmp_path), "pattern": "*"})
+    assert "safe.md" in out
+    assert "private.db" not in out
+    assert ".env" not in out
+
+
+def test_default_policy_blocks_project_private_data():
+    assert "오류" in ab._tool_read_file({"path": str(ab.PROJECT_ROOT / ".env")})
+    assert "오류" in ab._tool_read_file({"path": str(ab.PROJECT_ROOT / "data" / "paper.db")})
 
 
 def test_list_files_outside_blocked(tmp_path, monkeypatch):

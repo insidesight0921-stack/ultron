@@ -41,6 +41,8 @@ ai-agent/
 - [ ] 5단계: 투자봇 고도화 + 모의투자 사이트 (진행 중)
 - [ ] 6단계: 외부 API + 팩터 리서치봇
 
+목표 아키텍처의 Phase 1 데이터 경계는 [`docs/DATA_CLASSIFICATION.md`](docs/DATA_CLASSIFICATION.md)에서 관리합니다. 현재 분류·목표 스키마 설계와 P0 노출 경로 차단이 완료됐고, 권한·백업·물리 분리가 남아 있습니다.
+
 관심종목은 `data/private.db`에만 저장되며 Git/MCP에 노출하지 않습니다.
 
 ## 보안

@@ -146,7 +146,7 @@ write_plist_paper() {
         <string>${PYTHON}</string>
         <string>${SCRIPTS}/paper_ui.py</string>
         <string>--host</string>
-        <string>0.0.0.0</string>
+        <string>127.0.0.1</string>
         <string>--port</string>
         <string>8080</string>
     </array>
@@ -490,6 +490,17 @@ cmd_rotate_logs() {
     bash "$SCRIPTS/rotate_logs.sh"
 }
 
+cmd_restart_paper() {
+    if [ ! -x "$PYTHON" ] || [ ! -f "$SCRIPTS/paper_ui.py" ]; then
+        echo "❌ Paper UI 실행 환경을 찾을 수 없습니다."
+        exit 1
+    fi
+    write_plist_paper
+    launchctl unload "$PLIST_PAPER" 2>/dev/null || true
+    launchctl load "$PLIST_PAPER"
+    echo "✅ Paper UI 재시작: http://127.0.0.1:8080"
+}
+
 cmd_uninstall() {
     echo "🗑  AI Agent 서비스 제거 중..."
     cmd_stop
@@ -510,6 +521,7 @@ AI Agent 서비스 관리
   bash $0 start       시작
   bash $0 stop        중지
   bash $0 restart     재시작
+  bash $0 restart-paper  Paper UI 설정 갱신 + 단독 재시작
   bash $0 logs        최근 로그 보기
   bash $0 follow      실시간 로그 (Ctrl+C로 종료)
   bash $0 install-log-rotation  로그 회전만 설치 (매일 03:10)
@@ -532,6 +544,7 @@ case "${1:-help}" in
     start)      cmd_start ;;
     stop)       cmd_stop ;;
     restart)    cmd_restart ;;
+    restart-paper) cmd_restart_paper ;;
     status)     cmd_status ;;
     logs)       cmd_logs ;;
     follow)     cmd_logs_follow ;;

@@ -37,10 +37,13 @@ MAX_STEPS = 5
 MAX_OBSERVATION_CHARS = 2000
 MAX_FILE_CHARS = 4000
 
-# 파일 접근 샌드박스 — 이 루트 하위만 읽기 허용
+# 파일 접근 샌드박스 — 허용 디렉터리와 텍스트 형식을 모두 만족해야 읽기 허용
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VAULT_ROOT = PROJECT_ROOT.parent / "obsidian-vault"
-ALLOWED_ROOTS = [PROJECT_ROOT, VAULT_ROOT]
+ALLOWED_ROOTS = [PROJECT_ROOT / "scripts", PROJECT_ROOT / "docs", VAULT_ROOT / "wiki"]
+ALLOWED_FILES = [PROJECT_ROOT / "README.md"]
+ALLOWED_SUFFIXES = {".md", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml"}
+PATH_BASES = [PROJECT_ROOT, VAULT_ROOT]
 
 # 쓰기는 오직 이 디렉터리(raw/inbox)만 허용 — watch_raw가 자동 정제→wiki
 INBOX_DIR = VAULT_ROOT / "raw" / "inbox"
@@ -76,13 +79,13 @@ def list_tools() -> list[Tool]:
 
 
 def _resolve_safe(path_str: str) -> Optional[Path]:
-    """ALLOWED_ROOTS 하위로만 해석. 벗어나면 None (경로 탈출 차단)."""
+    """읽기 allowlist 하위로만 해석한다. 경로 탈출·숨김 경로는 차단한다."""
     try:
         p = Path(path_str).expanduser()
         if not p.is_absolute():
-            # 상대경로는 각 루트 기준으로 시도
-            for root in ALLOWED_ROOTS:
-                cand = (root / path_str).resolve()
+            # 기존 wiki/...·scripts/... 호출을 유지하면서 좁은 allowlist를 적용한다.
+            for base in [*PATH_BASES, *ALLOWED_ROOTS]:
+                cand = (base / path_str).resolve()
                 if _within_allowed(cand):
                     return cand
             return None
@@ -93,18 +96,26 @@ def _resolve_safe(path_str: str) -> Optional[Path]:
 
 
 def _within_allowed(p: Path) -> bool:
+    resolved = p.resolve()
+    for allowed_file in ALLOWED_FILES:
+        if resolved == allowed_file.resolve():
+            return True
     for root in ALLOWED_ROOTS:
         try:
-            p.relative_to(root.resolve())
-            return True
+            relative = resolved.relative_to(root.resolve())
+            return not any(part.startswith(".") for part in relative.parts)
         except ValueError:
             continue
     return False
 
 
+def _is_readable_file(p: Path) -> bool:
+    return _within_allowed(p) and p.suffix.lower() in ALLOWED_SUFFIXES
+
+
 def _tool_read_file(args: dict) -> str:
     p = _resolve_safe(str(args.get("path", "")))
-    if p is None or not p.exists() or not p.is_file():
+    if p is None or not p.exists() or not p.is_file() or not _is_readable_file(p):
         return "오류: 허용된 경로의 파일이 아닙니다."
     try:
         txt = p.read_text(encoding="utf-8", errors="replace")
@@ -121,7 +132,11 @@ def _tool_list_files(args: dict) -> str:
     try:
         if base.is_file():
             base = base.parent
-        items = sorted(str(p.relative_to(base)) for p in base.glob(pattern) if p.is_file())
+        items = sorted(
+            str(p.relative_to(base))
+            for p in base.glob(pattern)
+            if p.is_file() and _is_readable_file(p)
+        )
         return "\n".join(items[:100]) or "(파일 없음)"
     except Exception as e:
         return f"오류: 목록 실패 {e}"
@@ -129,10 +144,10 @@ def _tool_list_files(args: dict) -> str:
 
 def register_builtin_tools() -> None:
     register_tool(Tool("read_file",
-                       "허용 경로(프로젝트/볼트) 내 텍스트 파일 내용 읽기",
+                       "허용 경로(프로젝트 scripts/docs, README, 볼트 wiki)의 텍스트 파일 읽기",
                        _tool_read_file, args_hint='{"path": "wiki/투자/리스크_관리_원칙.md"}'))
     register_tool(Tool("list_files",
-                       "허용 경로 내 파일 목록(glob pattern 가능)",
+                       "허용 경로의 텍스트 파일 목록(glob pattern 가능)",
                        _tool_list_files, args_hint='{"dir": "wiki/투자", "pattern": "*.md"}'))
 
 
