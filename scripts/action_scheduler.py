@@ -8,7 +8,7 @@ telegram 디스패처(60초)가 시각 맞으면 해당 봇 실행.
 설계:
   - 순수 로직(CRUD·is_due) — 외부 의존 없음, 단위 테스트 용이.
   - 실제 봇 실행 콜러블은 telegram_bot에서 ACTION_RUNNERS로 주입(여기선 정의만).
-  - 영속: data/action_schedules.json. 멱등: last_fired(YYYY-MM-DD) 동일 occurrence 1회.
+  - 영속: ``storage_paths``의 Private state. 멱등: last_fired(YYYY-MM-DD) 동일 occurrence 1회.
   - freq: "daily" | "weekly"(weekday 0=월~6=일). time "HH:MM". until "YYYY-MM-DD"|None.
 """
 from __future__ import annotations
@@ -20,10 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from storage_paths import PATHS
+
 log = logging.getLogger("action_scheduler")
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_STORE_PATH = _DATA_DIR / "action_schedules.json"
+_DATA_DIR = PATHS.private_root
+_STORE_PATH = PATHS.action_schedules
 
 # 등록 가능한 봇 액션(키) → 사람이 읽는 라벨. 실제 실행 함수는 telegram에서 주입.
 ACTION_LABELS = {

@@ -16,10 +16,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from storage_paths import PATHS
+
 log = logging.getLogger("paper_analytics")
 
 _PROJECT = Path(__file__).resolve().parent.parent
-HISTORY_PATH = _PROJECT / "data" / "cache" / "perf_history.json"
+HISTORY_PATH = PATHS.private_state_file("perf_history.json")
 # 스냅샷에 보존할 슬롯 지표(EWMA 평활·추세용)
 _SNAP_FIELDS = ("n_closed", "total_return_pct", "sharpe", "total_pnl", "win_rate")
 

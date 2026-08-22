@@ -7,10 +7,11 @@ verify_parsers.py — IPO봇 38/KIND 파서 실사 검증 도구 (v3.26)
   python scripts/ipo_bot.py debug-html --source 38
   python scripts/ipo_bot.py debug-html --source kind
 
-  # 위가 안 되면 curl로 직접 저장
-  mkdir -p data/ipo_samples
-  curl -k -o data/ipo_samples/38_raw.html "https://www.38.co.kr/html/fund/index.htm?o=k"
-  curl -k -o data/ipo_samples/kind_raw.html \
+  # 위가 안 되면 storage_paths가 알려주는 샘플 경로에 curl로 직접 저장
+  SAMPLE_DIR="$(python scripts/storage_paths.py shareable_samples_dir)"
+  mkdir -p "$SAMPLE_DIR"
+  curl -k -o "$SAMPLE_DIR/38_raw.html" "https://www.38.co.kr/html/fund/index.htm?o=k"
+  curl -k -o "$SAMPLE_DIR/kind_raw.html" \
     "https://kind.krx.co.kr/listinginfo/iposummary.do?method=searchIpoSummary&forward=iposummary_info"
 
   # Step 2: 파서 검증
@@ -30,8 +31,9 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT / "scripts"))
 
-DATA_DIR   = PROJECT / "data"
-SAMPLE_DIR = DATA_DIR / "ipo_samples"
+from storage_paths import PATHS  # noqa: E402
+
+SAMPLE_DIR = PATHS.shareable_samples_dir
 
 from ipo_bot import (
     _parse_38_html,
@@ -50,7 +52,8 @@ def verify_38(verbose: bool = True) -> bool:
     if not html_path.exists():
         print("❌ 38_raw.html 없음. 먼저 수집하세요:")
         print("   python scripts/ipo_bot.py debug-html --source 38")
-        print("   또는: mkdir -p data/ipo_samples && curl -k -o data/ipo_samples/38_raw.html "
+        print(f"   또는: mkdir -p '{SAMPLE_DIR}' && curl -k -o "
+              f"'{SAMPLE_DIR / '38_raw.html'}' "
               "'https://www.38.co.kr/html/fund/index.htm?o=k'")
         return False
 
@@ -108,7 +111,8 @@ def verify_kind(verbose: bool = True) -> bool:
     if not html_path.exists():
         print("❌ kind_raw.html 없음. 먼저 수집하세요:")
         print("   python scripts/ipo_bot.py debug-html --source kind")
-        print("   또는: mkdir -p data/ipo_samples && curl -k -o data/ipo_samples/kind_raw.html \\")
+        print(f"   또는: mkdir -p '{SAMPLE_DIR}' && curl -k -o "
+              f"'{SAMPLE_DIR / 'kind_raw.html'}' \\")
         print("     'https://kind.krx.co.kr/listinginfo/iposummary.do"
               "?method=searchIpoSummary&forward=iposummary_info'")
         return False

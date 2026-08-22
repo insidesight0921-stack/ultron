@@ -42,11 +42,10 @@ from urllib.error import URLError, HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corp_code_loader import get_dart_key, ROOT  # noqa: E402
+from storage_paths import PATHS  # noqa: E402
 
-DATA_DIR = ROOT / "data"
-DATA_DIR.mkdir(exist_ok=True)
-SAMPLES_DIR = DATA_DIR / "ipo_samples"
-SAMPLES_DIR.mkdir(exist_ok=True)
+SAMPLES_DIR = PATHS.shareable_samples_dir
+SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # DART 공시 유형
@@ -226,7 +225,8 @@ def run_recent(days: int = 30) -> None:
         results.append(r)
 
     # CSV 저장
-    csv_path = DATA_DIR / "ipo_demand_validation.csv"
+    csv_path = PATHS.ipo_demand_validation
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "rcept_dt", "corp_name", "report_nm", "rcept_no",
         "competition_rate", "lockup_ratio",

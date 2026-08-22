@@ -24,9 +24,11 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
+from storage_paths import PATHS
+
 ROOT = Path(__file__).resolve().parent.parent  # ai-agent/
 ENV_PATH = ROOT / ".env"
-CACHE_DIR = ROOT / "data" / "cache"
+CACHE_DIR = PATHS.shareable_cache_dir
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_FILE = CACHE_DIR / "corp_codes.json"
 CACHE_TTL = 86400  # 24시간

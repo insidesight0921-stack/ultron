@@ -6,7 +6,7 @@
 when_at) 파라미터를 채워 호출하면, 이 모듈은 단순 실행자 역할만 한다.
 
 주요 설계 결정:
-- 백엔드: SQLite (ai-agent/data/schedule.db). macOS 비의존, 텔레그램·웹·CLI
+- 백엔드: SQLite (``storage_paths``가 선택한 Private DB). macOS 비의존, 텔레그램·웹·CLI
   공용. 백업/마이그레이션 단순. (Reminders.app 백엔드는 osascript 오버헤드
   + 자연어 파싱 부담 → 보류.)
 - 자연어 일시(예: "다음주 수요일 오후 3시")는 라우터(Gemma 4 26B)가 ISO 8601
@@ -48,9 +48,11 @@ from dateutil.rrule import (
     MO, TU, WE, TH, FR, SA, SU,
 )
 
+from storage_paths import PATHS
+
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
-DEFAULT_DB_PATH = PROJECT / "data" / "schedule.db"
+DEFAULT_DB_PATH = PATHS.schedule_db
 
 log = logging.getLogger("schedule_bot")
 

@@ -35,6 +35,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd  # v3.17: 변동성·MA 계산용
+from storage_paths import PATHS
 
 log = logging.getLogger("kium_bot")
 
@@ -46,7 +47,7 @@ PRICE_TTL_SEC = 1 * 60 * 60  # 1h — 같은 날 반복 스캔 시 캐시
 # in-memory cache: key=(market, date), value=(timestamp, list[(ticker, name)])
 _UNIVERSE_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
 
-_DISK_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "data" / "cache"
+_DISK_CACHE_DIR: Path = PATHS.shareable_cache_dir
 
 
 # ─── universe (KRX 지수 구성종목) ───────────────────

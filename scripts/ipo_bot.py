@@ -46,13 +46,14 @@ from typing import Optional
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 
+from storage_paths import PATHS
+
 log = logging.getLogger("ipo_bot")
 
 # ─── 경로 ────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = ROOT / "scripts"
-DATA_DIR = ROOT / "data"
-CACHE_DIR = DATA_DIR / "cache"
+CACHE_DIR = PATHS.shareable_cache_dir
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # dart_demand_parser 재활용
@@ -1572,7 +1573,7 @@ def _cmd_debug_html(source: str = "38", raw_payload: Optional[str] = None) -> No
     source="kind"    → KIND 공모일정 캘린더 HTML
     source="progcom" → KIND 공모기업현황 테이블 HTML (컬럼 구조 확인 필수)
     """
-    save_dir = DATA_DIR / "ipo_samples"
+    save_dir = PATHS.shareable_samples_dir
     save_dir.mkdir(parents=True, exist_ok=True)
     import re as _re
 

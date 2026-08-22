@@ -27,6 +27,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from storage_paths import PATHS
+
 log = logging.getLogger("signal_bot")
 
 # ─── 워치리스트 (핵심_자산배분_포트폴리오 SSOT) ─────────────
@@ -75,8 +77,8 @@ WIKI_PORTFOLIO_PATH = (
 )
 
 # ─── 캐시 설정 ──────────────────────────────────────
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_CACHE_DIR = _DATA_DIR / "cache"
+_DATA_DIR = PATHS.shareable_root
+_CACHE_DIR = PATHS.shareable_cache_dir
 ETF_MAP_TTL_SEC = 24 * 3600
 _ETF_MAP_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
 

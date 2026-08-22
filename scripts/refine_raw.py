@@ -35,14 +35,16 @@ from urllib.request import Request, urlopen
 import lancedb
 import numpy as np
 
+from storage_paths import PATHS
+
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
 VAULT = HOME / "울트론" / "obsidian-vault"
 RAW = VAULT / "raw"
 WIKI = VAULT / "wiki"
 TEMPLATE_PATH = VAULT / "templates" / "wiki_template.md"
-DB_PATH = PROJECT / "data" / "lancedb"
-PROCESSED_LOG = PROJECT / "data" / "raw_processed.json"
+DB_PATH = PATHS.rag_dir
+PROCESSED_LOG = PATHS.raw_processed
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 EMBED_MODEL = "bge-m3"

@@ -4,7 +4,12 @@
 set -euo pipefail
 
 PROJECT="${AI_AGENT_PROJECT:-$HOME/울트론/ai-agent}"
-LOG_DIR="$PROJECT/data/logs"
+PYTHON="$PROJECT/.venv/bin/python"
+if [ -x "$PYTHON" ] && [ -f "$PROJECT/scripts/storage_paths.py" ]; then
+    LOG_DIR="$("$PYTHON" "$PROJECT/scripts/storage_paths.py" logs_dir)"
+else
+    LOG_DIR="$PROJECT/data/logs"
+fi
 MAX_BYTES="${AI_AGENT_LOG_MAX_BYTES:-10485760}"  # 10 MiB
 BACKUP_COUNT="${AI_AGENT_LOG_BACKUPS:-5}"
 

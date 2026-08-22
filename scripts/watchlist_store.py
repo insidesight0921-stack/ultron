@@ -1,7 +1,7 @@
 """Private watchlist persistence.
 
 The watchlist is personal data (plan section 1.5), so it is stored only in the
-ignored local ``data/private.db`` database.  This module deliberately contains
+ignored local Private SQLite database selected by ``storage_paths``. This module deliberately contains
 no MCP or network surface.  Name/ticker resolution belongs to the caller; the
 store accepts only a validated six-digit KRX ticker.
 """
@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from storage_paths import PATHS
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "private.db"
+DEFAULT_DB_PATH = PATHS.watchlist_db
 
 
 @dataclass(frozen=True)
@@ -144,4 +145,3 @@ def contains(ticker: str, *, db_path: Path | str = DEFAULT_DB_PATH) -> bool:
             "SELECT 1 FROM watchlist WHERE ticker = ?", (ticker_n,)
         ).fetchone()
     return row is not None
-

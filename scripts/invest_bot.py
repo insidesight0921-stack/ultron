@@ -37,6 +37,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from storage_paths import PATHS
+
 # ask.py 와 같은 RAG·LLM
 from ask import retrieve, build_context, LLM_MODEL
 
@@ -56,7 +58,7 @@ _TICKER_MAP_CACHE: dict[str, tuple[float, dict]] = {}
 
 # 디스크 캐시 (봇 재시작 후에도 첫 호출 패널티 제거)
 # 테스트에서 monkeypatch 가능하도록 모듈 레벨 변수
-_DISK_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "data" / "cache"
+_DISK_CACHE_DIR: Path = PATHS.shareable_cache_dir
 
 
 def _disk_cache_path(date: str) -> Path:
@@ -113,7 +115,7 @@ def get_ticker_map(force_refresh: bool = False) -> dict[str, str]:
 
     조회 우선순위:
       1. in-memory 캐시 (TTL 안 지났으면)
-      2. 디스크 캐시 data/cache/ticker_map_<YYYYMMDD>.json (TTL 안 지났으면)
+      2. Shareable 디스크 캐시 ticker_map_<YYYYMMDD>.json (TTL 안 지났으면)
          → in-memory에도 채워서 다음 호출은 바로 hit
       3. KRX fetch — in-memory + 디스크 동시 저장
 

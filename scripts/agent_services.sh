@@ -27,6 +27,12 @@ SCRIPTS="$PROJECT/scripts"
 DATA_DIR="$PROJECT/data"
 PYTHON="$PROJECT/.venv/bin/python"
 
+if [ -x "$PYTHON" ] && [ -f "$SCRIPTS/storage_paths.py" ]; then
+    LOG_DIR="$("$PYTHON" "$SCRIPTS/storage_paths.py" logs_dir)"
+else
+    LOG_DIR="$DATA_DIR/logs"
+fi
+
 LA_DIR="$HOME/Library/LaunchAgents"
 
 LABEL_WATCH="com.hyunjun.ai-agent.watch-raw"
@@ -43,18 +49,18 @@ PLIST_WEEKLY="$LA_DIR/${LABEL_WEEKLY}.plist"
 PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
 PLIST_PRIVATE_BACKUP="$LA_DIR/${LABEL_PRIVATE_BACKUP}.plist"
 
-LOG_WATCH_OUT="$DATA_DIR/logs/watch_raw.out.log"
-LOG_WATCH_ERR="$DATA_DIR/logs/watch_raw.err.log"
-LOG_TG_OUT="$DATA_DIR/logs/telegram.out.log"
-LOG_TG_ERR="$DATA_DIR/logs/telegram.err.log"
-LOG_PAPER_OUT="$DATA_DIR/logs/paper_ui.out.log"
-LOG_PAPER_ERR="$DATA_DIR/logs/paper_ui.err.log"
-LOG_WEEKLY_OUT="$DATA_DIR/logs/weekly_kium.out.log"
-LOG_WEEKLY_ERR="$DATA_DIR/logs/weekly_kium.err.log"
-LOG_PRIVATE_BACKUP_OUT="$DATA_DIR/logs/private_backup.out.log"
-LOG_PRIVATE_BACKUP_ERR="$DATA_DIR/logs/private_backup.err.log"
+LOG_WATCH_OUT="$LOG_DIR/watch_raw.out.log"
+LOG_WATCH_ERR="$LOG_DIR/watch_raw.err.log"
+LOG_TG_OUT="$LOG_DIR/telegram.out.log"
+LOG_TG_ERR="$LOG_DIR/telegram.err.log"
+LOG_PAPER_OUT="$LOG_DIR/paper_ui.out.log"
+LOG_PAPER_ERR="$LOG_DIR/paper_ui.err.log"
+LOG_WEEKLY_OUT="$LOG_DIR/weekly_kium.out.log"
+LOG_WEEKLY_ERR="$LOG_DIR/weekly_kium.err.log"
+LOG_PRIVATE_BACKUP_OUT="$LOG_DIR/private_backup.out.log"
+LOG_PRIVATE_BACKUP_ERR="$LOG_DIR/private_backup.err.log"
 
-mkdir -p "$LA_DIR" "$DATA_DIR/logs"
+mkdir -p "$LA_DIR" "$LOG_DIR"
 
 # ─── plist 생성 ──────────────────────────────────────
 
@@ -496,7 +502,7 @@ cmd_status() {
             echo "📍 Tailscale: http://${TS_IP}:8080"
         fi
     fi
-    echo "📍 로그:   $DATA_DIR/logs/"
+    echo "📍 로그:   $LOG_DIR/"
 }
 
 cmd_logs() {

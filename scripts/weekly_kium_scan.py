@@ -5,7 +5,7 @@ weekly_kium_scan.py — 키움봇 v3 주간 자동 스캔 러너 (v3.24)
 매주 월요일 09:00 launchd가 자동 실행.
 흐름:
   1. kium_bot.run(action="scan", with_crash_signals=True)
-  2. HTML + TXT 리포트 → data/reports/kium_weekly_YYYYMMDD.*
+  2. HTML + TXT 리포트 → ``storage_paths``의 Private reports
   3. 텔레그램 푸시 (TELEGRAM_BOT_TOKEN + ALLOWED_TELEGRAM_USER_ID)
   4. Slack 웹훅 푸시 (SLACK_WEBHOOK_URL 환경변수 있을 때만)
 
@@ -30,9 +30,12 @@ from pathlib import Path
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
 SCRIPTS = PROJECT / "scripts"
-DATA_DIR = PROJECT / "data"
-REPORT_DIR = DATA_DIR / "reports"
-LOG_DIR = DATA_DIR / "logs"
+sys.path.insert(0, str(SCRIPTS))
+from storage_paths import PATHS  # noqa: E402
+
+DATA_DIR = PATHS.private_root
+REPORT_DIR = PATHS.reports_dir
+LOG_DIR = PATHS.logs_dir
 
 
 # .env 로드 (python-dotenv 없어도 동작)
@@ -72,7 +75,6 @@ err_handler.setLevel(logging.WARNING)
 logging.getLogger().addHandler(err_handler)
 
 # ─── 모듈 import ─────────────────────────────────────
-sys.path.insert(0, str(SCRIPTS))
 try:
     import kium_bot
 except ImportError as e:

@@ -31,6 +31,7 @@ from urllib.error import URLError, HTTPError
 # 같은 폴더의 corp_code_loader 사용
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corp_code_loader import lookup, get_dart_key, ROOT  # noqa: E402
+from storage_paths import PATHS  # noqa: E402
 
 # 분기 → DART reprt_code
 REPRT_CODE = {
@@ -53,10 +54,6 @@ VALIDATION_TICKERS = [
     ("035720", "카카오"),          # IT 플랫폼
     ("068270", "셀트리온"),        # 바이오
 ]
-
-DATA_DIR = ROOT / "data"
-DATA_DIR.mkdir(exist_ok=True)
-
 
 def get_financials(corp_code: str, year: int, quarter: int, fs_div: str = "CFS") -> list | None:
     """fnlttSinglAcntAll API 호출. CFS(연결) 우선, 없으면 OFS(별도)."""
@@ -284,7 +281,8 @@ def validate() -> None:
         results.append(r)
 
     # CSV 저장
-    out_csv = DATA_DIR / "dart_finance_validation.csv"
+    out_csv = PATHS.dart_finance_validation
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "ticker", "name", "corp_code", "year", "quarter",
         "revenue", "op_income", "net_income",

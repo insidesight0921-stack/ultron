@@ -48,6 +48,7 @@ load_dotenv(PROJECT / ".env")
 
 # 공용 모듈
 sys.path.insert(0, str(PROJECT / "scripts"))
+from storage_paths import PATHS  # noqa: E402
 from ask import LLM_MODEL  # noqa: E402  (지식봇 내부에서도 사용)
 from inbox import save_to_inbox, extract_url_content, extract_pdf_text, VAULT  # noqa: E402
 from memory import ChatMemory  # noqa: E402
@@ -997,7 +998,7 @@ NOTIFY_HORIZON_SEC = 70    # 발화 임박 윈도우 (interval + 약간)
 # v3.23 — 콴텍봇 월간 리밸런싱 자동 푸시 (매월 첫 영업일 09:30 KST)
 REBALANCE_HOUR = 9
 REBALANCE_MINUTE = 30
-REBALANCE_FLAG_DIR = PROJECT / "data" / "cache"
+REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
 _PENDING_REBALANCE: dict[int, list] = {}
@@ -1027,19 +1028,19 @@ import exit_rules  # noqa: E402  # 순수 판정 모듈(hermetic 테스트는 te
 INTRADAY_MONITOR_INTERVAL_SEC = int(os.getenv("INTRADAY_MONITOR_INTERVAL_SEC", 5 * 60))
 INTRADAY_STOP_LOSS_PCT = exit_rules.STOP_PCT      # -7% 손절선 (EXIT_STOP_PCT로 조정)
 INTRADAY_TAKE_PROFIT_PCT = exit_rules.TAKE_PCT    # +20% 익절선 (EXIT_TAKE_PCT로 조정)
-_INTRADAY_PEAKS_PATH = PROJECT / "data" / "cache" / "intraday_peaks.json"
+_INTRADAY_PEAKS_PATH = PATHS.private_state_file("intraday_peaks.json")
 
 # v3.40 — 기술적 신호 봇 (1시간봉, 장중)
 SIGNAL_CHECK_INTERVAL_SEC = 60 * 60       # 1시간 간격
 SIGNAL_OPEN_HOUR, SIGNAL_OPEN_MIN = 9, 0
 SIGNAL_CLOSE_HOUR, SIGNAL_CLOSE_MIN = 15, 30
-_SIGNAL_DEDUP_PATH = PROJECT / "data" / "cache" / "signal_last.json"
+_SIGNAL_DEDUP_PATH = PATHS.private_state_file("signal_last.json")
 
 # v3.41 — 뉴스 다이제스트 (매일 정시)
 NEWS_CHECK_INTERVAL_SEC = 10 * 60   # 검사 주기(발송 아님). 실제 발송은 하루 1회(멱등)
 NEWS_DIGEST_HOUR, NEWS_DIGEST_MIN = 8, 0
 NEWS_DIGEST_UNTIL = "2026-06-11"    # 이 날짜까지만 발송(포함). None이면 무기한
-_NEWS_DIGEST_FLAG = PROJECT / "data" / "cache" / "news_digest_last.json"
+_NEWS_DIGEST_FLAG = PATHS.private_state_file("news_digest_last.json")
 
 
 

@@ -35,6 +35,8 @@ from threading import Event, Lock, Thread
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from storage_paths import PATHS
+
 
 def to_nfc(p) -> Path:
     """
@@ -49,7 +51,7 @@ PROJECT = HOME / "울트론" / "ai-agent"
 VAULT = HOME / "울트론" / "obsidian-vault"
 RAW = VAULT / "raw"
 SCRIPTS = PROJECT / "scripts"
-LOG_FILE = PROJECT / "data" / "watch_raw.log"
+LOG_FILE = PATHS.watch_raw_log
 
 REFINE_SCRIPT = SCRIPTS / "refine_raw.py"
 INDEX_SCRIPT = SCRIPTS / "index_wiki.py"

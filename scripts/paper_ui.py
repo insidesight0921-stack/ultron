@@ -43,6 +43,7 @@ except Exception:
     pass
 
 sys.path.insert(0, str(PROJECT / "scripts"))
+from storage_paths import PATHS  # noqa: E402
 import paper_db as pdb  # noqa: E402
 from kium_bot import run as kium_run  # noqa: E402  # v3.19 신호 탭
 import quant_bot as qb  # noqa: E402  # v3.23 콴텍 탭
@@ -467,7 +468,7 @@ async def api_myquant_scan(market: str = "1028", refresh: bool = False):
         if refresh:
             from datetime import datetime
             from pathlib import Path as _P
-            cpath = (PROJECT / "data" / "cache" /
+            cpath = (PATHS.private_state_dir /
                      f"myquant_scan_{datetime.now().strftime('%Y%m%d')}.json")
             cpath.unlink(missing_ok=True)
         items = eb.scan_current(market_code=market)

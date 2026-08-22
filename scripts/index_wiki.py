@@ -27,12 +27,14 @@ import lancedb
 import numpy as np
 import pyarrow as pa
 
+from storage_paths import PATHS
+
 # ─── 경로 설정 ──────────────────────────────────────
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
 VAULT = HOME / "울트론" / "obsidian-vault"
 WIKI = VAULT / "wiki"
-DB_PATH = PROJECT / "data" / "lancedb"
+DB_PATH = PATHS.rag_dir
 DB_PATH.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_URL = "http://127.0.0.1:11434"

@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from storage_paths import PATHS
+
 log = logging.getLogger("trade_analytics")
 
 OLLAMA_URL = "http://127.0.0.1:11434"
@@ -266,7 +268,7 @@ UNLABELED = "미분류"
 
 # 실측 국면 캐시 — quant_bot snapshot 실행 시마다 그 달의 consensus_phase 기록(자동 축적).
 # merged_phase_map()에서 수동 근사(PHASE_BY_MONTH)보다 우선 적용.
-_PHASE_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "cache" / "phase_by_month.json"
+_PHASE_CACHE_PATH = PATHS.private_state_file("phase_by_month.json")
 
 
 def load_phase_months(path=None) -> dict:

@@ -40,9 +40,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterator
 
+from storage_paths import PATHS
+
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
-DEFAULT_DB_PATH = PROJECT / "data" / "paper.db"
+DEFAULT_DB_PATH = PATHS.paper_db
 
 log = logging.getLogger("paper_db")
 _LOCK = Lock()

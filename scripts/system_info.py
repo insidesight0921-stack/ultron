@@ -17,11 +17,13 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from storage_paths import PATHS
+
 log = logging.getLogger("system_info")
 
 PROJECT = Path(__file__).resolve().parent.parent
-CACHE_DIR = PROJECT / "data" / "cache"
-LOG_DIR = PROJECT / "data" / "logs"
+CACHE_DIR = PATHS.private_state_dir
+LOG_DIR = PATHS.logs_dir
 
 # 접속 정보 (paper_ui.py 기본 포트와 동기화)
 PAPER_PORT = 8080
@@ -88,7 +90,7 @@ def access_info() -> str:
         "🔌 접속 정보\n"
         f"• Paper 트레이딩: http://localhost:{PAPER_PORT}\n"
         f"• 로그 경로: {LOG_DIR}\n"
-        f"• watch_raw 로그: {PROJECT / 'data' / 'watch_raw.log'}"
+        f"• watch_raw 로그: {PATHS.watch_raw_log}"
     )
 
 

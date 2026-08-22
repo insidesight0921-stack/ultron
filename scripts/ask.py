@@ -22,9 +22,11 @@ from urllib.request import Request, urlopen
 import lancedb
 import numpy as np
 
+from storage_paths import PATHS
+
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
-DB_PATH = PROJECT / "data" / "lancedb"
+DB_PATH = PATHS.rag_dir
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 EMBED_MODEL = "bge-m3"        # 다국어 (한국어 포함). 인덱싱과 동일해야 함

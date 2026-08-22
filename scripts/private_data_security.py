@@ -17,9 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from storage_paths import PRIVATE_V1_LAYOUT, StoragePaths, get_paths
+
 
 PRIVATE_DB_NAMES = ("paper.db", "schedule.db", "private.db")
-PRIVATE_ROOT_FILES = ("action_schedules.json", "raw_processed.json", "watch_raw.log")
 PRIVATE_CACHE_FILES = (
     "intraday_peaks.json",
     "ipo_weekly_last.json",
@@ -28,6 +29,7 @@ PRIVATE_CACHE_FILES = (
     "phase_by_month.json",
     "quant_rebalance_last.json",
     "signal_last.json",
+    "news_digest_last.json",
 )
 
 
@@ -40,6 +42,10 @@ class SecurityPaths:
     @property
     def data(self) -> Path:
         return self.project / "data"
+
+    @property
+    def storage(self) -> StoragePaths:
+        return get_paths(self.project)
 
 
 def default_paths() -> SecurityPaths:
@@ -88,16 +94,24 @@ def _secure_tree(root: Path) -> tuple[int, int]:
 
 
 def _private_standalone_files(paths: SecurityPaths) -> Iterable[Path]:
+    storage = paths.storage
     yield paths.project / ".env"
-    for name in PRIVATE_DB_NAMES:
-        db_path = paths.data / name
+    for db_path in _private_database_paths(paths):
         yield db_path
-        yield from paths.data.glob(f"{name}-*")
-    for name in PRIVATE_ROOT_FILES:
-        yield paths.data / name
+        yield from db_path.parent.glob(f"{db_path.name}-*")
+    yield storage.action_schedules
+    yield storage.raw_processed
+    yield storage.watch_raw_log
     for name in PRIVATE_CACHE_FILES:
-        yield paths.data / "cache" / name
+        yield storage.private_state_file(name)
+    yield from storage.private_state_dir.glob("myquant_scan_*.json")
     yield from paths.data.glob(".fuse_hidden*")
+
+
+def _private_database_paths(paths: SecurityPaths) -> list[Path]:
+    storage = paths.storage
+    ordered = (storage.paper_db, storage.schedule_db, storage.watchlist_db)
+    return list(dict.fromkeys(ordered))
 
 
 def secure_permissions(paths: SecurityPaths | None = None) -> dict[str, int]:
@@ -109,14 +123,15 @@ def secure_permissions(paths: SecurityPaths | None = None) -> dict[str, int]:
     for path in _private_standalone_files(paths):
         files_changed += int(_secure_file(path))
 
-    for root in (
-        paths.data / "logs",
-        paths.data / "lancedb",
-        paths.data / "reports",
-        paths.vault / "raw",
-        paths.vault / "wiki",
-        paths.backup_root,
-    ):
+    tree_roots = [paths.vault / "raw", paths.vault / "wiki", paths.backup_root]
+    if paths.storage.layout == PRIVATE_V1_LAYOUT:
+        tree_roots.append(paths.storage.private_root)
+    else:
+        tree_roots.extend(
+            (paths.storage.logs_dir, paths.storage.rag_dir, paths.storage.reports_dir)
+        )
+
+    for root in tree_roots:
         file_count, dir_count = _secure_tree(root)
         files_changed += file_count
         dirs_changed += dir_count
@@ -221,8 +236,8 @@ def backup_all(
     stamp = stamp or datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     snapshot = _make_snapshot_dir(paths.backup_root, stamp)
     results = [
-        backup_database(paths.data / name, snapshot / name)
-        for name in PRIVATE_DB_NAMES
+        backup_database(source, snapshot / source.name)
+        for source in _private_database_paths(paths)
     ]
     manifest = {
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),

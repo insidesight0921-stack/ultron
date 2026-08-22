@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 import exit_backtest
 import exit_rules
+from storage_paths import PATHS
 
 MIN_HISTORY = 60          # 피처 계산에 필요한 최소 봉 수
 DEFAULT_HORIZON = 20      # 진입 후 최대 관찰 봉 수(≈ 1개월) — 만기 시 종가 청산
@@ -113,8 +114,7 @@ def scan_current(market_code: str = "1028", days: int = 140,
     from pathlib import Path
     from pykrx import stock as stk
 
-    cdir = Path(cache_dir) if cache_dir else \
-        Path(__file__).resolve().parent.parent / "data" / "cache"
+    cdir = Path(cache_dir) if cache_dir else PATHS.private_state_dir
     cpath = cdir / f"myquant_scan_{datetime.now().strftime('%Y%m%d')}.json"
     try:
         return json.loads(cpath.read_text(encoding="utf-8"))
@@ -263,7 +263,7 @@ def _universe_tickers(market_code: str = "1028") -> list[tuple[str, str]]:
         import glob
         import json
         from pathlib import Path
-        cdir = Path(__file__).resolve().parent.parent / "data" / "cache"
+        cdir = PATHS.shareable_cache_dir
         files = sorted(glob.glob(str(cdir / f"universe_{m_name}_*.json")))
         if files:
             lst = json.loads(Path(files[-1]).read_text(encoding="utf-8"))

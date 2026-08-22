@@ -83,3 +83,22 @@ def test_backup_includes_uncheckpointed_wal_rows(tmp_path):
 
     assert result["table_counts"] == {"sample": 1}
     assert result["restore_verified"] is True
+
+
+def test_private_v1_uses_one_assistant_database(tmp_path):
+    paths = _paths(tmp_path)
+    config = paths.data / "storage-layout.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"layout": "private-v1"}), encoding="utf-8")
+    storage = paths.storage
+    _make_db(storage.paper_db, rows=("paper",))
+    _make_db(storage.schedule_db, rows=("assistant",))
+
+    snapshot, manifest = pds.backup_all(paths, stamp="20260822T190000+0900")
+
+    assert [item["database"] for item in manifest["databases"]] == [
+        "paper.db",
+        "assistant.db",
+    ]
+    assert storage.private_root.stat().st_mode & 0o777 == 0o700
+    assert (snapshot / "assistant.db").stat().st_mode & 0o777 == 0o600

@@ -45,6 +45,8 @@ from typing import Iterable
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from storage_paths import PATHS
+
 log = logging.getLogger("quant_bot")
 if not log.handlers:
     h = logging.StreamHandler()
@@ -641,9 +643,7 @@ def fetch_market_caps(market: str = "KOSPI") -> dict[str, float]:
 # 두 번째 호출부터 ~5초로 단축. v3.21 빈 응답 가드 패턴 적용.
 
 OHLCV_TTL_SEC = 24 * 60 * 60
-_OHLCV_CACHE_DIR: Path = (
-    Path(__file__).resolve().parent.parent / "data" / "cache" / "ohlcv"
-)
+_OHLCV_CACHE_DIR: Path = PATHS.shareable_cache_dir / "ohlcv"
 
 
 def _ohlcv_cache_path(ticker: str, end_date: str) -> Path:

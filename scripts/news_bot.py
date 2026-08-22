@@ -25,15 +25,17 @@ from pathlib import Path
 from typing import Optional
 from urllib.request import Request, urlopen
 
+from storage_paths import PATHS
+
 log = logging.getLogger("news_bot")
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 LLM_MODEL = "gemma4:31b"
 KEEP_ALIVE = "30m"
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_CACHE_DIR = _DATA_DIR / "cache"
-_SEEN_PATH = _CACHE_DIR / "news_seen.json"
+_DATA_DIR = PATHS.private_root
+_CACHE_DIR = PATHS.private_state_dir
+_SEEN_PATH = PATHS.private_state_file("news_seen.json")
 _SEEN_CAP = 600                 # 롤링 dedup 최대 보관 link 수
 DEFAULT_PER_SOURCE = 4         # 소스당 최신 N건
 SUMMARY_MAX_ITEMS = 10        # LLM 요약 총 상한(속도 관리)
