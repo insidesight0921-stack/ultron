@@ -3,7 +3,7 @@
 투자봇 (invest_bot) — pykrx 차트 분석 + Wiki 매매 규칙 대조.
 
 4단계 네 번째 도구. 단일 종목에 대해:
-  1. pykrx로 일봉 OHLCV 6개월 가져옴
+  1. Shareable API/전용 수집기로 일봉 OHLCV 6개월 가져옴
   2. 순수 계산 함수로 RSI, MA(5/20/60/120), 변동성, 거래량 비율 산출
   3. 골든/데드크로스 발생 여부, 과매수/과매도 신호 판정
   4. (mode='accurate'면) wiki 매매 규칙 RAG → 31B에게 "조건 충족인지" 평가
@@ -21,8 +21,8 @@ API:
   run(action, ticker_or_name=None, mode="accurate") -> tuple[str, list]
 
 설계 결정:
-- pykrx 호출은 _fetch_ohlcv_raw / _fetch_ticker_map_raw로 분리 → 테스트는
-  monkeypatch로 가짜 DataFrame 주입 (외부 KRX 의존성 격리).
+- OHLCV와 ticker map 외부 수집·Shareable 쓰기는 market_data_collector에 위임하고,
+  소비 경로는 Data API를 우선 사용 → 테스트는 monkeypatch로 외부 의존성 격리.
 - 종목명↔티커 매핑은 in-memory 캐시 (TTL 24h). 첫 호출 시 ~1초.
 - mode='fast': 지표만 출력 (LLM 무호출, ~2초)
   mode='accurate': 지표 + wiki 매매 규칙 + 31B 평가 (~50초)
@@ -38,6 +38,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from storage_paths import PATHS
+from data_api_client import DataAPIError, ShareableDataClient, data_api_enabled
+from market_data_collector import (
+    collect_ohlcv,
+    fetch_ticker_map_data,
+    write_ticker_map_cache,
+)
 
 # ask.py 와 같은 RAG·LLM
 from ask import retrieve, build_context, LLM_MODEL
@@ -55,6 +61,7 @@ log = logging.getLogger("invest_bot")
 
 
 _TICKER_MAP_CACHE: dict[str, tuple[float, dict]] = {}
+_DATA_API_CLIENT = ShareableDataClient()
 
 # 디스크 캐시 (봇 재시작 후에도 첫 호출 패널티 제거)
 # 테스트에서 monkeypatch 가능하도록 모듈 레벨 변수
@@ -83,31 +90,16 @@ def _load_disk_cache(date: str) -> dict[str, str] | None:
 
 
 def _save_disk_cache(date: str, m: dict[str, str]) -> None:
-    """디스크에 ticker map 저장. 실패해도 본 동작은 영향 없음 (저장은 best-effort)."""
+    """호환 wrapper. ticker map 쓰기 구현은 market_data_collector가 소유한다."""
     try:
-        _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        # 원자적 쓰기 — temp 파일 후 rename
-        p = _disk_cache_path(date)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(p)
+        write_ticker_map_cache(date, m, cache_dir=_DISK_CACHE_DIR)
     except Exception as e:
         log.warning(f"ticker map 디스크 캐시 저장 실패 — 무시: {e}")
 
 
 def _fetch_ticker_map_raw(date: str) -> dict[str, str]:
-    """KRX 종목 ticker → name 전체 매핑. 외부 호출이라 테스트는 patch."""
-    from pykrx import stock  # 지연 import (sandbox에서 invest_bot import 가능하게)
-
-    out: dict[str, str] = {}
-    for market in ("KOSPI", "KOSDAQ"):
-        for ticker in stock.get_market_ticker_list(date, market=market):
-            try:
-                out[ticker] = stock.get_market_ticker_name(ticker)
-            except Exception:
-                # 일부 종목은 lookup 실패 — 무시
-                pass
-    return out
+    """호환 wrapper. 실제 외부 수집은 market_data_collector가 소유한다."""
+    return fetch_ticker_map_data(date)
 
 
 def get_ticker_map(force_refresh: bool = False) -> dict[str, str]:
@@ -144,6 +136,20 @@ def get_ticker_map(force_refresh: bool = False) -> dict[str, str]:
     return m
 
 
+def _resolve_ticker_via_api(query: str) -> tuple[str, str] | None:
+    if query.isdigit() and len(query) == 6:
+        item = _DATA_API_CLIENT.get_instrument(query)
+        if item is None:
+            return None
+        return str(item["ticker"]), str(item["name"])
+    items = _DATA_API_CLIENT.search_instruments(query, limit=20)
+    if not items:
+        return None
+    exact = [item for item in items if item["name"] == query]
+    selected = exact[0] if exact else min(items, key=lambda item: len(item["name"]))
+    return str(selected["ticker"]), str(selected["name"])
+
+
 def resolve_ticker(query: str) -> tuple[str, str] | None:
     """종목명 또는 티커 → (ticker, name). 못 찾으면 None.
 
@@ -155,6 +161,14 @@ def resolve_ticker(query: str) -> tuple[str, str] | None:
     q = (query or "").strip()
     if not q:
         return None
+
+    if data_api_enabled():
+        try:
+            resolved = _resolve_ticker_via_api(q)
+            if resolved is not None:
+                return resolved
+        except (DataAPIError, ValueError) as exc:
+            log.warning("Shareable Data API 조회 실패 — 기존 캐시 경로 사용: %s", exc)
 
     # 1. 티커 형식
     if q.isdigit() and len(q) == 6:
@@ -189,19 +203,55 @@ def resolve_ticker(query: str) -> tuple[str, str] | None:
 
 
 def _fetch_ohlcv_raw(ticker: str, start: str, end: str):
-    """pykrx OHLCV. 외부 호출이라 테스트는 patch."""
-    from pykrx import stock
-    return stock.get_market_ohlcv(start, end, ticker)
+    """호환 wrapper. 외부 수집·쓰기는 market_data_collector가 소유한다."""
+    payload = collect_ohlcv(
+        ticker,
+        start,
+        end,
+        ohlcv_dir=PATHS.shareable_cache_dir / "ohlcv",
+    )
+    return _ohlcv_payload_to_frame(payload)
+
+
+def _ohlcv_payload_to_frame(payload: dict):
+    import pandas as pd
+
+    series = payload.get("series") if isinstance(payload, dict) else None
+    if not isinstance(series, dict) or not isinstance(series.get("close"), list):
+        raise ValueError("OHLCV payload 형식이 올바르지 않습니다.")
+    column_map = {
+        "open": "시가",
+        "high": "고가",
+        "low": "저가",
+        "close": "종가",
+        "volume": "거래량",
+    }
+    columns = {
+        korean: series[field]
+        for field, korean in column_map.items()
+        if isinstance(series.get(field), list)
+    }
+    frame = pd.DataFrame(columns)
+    dates = series.get("date") or series.get("dates")
+    if isinstance(dates, list) and len(dates) == len(frame):
+        frame.index = pd.to_datetime(dates, format="%Y%m%d")
+    return frame
 
 
 def fetch_ohlcv(ticker: str, days: int = 180):
-    """최근 days일치 일봉. DataFrame index는 영업일."""
+    """최근 days일치 일봉. Data API 우선, 미스 시 전용 수집기를 사용한다."""
     end = datetime.now()
     start = end - timedelta(days=days * 2)  # 비영업일 고려해 넉넉히
-    df = _fetch_ohlcv_raw(
+    if data_api_enabled():
+        try:
+            payload = _DATA_API_CLIENT.latest_ohlcv(ticker)
+            if payload is not None:
+                return _ohlcv_payload_to_frame(payload)
+        except (DataAPIError, ValueError) as exc:
+            log.warning("Shareable Data API OHLCV 실패 — collector 사용: %s", exc)
+    return _fetch_ohlcv_raw(
         ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     )
-    return df
 
 
 # ─── 지표 계산 (순수 함수) ───────────────────────────

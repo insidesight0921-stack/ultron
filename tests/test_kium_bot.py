@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 import kium_bot as kb
+from data_api_client import DataAPIUnavailable
 
 
 @pytest.fixture(autouse=True)
@@ -219,6 +220,77 @@ def test_save_disk_cache_skips_empty_list(monkeypatch, tmp_path):
     assert cache_file.exists()
 
 
+def test_fetch_universe_api_first_for_current_date(monkeypatch, tmp_path):
+    today = kb.datetime.now().strftime("%Y%m%d")
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(kb, "_DISK_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_universe",
+        lambda market: {
+            "market": market,
+            "as_of": today,
+            "instruments": [{"ticker": "005930", "name": "삼성전자"}],
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "_load_disk_cache",
+        lambda *args: (_ for _ in ()).throw(AssertionError("disk fallback used")),
+    )
+    assert kb.fetch_universe("KOSPI200") == [("005930", "삼성전자")]
+
+
+def test_fetch_universe_api_stale_falls_back_to_disk(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_universe",
+        lambda market: {
+            "market": market,
+            "as_of": "20000101",
+            "instruments": [{"ticker": "005930", "name": "삼성전자"}],
+        },
+    )
+    monkeypatch.setattr(
+        kb, "_load_disk_cache", lambda market, date: [("000660", "SK하이닉스")]
+    )
+    assert kb.fetch_universe("KOSPI200") == [("000660", "SK하이닉스")]
+
+
+def test_fetch_universe_api_failure_falls_back_to_disk(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_universe",
+        lambda market: (_ for _ in ()).throw(DataAPIUnavailable("down")),
+    )
+    monkeypatch.setattr(
+        kb, "_load_disk_cache", lambda market, date: [("000660", "SK하이닉스")]
+    )
+    assert kb.fetch_universe("KOSPI200") == [("000660", "SK하이닉스")]
+
+
+def test_fetch_universe_refresh_failure_uses_last_api_snapshot(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_universe",
+        lambda market: {
+            "market": market,
+            "as_of": "20260803",
+            "instruments": [{"ticker": "005930", "name": "삼성전자"}],
+        },
+    )
+    monkeypatch.setattr(kb, "_load_disk_cache", lambda market, date: None)
+    monkeypatch.setattr(
+        kb,
+        "_fetch_universe_raw",
+        lambda market, date: (_ for _ in ()).throw(RuntimeError("KRX auth required")),
+    )
+    assert kb.fetch_universe("KOSPI200") == [("005930", "삼성전자")]
+
+
 # ─── scan_universe ──────────────────────────────────
 
 
@@ -228,6 +300,36 @@ def _make_price_df(growth_pct: float, n: int = 253):
     ratio = (end / 100.0) ** (1 / (n - 1))
     closes = [100.0 * (ratio ** i) for i in range(n)]
     return pd.DataFrame({"종가": closes})
+
+
+def test_load_ohlcv_api_first_and_fallback(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_ohlcv",
+        lambda ticker: {
+            "ticker": ticker,
+            "as_of": "20260822",
+            "series": {"close": [100, 110]},
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "_fetch_ohlcv_raw",
+        lambda *args: (_ for _ in ()).throw(AssertionError("raw fallback used")),
+    )
+    assert kb._load_ohlcv("005930", "20250101", "20260822")["종가"].tolist() == [
+        100,
+        110,
+    ]
+
+    monkeypatch.setattr(
+        kb._DATA_API_CLIENT,
+        "latest_ohlcv",
+        lambda ticker: (_ for _ in ()).throw(DataAPIUnavailable("down")),
+    )
+    monkeypatch.setattr(kb, "_fetch_ohlcv_raw", lambda *args: _make_price_df(10))
+    assert len(kb._load_ohlcv("005930", "20250101", "20260822")) == 253
 
 
 def test_scan_universe_sorts_by_score_desc(monkeypatch):
@@ -737,13 +839,23 @@ def test_run_scan_crash_signals_failure_falls_back(monkeypatch):
     assert "에이" in msg
 
 
-# ─── KOSPI / VKOSPI fetch 캐시 우회 (monkeypatch) ──
+# ─── KOSPI / VKOSPI API + collector 경계 ───────────
+
+
+def _index_payload(index_name, closes, *, last_date=None):
+    last = last_date or kb.datetime.now().strftime("%Y%m%d")
+    dates = [last] * len(closes)
+    return {
+        "index": index_name,
+        "as_of": last,
+        "series": {"date": dates, "close": closes},
+    }
 
 
 def test_fetch_kospi_close_returns_close_series(monkeypatch):
     monkeypatch.setattr(
-        kb, "_fetch_kospi_close_raw",
-        lambda s, e: pd.DataFrame({"종가": [2500.0, 2510.0, 2520.0]})
+        kb, "_collect_market_index",
+        lambda name, days: _index_payload(name, [2500.0, 2510.0, 2520.0]),
     )
     out = kb.fetch_kospi_close()
     assert out is not None
@@ -751,16 +863,16 @@ def test_fetch_kospi_close_returns_close_series(monkeypatch):
 
 
 def test_fetch_kospi_close_handles_exception(monkeypatch):
-    def boom(s, e):
+    def boom(name, days):
         raise RuntimeError("KRX down")
-    monkeypatch.setattr(kb, "_fetch_kospi_close_raw", boom)
+    monkeypatch.setattr(kb, "_collect_market_index", boom)
     assert kb.fetch_kospi_close() is None
 
 
 def test_fetch_vkospi_latest_returns_float(monkeypatch):
     monkeypatch.setattr(
-        kb, "_fetch_vkospi_raw",
-        lambda s, e: pd.DataFrame({"종가": [18.5, 19.0, 17.5]})
+        kb, "_collect_market_index",
+        lambda name, days: _index_payload(name, [18.5, 19.0, 17.5]),
     )
     out = kb.fetch_vkospi_latest()
     assert out == 17.5
@@ -768,9 +880,33 @@ def test_fetch_vkospi_latest_returns_float(monkeypatch):
 
 def test_fetch_vkospi_latest_handles_empty(monkeypatch):
     monkeypatch.setattr(
-        kb, "_fetch_vkospi_raw", lambda s, e: pd.DataFrame()
+        kb, "_collect_market_index", lambda name, days: _index_payload(name, [])
     )
     assert kb.fetch_vkospi_latest() is None
+
+
+def test_fetch_kospi_close_api_first(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    payload = _index_payload("KOSPI", list(range(220)))
+    monkeypatch.setattr(kb._DATA_API_CLIENT, "latest_market_index", lambda name: payload)
+    monkeypatch.setattr(
+        kb,
+        "_collect_market_index",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("collector used")),
+    )
+    assert len(kb.fetch_kospi_close(days=200)) == 220
+
+
+def test_fetch_market_index_stale_api_uses_collector(monkeypatch):
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    stale = _index_payload("VKOSPI", [99.0], last_date="20000101")
+    monkeypatch.setattr(kb._DATA_API_CLIENT, "latest_market_index", lambda name: stale)
+    monkeypatch.setattr(
+        kb,
+        "_collect_market_index",
+        lambda name, days: _index_payload(name, [18.5]),
+    )
+    assert kb.fetch_vkospi_latest() == 18.5
 
 
 # ─── router validator: with_crash_signals ──────────

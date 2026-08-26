@@ -10,6 +10,42 @@
 > ✅ **비파괴 전환 검증 완료**: 최신 legacy 백업 → AI-agent 서비스 중지 → 복사·DB 병합·해시 검증 → 레이아웃 활성화 → 서비스 재기동을 완료했다. legacy 원본은 삭제하지 않고 보존한다.
 > ✅ **운영 검증**: Paper UI 8080 HTTP 200, Telegram/watch_raw 정상, Tapnow 8082·Ollama 11434 유지, DB 행 수 일치, 전환 후 2개 DB 복구 백업 성공, 전체 테스트 1,048개 통과.
 > 🚧 **다음 단계는 Phase 2 서버화**: 데이터 접근 API의 private/shareable 경계를 먼저 고정하고, 직접 파일·DB 접근을 작은 단위로 API 경유로 전환한다. Time Machine이 없어 디스크 고장 대비 외부 사본은 별도 운영 과제다.
+> ✅ **Phase 2 공개 수집·읽기 경계 완료**: `127.0.0.1:8090` Shareable API를 launchd로 운영하고 invest/quant/kium 읽기를 API 우선으로 전환했다. 시장지수·universe·OHLCV·ticker-map·fundamental·시가총액의 외부 수집과 Shareable 쓰기는 전용 `market_data_collector.py`가 소유한다. factor API와 비거래일 후퇴를 운영 적용했다.
+> ✅ **Private API watchlist·일정 조회 운영 전환 완료**: 8091의 read-only 경계에서 watchlist와 chat별 일정 list/upcoming을 운영한다. Telegram 조회는 API 우선/DB 폴백이며 모든 쓰기와 일정 알림 스케줄러는 기존 직접 경로다. `writes_enabled=false`, 전체 테스트 1,163개 통과.
+> ✅ **Private Paper portfolio/position 조회 운영 전환 완료**: 8091의 고정 read-only Paper 라우트와 Paper UI API 우선/DB 폴백을 적용했다. 운영 1/9건, 무인증 401, 안정화 뒤 DB 해시·논리 스냅샷 무변경, 전체 테스트 1,173개 통과. 모든 쓰기는 직접 경로로 보존한다.
+> ✅ **Private Paper slots/trades 조회 운영 전환 완료**: 기본 대시보드의 슬롯 집계와 최근 거래를 8091 API 우선/DB 폴백으로 전환했다. 운영 slots 4 / trades 164, UI trades 100, 무인증 401, 조회 전후 DB 불변, 전체 테스트 1,182개 통과.
+> ✅ **Private Paper IPO 조회 운영 전환 완료**: IPO records/stats를 8091 API 우선/DB 폴백으로 전환했다. 운영 0/0건 빈 목록, 무인증 401, 조회 전후 DB 불변, 전체 테스트 1,192개 통과. subscribe/close 쓰기는 직접 경로다.
+> ✅ **Private Paper 성과 계산 조회 운영 전환 완료**: 공통 순수 FIFO 계산 계층을 두고 performance/myquant-tags를 8091 API 우선/DB 폴백으로 전환했다. 운영 성과 4행·태그 0건, 원시 거래 비노출, 무인증 401, DB 불변, 전체 테스트 1,199개 통과.
+> ✅ **Private 쓰기 사전 계약 완료**: 실제 mutation 없이 9개 operation allowlist, 멱등키, UUID 요청·승인 ID, expected version, 승인 상태 머신, 비민감 감사 이벤트를 순수 검증 계층으로 고정했다. HTTP mutation은 0개이고 `writes_enabled=false`를 유지한다. 전체 테스트 1,218개 통과.
+> ✅ **watchlist 격리 쓰기 저장 검증 완료**: 기본 쓰기 잠금과 명시 DB 경계를 둔 저장 계층을 추가했다. 임시 SQLite에서 pending→approved→applied 1회 add/remove, 동일 요청 replay, 멱등키·버전·승인 충돌, payload 비노출 감사를 검증했다. 운영 DB/API에는 연결하지 않았다. 전체 테스트 1,229개 통과.
+> ✅ **watchlist 기본 비활성 HTTP 계약 완료**: writer를 명시 주입한 테스트 앱에만 intent/approve/reject/apply 네 POST를 등록했다. 인증·no-query·요청 크기·중복 JSON·필수 UUID/멱등 헤더·HTTP 충돌을 임시 DB에서 검증했다. 운영 CLI에는 writer/활성화 옵션이 없어 mutation route 0개와 `writes_enabled=false`를 유지한다. 전체 테스트 1,241개 통과.
+> ✅ **watchlist 기본 비활성 client 완료**: `PrivateDataClient` 생성자에서 명시 활성화한 테스트 객체만 submit/approve/reject/apply를 호출한다. 임시 HTTP 앱에서 request+approval UUID 결합, replay, 401/409/413/422, 엄격한 응답 allowlist를 검증했다. 환경변수·Telegram·운영 DB 연결은 없다. 전체 테스트 1,250개 통과.
+> ✅ **Telegram watchlist write identity 완료**: update/chat/user/message/action을 결정론적 request UUID·approval UUID·Idempotency-Key로 변환해 add/remove dispatch에 전달한다. 원문·종목·Telegram 숫자 ID는 identity에 남기지 않는다. `watchlist_bot`은 아직 기존 직접 쓰기를 사용하며 client/plist/운영 API 연결은 없다. 전체 테스트 1,267개 통과.
+> ✅ **watchlist idempotent preflight 완료**: 테스트 주입 store/API/client에서 신규 요청은 현재 version, 기존 요청은 최초 expected version·state·완료 result를 payload 없이 복원한다. 식별자/operation 불일치는 409이며 한 SQLite snapshot으로 읽고 감사·관심종목을 바꾸지 않는다. 운영 기본 앱에는 경로가 없다. 전체 테스트 1,278개 통과.
+> ✅ **watchlist 기본 비활성 consumer executor 완료**: executor+client 이중 활성화와 호출별 명시 승인을 요구하고, preflight→submit→approve→apply 및 pending/approved/applied 재개를 임시 HTTP/SQLite에서 검증했다. rejected/expired와 payload drift는 중단하며 API 실패 시 직접 DB 폴백이 없다. Telegram 운영 경로에는 executor를 주입하지 않았다. 전체 테스트 1,288개 통과.
+> ✅ **Private 쓰기 readiness gate 완료**: API writer/client/Telegram executor 세 조건, 단일 `private-data-api` writer, private `assistant.db` 무결성, 최근 24시간 복구 검증 백업의 권한·해시·schema·행 수, 호출별 승인, direct DB 무폴백, rollback을 순수 보고서로 검사한다. 손상·위조·부분 활성화는 fail-closed이며 운영 설정·DB·서비스는 바꾸지 않았다. 전체 테스트 1,305개 통과.
+> ✅ **Private 쓰기 공통 activation permit 완료**: readiness 전체 통과 뒤에만 DB/backup fingerprint-bound permit을 발급하고 write API 앱, client, executor가 모두 요구한다. 누락·직접 생성·일반 보고서 대체·DB scope·client/executor permit 불일치는 생성 단계에서 거부한다. 운영 CLI/Telegram/8091에는 발급·주입 경로가 없다. 전체 테스트 1,311개 통과.
+> ✅ **Private 쓰기 cutover/rollback dry-run 완료**: 현재 write stack 비활성·단일 legacy writer와 목표 단일 API writer를 분리하고 cutover 6단계·rollback 5단계 순서를 고정했다. 자동 DB 복원·순서 drift·부분 활성화를 거부하고 결과에는 permit 객체나 실행 기능이 없다. 운영 read-only 결과는 `backup_fresh`, `rollback_verified` 미충족으로 ready=false이며 DB는 불변이다. 전체 테스트 1,323개 통과.
+> ✅ **fresh backup/rollback rehearsal 완료**: `20260825T224422+0900`에 운영 paper/assistant DB를 온라인 백업·메모리 복구 검증했고 원본은 불변이었다. fresh assistant clone에서 API write→legacy writer 재개·API 결과 보존·별도 emergency restore 일치를 확인했다. 산출물 `/private/tmp/ultron-private-rollback-so8mv5vr`은 삭제하지 않았다. 재평가 dry-run은 ready=true이며 실제 활성화 승인은 아니다. 전체 테스트 1,328개 통과.
+> ✅ **기본 비활성 atomic runtime bundle 완료**: 단일 600 private JSON과 bundle ID 없이는 API writer/client/Telegram executor 어느 것도 활성화되지 않는다. 고정 DB·승인 backup root·세 플래그·사용자 승인·무폴백·rollback·자동 복원 금지·permit fingerprint를 양 프로세스가 재검증한다. 현재 env/plist/file은 미설정이고 운영 mutation route/write table은 0개다. 전체 테스트 1,345개 통과.
+> ✅ **비설치 activation candidate/runbook 완료**: 운영 root와 다른 빈 700 staging에만 600 candidate를 exclusive 생성하고 API/Telegram loader가 같은 bundle/permit fingerprint를 재검증한다. 운영 증거 candidate는 `/private/tmp/ultron-private-write-candidate-p46sn34t/`에 보존했지만 미설치다. 고정 파일·env/plist key는 없고 운영 DB는 불변이다. `docs/PRIVATE_WRITE_CUTOVER_RUNBOOK.md`에 승인 후 순서를 고정했다. 전체 테스트 1,352개 통과.
+> ✅ **운영 watchlist write cutover 완료 (2026-08-26)**: fresh backup `20260826T005056+0900`·격리 rollback rehearsal 뒤 atomic bundle `528fcb275432…`를 600 private 파일과 `.env` 단일 키로 활성화했다. 8091은 `writes_enabled=true`와 5개 mutation route, Telegram은 동일 API executor로 운영하며 direct DB 쓰기 폴백이 없다. 무데이터 replay 뒤 실제 Telegram에서 `삼성전자(005930)` add/remove가 각각 pending→approved→applied로 완료됐다. 최종 watchlist 0건·version 2이며 실제 사용자 update의 양방향 경로까지 검증했다. macOS 한글 경로 NFC/NFD 차이를 고정 위치 비교에서 정규화했다.
+> ✅ **일정 쓰기 순수 계약 완료**: `schedule.add/delete/complete`를 실제 라우터의 RRULE·다중 사전알림 payload와 일치시키고 chat scope hash를 intent fingerprint에 결합했다. repr/audit에는 chat ID·일정 본문을 남기지 않으며 아직 DB·HTTP·Telegram runtime에는 연결하지 않았다. 전체 테스트 1,374개 통과. 다음 구현 단위는 기본 비활성 일정 격리 저장소다.
+> ✅ **기본 비활성 일정 격리 저장소 완료**: 공통 scope-bound 승인 상태 머신과 schedule SQL 적용부를 분리했다. 임시 DB에서 chat별 version, 승인 전 무변경, add/delete/complete, replay, stale 만료, reject, 다른 chat 접근 차단과 비민감 audit를 검증했다. 운영 DB의 `private_scoped_*` table은 0개이고 일정 5건·watchlist 0건/version 2를 유지한다. 전체 테스트 1,385개 통과. 다음 구현 단위는 writer를 명시 주입한 테스트 앱의 일정 HTTP 계약이다.
+> ✅ **기본 비활성 일정 HTTP 계약 완료**: 동일 DB scope permit과 schedule writer를 명시 주입한 테스트 앱에만 intent/preflight/approve/reject/apply 5개 POST를 등록했다. Bearer·no-query·chat header·UUID·멱등키·중복 JSON·크기 제한·cross-chat 409를 검증했다. 운영 8091에는 schedule write capability가 없고 경로 404, scoped table 0개를 유지한다. 전체 테스트 1,395개 통과. 다음 구현 단위는 기본 비활성 Private client 일정 쓰기 어댑터다.
+> ✅ **기본 비활성 일정 Private client 완료**: 명시 활성화와 activation permit이 있는 객체만 schedule submit/preflight/approve/reject/apply를 호출한다. chat scope를 모든 요청 헤더에 강제하고 임시 HTTP/SQLite에서 승인 전 무변경, add/complete/delete, replay, cross-chat 409, 인증 실패와 엄격한 응답 allowlist를 검증했다. 운영 Telegram·8091·DB에는 연결하지 않았다. 전체 테스트 1,405개 통과. 다음 구현 단위는 일정 Telegram 요청의 결정론적·비민감 identity다.
+> ✅ **Telegram 일정 write identity 완료**: update/chat/user/message/action을 일정 전용 결정론적 request UUID·approval UUID·멱등키로 변환한다. identity repr에는 Telegram 숫자 ID·일정 제목·시간·메모가 없고 watchlist 도메인과도 분리된다. Telegram은 add/delete/complete에만 identity를 만들어 `schedule_bot`에 전달하며 action 불일치는 DB 실행 전에 거부한다. 아직 일정 Private client/executor에는 연결하지 않아 운영 writer 소유권은 기존 직접 경로다. 전체 테스트 1,426개 통과. 다음 구현 단위는 기본 비활성 일정 consumer executor다.
+> ✅ **기본 비활성 일정 consumer executor 완료**: executor+client 이중 활성화, 동일 activation permit, 호출별 명시 승인을 요구한다. 임시 HTTP/SQLite에서 preflight→submit→approve→apply, pending/approved 재개, applied replay, reject·payload drift·cross-chat 차단, add/complete/delete를 검증했다. `schedule_bot` 주입 시 직접 DB 경로를 우회하고 API 오류 시 로컬 폴백하지 않는다. 운영 Telegram에는 executor를 주입하지 않았다. 전체 테스트 1,440개 통과. 다음 구현 단위는 알림 스케줄러의 내부 쓰기 소유권까지 포함한 일정 cutover readiness/dry-run이다.
+> ✅ **일정 cutover readiness/dry-run 완료**: 사용자 mutation은 `private-data-api`, 발송 완료·사전알림·반복 진전은 `telegram-schedule-notifier`가 소유하는 비중첩 operation 경계를 고정했다. 전환·롤백은 watchlist writer를 유지한 채 일정 writer만 바꾸며 notifier를 중지하지 않는다. fresh backup·permit·승인·무폴백·소유권·순서 drift·부분 활성화를 fail-closed로 검사하고 실행 기능이나 자동 DB 복원은 제공하지 않는다. 운영 설정·서비스·DB는 불변이다. 전체 테스트 1,466개 통과. 다음 단계는 fresh clone 일정 rollback rehearsal이다.
+> ✅ **fresh clone 일정 rollback rehearsal 완료**: 운영 `assistant.db`를 온라인 백업·메모리 복구 검증한 뒤 `/private/tmp/ultron-schedule-rollback-wBbn79`의 사본에서만 API 일정 추가→알림 완료 마킹→반복 진전→legacy 사용자 writer 재개→API 결과 보존→별도 emergency restore 일치를 확인했다. backup은 불변이고 운영 DB 논리 서명·일정 5건·watchlist 0건·scoped table 0개가 유지됐다. 산출물은 삭제하지 않았다. 전체 테스트 1,470개 통과. 다음 구현 단위는 일정 capability를 포함하되 기본 비활성인 atomic runtime bundle 확장이다.
+> ✅ **일정 기본 비활성 atomic runtime bundle 완료**: 기존 운영 v1 bundle을 일정 비활성으로 계속 수용하고, v2의 `schedule` block이 없거나 `enabled=false`면 일정 writer/executor를 만들지 않는다. 활성 v2는 일정 API/client/executor, legacy user owner, notifier owner·operation, 동일 DB, 무폴백을 한 fingerprint로 검증한 뒤에만 양 프로세스 stack을 만든다. 부분 플래그·notifier drift·bundle drift는 fail-closed다. 실제 운영 bundle `528fcb275432…`는 재검증 결과 schedule=false이며 env/file/service를 변경하지 않았다. 전체 테스트 1,478개 통과. 다음 단계는 비설치 v2 schedule activation candidate와 runbook 확장이다.
+> ✅ **비설치 v2 schedule candidate/runbook 완료**: fresh rehearsal manifest에 묶인 candidate를 `/private/tmp/ultron-schedule-candidate-922Se5/`에 600 권한으로 생성했고 combined bundle `86bc4a9a2625…`·activation fingerprint `7129d0066ec1…`를 runtime 재검증했다. installed=false이며 운영 bundle은 불변이다. writer 중첩을 막기 위해 cutover는 Telegram→Private API, rollback은 Private API→Telegram 재시작 순서로 수정·고정했다. 전체 테스트 1,484개 통과. 다음 단계는 실제 운영 일정 write cutover에 대한 명시 승인과 직전 fresh backup 재검증이다.
+> ✅ **운영 일정 write cutover·실제 Telegram E2E 완료 (2026-08-26)**: 영구 backup `20260826T193342+0900`을 새로 만들고 v2 bundle `f0c651775aa4…`를 600 고정 파일에 설치했다. 이전 v1은 `/private/tmp/ultron-schedule-cutover-operational-PWTtTX/`에 보존했다. 안전 순서대로 Telegram→Private API를 재시작해 사용자 일정 mutation은 API-only, 알림 상태·반복 진전은 Telegram notifier로 분리했다. 인증 status와 격리 무데이터 replay에 이어 실제 Telegram에서 테스트 일정을 add한 뒤 `#8` delete했고 양쪽 모두 pending→approved→applied, chat version `0→1→2`를 확인했다. 최종 일정 5건·사전 알림 4건은 원상 복원됐으며 DB integrity/메모리 복구 검증과 전체 테스트 1,484개에 통과했다. 다음 Phase 2 쓰기 단위는 아직 직접 경로인 Paper `buy/sell`의 기본 비활성 계약이다.
+> ✅ **Paper buy/sell 기본 비활성 계약·저장소 완료**: `private_paper_write_contract.py`가 6자리 ticker, 양수 수량·가격, 비음수 수수료, 본문 길이와 양의 정수 `slot_id` scope를 정규화한다. `private_paper_write_store.py`는 명시 DB와 `writes_enabled=True`가 있을 때만 연결하며 pending→approved→applied, 슬롯별 version, 멱등 replay, stale 만료, cross-slot 차단, 잔고·보유량 검증을 한 SQLite 트랜잭션으로 처리한다. 임시 DB에서 buy 가중평균·자본 차감, partial/full sell·자본 복원, 실패 원자성과 payload 비노출 감사를 검증했다. 운영 `paper.db`는 scoped table 0개·portfolio 1/slots 4/positions 4/trades 169로 불변이고 8091 Paper write capability도 없다. 전체 테스트 1,512개 통과. 다음 구현 단위는 writer를 명시 주입한 기본 비활성 Paper write HTTP 계약이다.
+> ✅ **Paper buy/sell 기본 비활성 HTTP 계약 완료**: 별도 `paper.db` readiness permit과 writer를 명시 주입한 테스트 앱에만 intent/preflight/approve/reject/apply 5개 POST를 등록했다. Bearer·no-query·양의 정수 slot header·header/payload 일치·UUID·멱등키·중복 JSON·크기 제한·cross-slot 및 잔고 충돌을 검증했고 승인 전에는 매매 상태가 변하지 않는다. 운영 8091은 Paper write capability 없음·경로 404, 운영 DB는 integrity ok·scoped table 0개·portfolio 1/slots 4/positions 4/trades 169를 유지한다. 전체 테스트 1,527개 통과. 다음 구현 단위는 기본 비활성 Private client Paper 쓰기 어댑터다.
+> ✅ **Paper buy/sell 기본 비활성 Private client 완료**: 일반 watchlist·일정 쓰기와 분리된 `paper_writes_enabled`, `paper.db` 절대 경계 permit, 명시 DB 경로가 모두 있어야만 submit/preflight/approve/reject/apply를 호출한다. slot header와 payload/응답 slot을 일치시키고 buy `total_cost`·sell `proceeds` 계산 및 응답 필드 allowlist를 재검증한다. 임시 HTTP/SQLite에서 승인 전 무변경, buy/sell, replay, cross-slot, reject, 인증·잔고 충돌을 검증했다. 운영 runtime·Paper UI·Telegram에는 연결하지 않았고 8091 404·운영 DB 1/4/4/169·scoped table 0개를 유지한다. 전체 테스트 1,538개 통과. 다음 구현 단위는 Paper UI·Telegram 직접 writer 소유권 분류와 결정론적·비민감 요청 identity 계약이다.
+> ✅ **Paper direct writer 소유권·identity 계약 완료**: production `record_buy/sell` 호출을 AST로 전수 대조해 Paper UI buy/sell, Telegram intraday sell-only, 키움·콴텍 승인 batch, operator CLI의 6개 경계를 고정했다. 정상 운영 target DB writer는 `private-data-api` 하나이고 CLI direct는 rollback-only 퇴역 대상으로 분류했다. UI/Telegram 4개 caller의 actor/event/batch ordinal을 즉시 hash한 뒤 UUID·멱등키를 결정론적으로 만들며 repr에는 사용자 좌표·slot·ticker·수량·가격·본문이 없다. payload는 identity에서 제외해 retry 중 변경이 새 identity가 아닌 fingerprint conflict가 되게 했다. 신규 identity 테스트 23개가 통과했고, 동시에 추가된 weekly-report 테스트 25개를 포함한 전체 테스트는 1,586개 통과했다. 아직 runtime에는 연결하지 않았고 운영 DB 1/4/4/169·scoped table 0개를 유지한다. 다음 구현 단위는 identity+Paper client를 묶는 기본 비활성 consumer executor다.
+> ✅ **Paper 기본 비활성 consumer executor 완료**: Paper 전용 permit이 일치하는 client/executor만 활성화되며 UI·키움·콴텍은 명시적 사용자 승인, Telegram intraday는 sell-only 정책 승인을 요구한다. preflight→submit→approve→apply와 pending/approved 재개, applied replay, reject, payload drift, cross-slot 사전 차단, 잔고 실패 원자성, API 장애 direct DB fallback 0을 임시 HTTP/SQLite 신규 11개 테스트로 확인했다. 운영 runtime에는 연결하지 않았고 8091 Paper write route는 404다. 운영 DB portfolio 1/slots 4/positions 4/trades 169, scoped table 0, integrity ok를 유지한다. 검증 중 외부 서비스 재시작과 함께 raw SHA-256이 `7a94a9ddd021…→adcb98c80723…`로 바뀌어 논리 불변만 확인했으며 byte-for-byte 불변은 주장하지 않는다. 전체 회귀는 1,606개 통과했다. 현재 진행률은 전체 약 70%, Phase 2 약 78%, Paper write track 60%다. 다음 구현 단위는 Paper writer ownership readiness/rollback이다.
 > 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
@@ -81,6 +117,85 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 - Paper UI 8080, Telegram, watch_raw를 새 경로로 재기동했다. Tapnow 8082와 Ollama 11434는 중단하지 않았다.
 - legacy DB·RAG·로그는 롤백용으로 보존하며 삭제는 별도 승인 사항이다.
 - 전환 직후 전체 회귀 테스트 1,048개 통과. 다음 트랙은 Phase 2 API 서버화다.
+
+### 🚧 Phase 2 Shareable 데이터 API 운영 전환 (2026-08-22) ← NEW
+- `data_api.py`: `127.0.0.1:8090` 전용 FastAPI 골격. 비루프백 주소는 실행 단계에서 거부한다.
+- `shareable_store.py`: `data/shareable` 고정 참조, ticker 검증, symlink·루트 이탈 차단, 응답 필드 allowlist.
+- API: health / 종목명 검색 / 종목 메타 / 최신 universe / 최신 OHLCV 캐시. Private·범용 파일·SQL 라우트 없음.
+- `data_api_client.py`: loopback URL만 허용하고 응답을 재검증하는 읽기 클라이언트.
+- `invest_bot`: `AI_AGENT_DATA_API_ENABLED=1`일 때 종목 해석을 API로 우선 조회하며, 미기동·오류·미스는 기존 캐시/pykrx로 폴백한다.
+- 실제 Shareable 캐시로 삼성전자 검색·메타, SK하이닉스 최신 OHLCV 조회 성공. Private 경로는 HTTP 404.
+- `quant_bot`은 요청 end_date와 API `as_of`가 같을 때만 OHLCV를 채택하고, 불일치·장애 시 기존 디스크 캐시/pykrx로 폴백한다. 첫 연결 장애 뒤 30초 cooldown으로 대량 스캔의 반복 timeout을 막는다.
+- 실제 8090 HTTP에서 `invest_bot` 이름/티커 해석과 `quant_bot` SK하이닉스 OHLCV 280행 조회를 확인했다. 서버 종료 후 같은 OHLCV 280행이 디스크 캐시에서 복구되는 것도 확인했다.
+- `smoke_data_api.py`로 기동·readiness·invest/quant 소비·Private 404·소유한 자식 종료·종료 후 폴백을 자동 검증했다. 실제 결과 API 280행 / 폴백 280행 / 서버 종료 true.
+- `agent_services.sh`에 Data API launchd 등록·readiness 대기·로그·상태 관리를 추가했다. API가 준비된 다음 Telegram/Paper가 시작된다.
+- 실제 운영 plist의 Telegram/Paper에 `AI_AGENT_DATA_API_ENABLED=1`을 적용하고 재시작했다. Data API 8090 health 200, Paper 8080 HTTP 200, Tapnow 8082·Ollama 11434 유지.
+- 디스크 읽기를 막은 소비 테스트에서 삼성전자 식별과 SK하이닉스 OHLCV 280행을 API로 확인했고, 사용할 수 없는 API를 주입한 테스트에서도 기존 캐시 280행 폴백을 확인했다.
+- 1차 launchd 운영 전환 시점 전체 회귀 테스트 1,085개 통과.
+- `GET /v1/shareable/universes/{market}/latest` 계약을 추가했다. market은 KOSPI200/KOSDAQ150/합집합 allowlist만 허용하고 유효한 6자리 ticker/name만 반환한다.
+- `kium_bot`은 당일 universe와 기준일 일치 OHLCV를 API로 우선 읽는다. 오래된 캐시·장애·미스는 기존 디스크/pykrx로 폴백하며 force refresh는 기존 수집 의미를 유지한다.
+- 실운영 API에서 universe 기준일 `20260803`을 확인해 오늘 데이터로 오인하지 않으며, pykrx 폴백을 막은 검사에서 SK하이닉스 OHLCV 280행을 API로 읽었다.
+- `market_data_collector.py`를 시장지수 캐시 쓰기 소유자로 추가하고 `GET /v1/shareable/market-indices/{index}/latest` 계약을 구현했다. 날짜·종가 외 필드는 노출하지 않는다.
+- KOSPI는 FinanceDataReader `KS11`로 363행을 수집했고 최신 실제 거래일은 `20260821`이다. 매일 16:20 launchd가 갱신하며 `kium_bot`은 최근 API 캐시를 우선 사용한다.
+- 기존 VKOSPI 코드 `1003`은 실제로 KOSPI 중형주였으므로 제거했다. 검증된 무인증 VKOSPI 소스가 없어 자동 수집하지 않으며 운영 API는 캐시가 없을 때 404, 소비자는 `None`으로 축소 동작한다.
+- universe/OHLCV 외부 수집과 Shareable 원자적 쓰기를 `market_data_collector.py`로 이동했다. `kium_bot`·`quant_bot`은 API/캐시 소비와 계산만 담당하며 파일 쓰기를 구현하지 않는다.
+- 실제 SK하이닉스 OHLCV 14거래일을 운영 캐시와 분리된 임시 경로에 수집했다. KRX 최신 universe 갱신 실패를 모의했을 때도 운영 API의 마지막 스냅샷 199종목을 최후 폴백으로 유지했다.
+- 재기동 후 Data API 8090 health, Paper 8080 HTTP 200, Telegram 시작, Tapnow 8082·Ollama 11434 공존을 확인했다.
+- ticker-map 외부 조회·검증·원자적 쓰기와 fundamental/시가총액 외부 조회·필드 정제를 `market_data_collector.py`로 이동했다. `invest_bot`·`quant_bot`에는 호환 어댑터와 계산만 남겼다.
+- pykrx가 계정 식별자를 표준 출력에 기록하던 동작을 수집 경계에서 차단했고, 빈 ticker-map은 성공으로 캐시하지 않는다.
+- KRX 비밀번호 갱신 후 실수집 복구를 확인했다: ticker-map 2,687, KOSPI fundamental 890/시가총액 917, KOSDAQ fundamental 1,750/시가총액 1,770종목. 비거래일에는 factor 기준일을 최신 거래일 `20260821`로 후퇴한다.
+- `GET /v1/shareable/factors/{market}/latest`를 추가하고 `quant_bot`을 API 우선으로 전환했다. collector를 막은 운영 검사에서 KOSPI 890/917종목을 API만으로 읽었다.
+- `invest_bot` OHLCV 직접 pykrx 조회를 제거했다. 실제 삼성전자 14거래일 full OHLCV(date/open/high/low/close/volume)를 격리 수집했고, 운영 API의 기존 280행만으로 지표 계산도 성공했다.
+- 매일 16:20 collector 일정은 시장지수뿐 아니라 ticker-map·KOSPI/KOSDAQ factor·universe까지 갱신한다. dataset별 실패는 격리한다.
+- KRX universe 구성종목 엔드포인트는 인증 복구 후에도 빈 응답이라 새 캐시를 쓰지 않으며 마지막 KOSPI200 199종목 API 스냅샷을 유지한다.
+- Paper 8080, Tapnow backend 8082, Data API 8090, Ollama 11434 공존과 Telegram 재기동을 확인했다.
+- `private_data_api.py` 인증 골격을 추가했다. 기본 8091이며 8080/8082/8090/11434를 거부하고, Shareable API·Telegram과 토큰을 공유하지 않는다.
+- 표면은 무인증 `/health`, 인증 필수 status/watchlist, chat 범위 필수 일정
+  `/v1/private/schedule/events[/upcoming]`이다. capabilities는 `watchlist:read`와
+  `schedule:read`, `writes_enabled=false`이며 Paper·파일·SQL 라우트는 없다.
+- OpenAPI/Swagger/ReDoc를 끄고 모든 응답에 `Cache-Control: no-store`를 적용했다. 실제 Private DB를 열거나 수정하지 않는 테스트 골격이다.
+- 64자 운영 전용 token을 `.env`(권한 600)에 생성하고
+  `com.hyunjun.ai-agent.private-data-api` launchd를 등록했다. plist·로그에는 token을 넣지 않는다.
+- 실제 8091 HTTP에서 health 200, 무인증·쿼리 token 401, 올바른 Bearer 200,
+  모든 응답 `no-store`를 확인했다. Paper 8080·Tapnow 8082·Shareable 8090·Ollama 11434는 유지된다.
+- query-string token이 기본 접근 로그에 남는 문제를 스모크에서 발견해 token을 즉시
+  교체·무효화하고 Uvicorn access log를 비활성화했다. 현재 token은 plist·로그에 없다.
+- `private_read_store.py`는 고정 `assistant.db`를 SQLite `mode=ro`+`query_only`로 읽고
+  ticker·name·created_at만 최대 500건 반환한다. 경로·테이블·SQL은 HTTP 입력이 아니다.
+- `private_data_api_client.py`는 loopback 8091·Bearer header·no-store·응답 allowlist를
+  재검증하고 redirect·과대 응답을 차단한다.
+- Telegram plist에 `AI_AGENT_PRIVATE_API_ENABLED=1`을 적용했다. list는 API 우선/직접 DB
+  폴백이며 add/remove는 기존 직접 쓰기를 유지한다. plist에는 token이 없다.
+- 실제 운영 watchlist 0건 조회 전후 DB 행 수와 파일 해시가 동일했고, 로컬 DB 폴백을
+  막은 Telegram 실행 검사에서도 API-only 응답에 성공했다.
+- 일정 저장소는 고정 assistant DB를 `mode=ro`+`query_only`로 읽고 숫자형
+  `X-AI-Agent-Chat-ID` 헤더로 범위를 강제한다. 응답에는 chat_id·알림 상태·생성 시각을
+  포함하지 않고 최대 100건만 반환한다.
+- 실제 전체 일정 5건/다가오는 일정 0건, 무인증 401/chat 누락 400, DB 행 수·파일 해시
+  무변경, Telegram API-only 실행을 확인했다. 일정 add/delete/complete와 알림 스케줄러는
+  직접 경로를 유지한다.
+- Paper portfolio/position은 고정 `paper.db` read-only 라우트로 추가했다. Paper UI는
+  `AI_AGENT_PRIVATE_API_ENABLED=1`에서 API 우선, 장애 시 DB 폴백이다. slot 필터는 API
+  쿼리가 아니라 클라이언트 로컬 필터이며 이 시점에는 slots/trades·매수/매도/IPO가 직접 경로였다.
+- 운영 portfolio 1 / position 9, 무인증 401, 안정화 뒤 DB 해시·논리 스냅샷 무변경을
+  확인했다. Paper 8080·Shareable 8090·Private 8091·Ollama 11434는 정상이며 Tapnow 8082는
+  현재 리슨하지 않는다.
+- slots/trades를 고정 read-only 라우트로 추가했다. 슬롯은 dashboard 집계까지 서버에서
+  계산하고, 거래 slot/limit은 Private API query 없이 클라이언트에서 필터링한다.
+- 운영 slots 4 / trades 164, Paper UI slots 4 / 최근 trades 100, 무인증 401, 조회 전후
+  DB 파일 해시·논리 스냅샷 무변경을 확인했다. 전체 회귀 테스트 1,182개 통과.
+- IPO records/stats를 최신 500건·등급 통계 20건 allowlist로 추가했다. factors는 JSON
+  객체만 허용하고 subscribe/close 쓰기는 직접 경로다. 운영 0/0건 빈 목록, 무인증 401,
+  Paper UI 동일 응답과 조회 전후 DB 불변을 확인했다. 전체 회귀 테스트 1,192개 통과.
+- `paper_metrics.py` 순수 FIFO 계산 계층을 추가하고 performance/myquant-tags를 API 우선으로
+  전환했다. 운영 직접 계산과 결과가 동일하며 performance 4행·태그 0건, 원시 거래 비노출,
+  무인증 401, 조회 전후 DB 불변을 확인했다. 전체 회귀 테스트 1,199개 통과.
+- Paper UI 일반 런타임 읽기는 전환 완료다. 남은 직접 접근은 쓰기, Telegram 승인 전제
+  조회/쓰기, 일정 알림 스케줄러, 내부·오프라인 분석 예외다.
+- 운영 watchlist write cutover 완료: Private API가 단일 writer이고 Telegram add/remove는
+  동일 atomic bundle의 API executor만 사용한다. 실제 삼성전자 add/remove로 version 2와
+  양쪽 감사를 확인했다. 일정 chat 격리 계약·저장소도 완료했으며 다음 구현 단위는 기본 비활성
+  일정 client 쓰기 어댑터다. 테스트 전용 HTTP 계약은 완료됐다.
 
 ### ✅ 개인 관심종목 자연어 관리 (watchlist v1) ← NEW
 - `watchlist_store.py`: 당시 ignored `data/private.db`에 구현했고 현재는 `data/private/assistant.db`로 병합·전환. ticker PK 멱등 추가·삭제·조회, MCP 미노출.

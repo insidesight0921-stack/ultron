@@ -40,6 +40,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterator
 
+from paper_metrics import compute_performance_stats
 from storage_paths import PATHS
 
 HOME = Path.home()
@@ -655,9 +656,6 @@ def performance_stats(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
                total_pnl(원), total_return_pct, max_drawdown_pct, sharpe(연환산),
                n_open_positions, open_cost(원 미실현 매입금액)
     """
-    import math
-    from collections import defaultdict, deque
-
     with _conn(db_path) as con:
         slots = con.execute("SELECT * FROM slots ORDER BY id").fetchall()
         all_trades = con.execute(
@@ -668,117 +666,15 @@ def performance_stats(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
         seed_row = con.execute(
             "SELECT seed_capital FROM portfolios LIMIT 1"
         ).fetchone()
-        open_positions = con.execute(
-            "SELECT slot_id, COUNT(*) AS n, "
-            "SUM(quantity * avg_price) AS open_cost "
-            "FROM positions GROUP BY slot_id"
-        ).fetchall()
+        positions = con.execute("SELECT * FROM positions ORDER BY id").fetchall()
 
     seed_capital = float(seed_row["seed_capital"]) if seed_row else 100_000_000
-
-    open_map: dict[int, dict] = {}
-    for row in open_positions:
-        open_map[int(row["slot_id"])] = {
-            "n": int(row["n"]),
-            "open_cost": float(row["open_cost"] or 0),
-        }
-
-    by_slot: dict[int, list] = defaultdict(list)
-    for t in all_trades:
-        by_slot[int(t["slot_id"])].append(_row_to_dict(t))
-
-    results = []
-    for slot_row in slots:
-        slot_id = int(slot_row["id"])
-        slot_name = slot_row["name"]
-        slot_seed = float(slot_row["allocation_pct"]) * seed_capital
-        trades = by_slot.get(slot_id, [])
-
-        buy_queues: dict[str, deque] = defaultdict(deque)
-        completed: list[dict] = []
-
-        for t in trades:
-            ticker = t["ticker"]
-            qty = int(t["quantity"])
-            price = float(t["price"])
-            fees = float(t["fees"])
-
-            if t["side"] == "buy":
-                fpu = fees / qty if qty else 0.0
-                buy_queues[ticker].append((qty, price, fpu))
-            else:
-                remaining = qty
-                buy_cost = 0.0
-                matched_qty = 0
-                while remaining > 0 and buy_queues[ticker]:
-                    bqty, bprice, bfpu = buy_queues[ticker][0]
-                    take = min(remaining, bqty)
-                    buy_cost += take * bprice + take * bfpu
-                    remaining -= take
-                    matched_qty += take
-                    if take >= bqty:
-                        buy_queues[ticker].popleft()
-                    else:
-                        buy_queues[ticker][0] = (bqty - take, bprice, bfpu)
-                if matched_qty > 0:
-                    sell_rev = matched_qty * price - fees * (matched_qty / qty)
-                    pnl = sell_rev - buy_cost
-                    completed.append({"pnl": pnl, "buy_cost": buy_cost})
-
-        n_closed = len(completed)
-        open_info = open_map.get(slot_id, {"n": 0, "open_cost": 0.0})
-
-        if n_closed == 0:
-            results.append({
-                "slot_id": slot_id, "slot_name": slot_name,
-                "n_closed": 0, "win_rate": None,
-                "total_pnl": 0, "total_return_pct": 0.0,
-                "max_drawdown_pct": 0.0, "sharpe": None,
-                "n_open_positions": open_info["n"],
-                "open_cost": round(open_info["open_cost"]),
-            })
-            continue
-
-        wins = sum(1 for c in completed if c["pnl"] > 0)
-        win_rate = round(wins / n_closed * 100, 1)
-        total_pnl = sum(c["pnl"] for c in completed)
-        total_return_pct = round(total_pnl / slot_seed * 100, 2) if slot_seed > 0 else 0.0
-
-        equity = slot_seed
-        equity_curve = [equity]
-        trade_returns: list[float] = []
-        for c in completed:
-            equity += c["pnl"]
-            equity_curve.append(equity)
-            r = c["pnl"] / (c["buy_cost"] or 1.0)
-            trade_returns.append(r)
-
-        peak = equity_curve[0]
-        max_dd = 0.0
-        for e in equity_curve:
-            if e > peak:
-                peak = e
-            dd = (peak - e) / peak if peak > 0 else 0.0
-            max_dd = max(max_dd, dd)
-
-        sharpe = None
-        if len(trade_returns) >= 2:
-            mean_r = sum(trade_returns) / len(trade_returns)
-            var_r = sum((r - mean_r) ** 2 for r in trade_returns) / (len(trade_returns) - 1)
-            std_r = math.sqrt(var_r) if var_r > 0 else 0.0
-            if std_r > 0:
-                sharpe = round(mean_r / std_r * math.sqrt(252), 2)
-
-        results.append({
-            "slot_id": slot_id, "slot_name": slot_name,
-            "n_closed": n_closed, "win_rate": win_rate,
-            "total_pnl": round(total_pnl), "total_return_pct": total_return_pct,
-            "max_drawdown_pct": round(max_dd * 100, 2), "sharpe": sharpe,
-            "n_open_positions": open_info["n"],
-            "open_cost": round(open_info["open_cost"]),
-        })
-
-    return results
+    return compute_performance_stats(
+        slots=[_row_to_dict(row) for row in slots],
+        trades=[_row_to_dict(row) for row in all_trades],
+        positions=[_row_to_dict(row) for row in positions],
+        seed_capital=seed_capital,
+    )
 
 def _cli() -> None:
     import argparse

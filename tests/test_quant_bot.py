@@ -735,14 +735,73 @@ def _fake_caps():
     }
 
 
+def test_fundamental_and_cap_adapters_delegate_to_collector(monkeypatch):
+    seen = []
+
+    def fake_fundamentals(date, market="KOSPI"):
+        seen.append(("fundamental", date, market))
+        return _fake_fundamentals()
+
+    def fake_caps(date, market="KOSPI"):
+        seen.append(("cap", date, market))
+        return _fake_caps()
+
+    monkeypatch.setattr(qb, "fetch_fundamental_data", fake_fundamentals)
+    monkeypatch.setattr(qb, "fetch_market_cap_data", fake_caps)
+    assert qb.fetch_fundamentals("KOSDAQ") == _fake_fundamentals()
+    assert qb.fetch_market_caps("KOSDAQ") == _fake_caps()
+    assert [item[0] for item in seen] == ["fundamental", "cap"]
+    assert all(item[1].isdigit() and len(item[1]) == 8 for item in seen)
+    assert all(item[2] == "KOSDAQ" for item in seen)
+
+
+def test_fundamental_and_cap_adapters_fail_closed(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("source unavailable")
+
+    monkeypatch.setattr(qb, "fetch_fundamental_data", boom)
+    monkeypatch.setattr(qb, "fetch_market_cap_data", boom)
+    assert qb.fetch_fundamentals() == {}
+    assert qb.fetch_market_caps() == {}
+
+
+def test_fundamental_and_cap_adapters_use_data_api_first(monkeypatch):
+    class FakeClient:
+        def latest_factors(self, market):
+            return {
+                "market": market,
+                "as_of": "20260821",
+                "fundamentals": _fake_fundamentals(),
+                "market_caps": _fake_caps(),
+            }
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(qb, "_DATA_API_CLIENT", FakeClient())
+    monkeypatch.setattr(
+        qb,
+        "fetch_fundamental_data",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("collector called")),
+    )
+    monkeypatch.setattr(
+        qb,
+        "fetch_market_cap_data",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("collector called")),
+    )
+    assert qb.fetch_fundamentals("KOSPI") == _fake_fundamentals()
+    assert qb.fetch_market_caps("KOSPI") == _fake_caps()
+
+
 def _stub_ohlcv(monkeypatch):
-    """4종목 다른 추세 OHLCV stub (kium_bot._fetch_ohlcv_raw 동일 패턴)."""
-    import kium_bot
+    """4종목 다른 추세를 전용 collector adapter에 주입."""
     factors = {"005930": 1.002, "000660": 1.001, "035420": 0.999, "207940": 1.003}
     def fake(ticker, start, end):
         f = factors.get(ticker, 1.001)
-        return pd.DataFrame({"종가": [100.0 * (f ** i) for i in range(280)]})
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake)
+        return {
+            "ticker": ticker,
+            "as_of": end,
+            "series": {"close": [100.0 * (f ** i) for i in range(280)]},
+        }
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake)
 
 
 def test_recommend_returns_top_n(monkeypatch):
@@ -1023,6 +1082,52 @@ def test_load_ohlcv_cache_miss_returns_none(tmp_path, monkeypatch):
     assert qb._load_ohlcv_cache("999999", "20260513") is None
 
 
+def test_load_ohlcv_cache_uses_data_api_when_enabled(tmp_path, monkeypatch):
+    class FakeClient:
+        def latest_ohlcv(self, ticker):
+            return {
+                "ticker": ticker,
+                "as_of": "20260513",
+                "series": {"close": [100.0, 101.0]},
+            }
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(qb, "_DATA_API_CLIENT", FakeClient())
+    monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
+    loaded = qb._load_ohlcv_cache("005930", "20260513")
+    assert loaded["종가"].tolist() == [100.0, 101.0]
+
+
+def test_load_ohlcv_cache_api_date_mismatch_falls_back(tmp_path, monkeypatch):
+    class FakeClient:
+        def latest_ohlcv(self, ticker):
+            return {
+                "ticker": ticker,
+                "as_of": "20260512",
+                "series": {"close": [999.0]},
+            }
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(qb, "_DATA_API_CLIENT", FakeClient())
+    monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
+    qb._save_ohlcv_cache("005930", "20260513", pd.Series([100.0, 101.0]))
+    loaded = qb._load_ohlcv_cache("005930", "20260513")
+    assert loaded["종가"].tolist() == [100.0, 101.0]
+
+
+def test_load_ohlcv_cache_api_failure_falls_back(tmp_path, monkeypatch):
+    class FailingClient:
+        def latest_ohlcv(self, ticker):
+            raise qb.DataAPIError("down")
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(qb, "_DATA_API_CLIENT", FailingClient())
+    monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
+    qb._save_ohlcv_cache("005930", "20260513", pd.Series([100.0]))
+    loaded = qb._load_ohlcv_cache("005930", "20260513")
+    assert loaded["종가"].tolist() == [100.0]
+
+
 def test_load_ohlcv_cache_ttl_expired(tmp_path, monkeypatch):
     """파일 mtime이 TTL 초과면 None."""
     import os
@@ -1042,11 +1147,12 @@ def test_fetch_ohlcv_cached_first_call_fetches(tmp_path, monkeypatch):
     """첫 호출은 fetch → 캐시 저장."""
     monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
     calls = {"n": 0}
-    def fake_raw(ticker, start, end):
+    def fake_collect(ticker, start, end):
         calls["n"] += 1
-        return pd.DataFrame({"종가": [100.0 + i for i in range(50)]})
-    import kium_bot
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_raw)
+        close = [100.0 + i for i in range(50)]
+        qb._save_ohlcv_cache(ticker, end, close)
+        return {"ticker": ticker, "as_of": end, "series": {"close": close}}
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake_collect)
 
     df1 = qb.fetch_ohlcv_cached("005930", "20260101", "20260513")
     assert df1 is not None and len(df1) == 50
@@ -1059,11 +1165,12 @@ def test_fetch_ohlcv_cached_second_call_hits_cache(tmp_path, monkeypatch):
     """두 번째 호출은 디스크 캐시 → fetch 호출 안 함."""
     monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
     calls = {"n": 0}
-    def fake_raw(ticker, start, end):
+    def fake_collect(ticker, start, end):
         calls["n"] += 1
-        return pd.DataFrame({"종가": [100.0 + i for i in range(50)]})
-    import kium_bot
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_raw)
+        close = [100.0 + i for i in range(50)]
+        qb._save_ohlcv_cache(ticker, end, close)
+        return {"ticker": ticker, "as_of": end, "series": {"close": close}}
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake_collect)
 
     qb.fetch_ohlcv_cached("005930", "20260101", "20260513")
     qb.fetch_ohlcv_cached("005930", "20260101", "20260513")
@@ -1074,11 +1181,10 @@ def test_fetch_ohlcv_cached_empty_response_not_cached(tmp_path, monkeypatch):
     """v3.21 패턴 — 빈 df 응답은 캐시 안 함. 다음 호출 다시 fetch."""
     monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
     calls = {"n": 0}
-    def fake_raw(ticker, start, end):
+    def fake_collect(ticker, start, end):
         calls["n"] += 1
-        return pd.DataFrame()
-    import kium_bot
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_raw)
+        raise RuntimeError("empty response")
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake_collect)
 
     qb.fetch_ohlcv_cached("000000", "20260101", "20260513")
     qb.fetch_ohlcv_cached("000000", "20260101", "20260513")
@@ -1089,11 +1195,10 @@ def test_fetch_ohlcv_cached_fetch_exception_not_cached(tmp_path, monkeypatch):
     """fetch 예외는 캐시 안 함."""
     monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
     calls = {"n": 0}
-    def fake_raw(ticker, start, end):
+    def fake_collect(ticker, start, end):
         calls["n"] += 1
         raise RuntimeError("KRX down")
-    import kium_bot
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_raw)
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake_collect)
 
     df1 = qb.fetch_ohlcv_cached("000000", "20260101", "20260513")
     df2 = qb.fetch_ohlcv_cached("000000", "20260101", "20260513")
@@ -1105,11 +1210,12 @@ def test_recommend_uses_ohlcv_cache(tmp_path, monkeypatch):
     """recommend_top_n이 캐시를 거치는지 — 두 번째 호출 빠른 path."""
     monkeypatch.setattr(qb, "_OHLCV_CACHE_DIR", tmp_path)
     fetch_calls = {"n": 0}
-    def fake_raw(ticker, start, end):
+    def fake_collect(ticker, start, end):
         fetch_calls["n"] += 1
-        return pd.DataFrame({"종가": [100.0 * (1.001 ** i) for i in range(280)]})
-    import kium_bot
-    monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_raw)
+        close = [100.0 * (1.001 ** i) for i in range(280)]
+        qb._save_ohlcv_cache(ticker, end, close)
+        return {"ticker": ticker, "as_of": end, "series": {"close": close}}
+    monkeypatch.setattr(qb, "_collect_ohlcv", fake_collect)
 
     universe = [("005930", "삼성전자"), ("000660", "SK하이닉스")]
     funds = _fake_fundamentals()

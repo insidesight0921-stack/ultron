@@ -48,7 +48,20 @@ from dateutil.rrule import (
     MO, TU, WE, TH, FR, SA, SU,
 )
 
+from private_data_api_client import (
+    PrivateAPIError,
+    PrivateDataClient,
+    private_api_enabled,
+)
+from private_schedule_write_consumer import (
+    ScheduleExecutionResult,
+    ScheduleWriteExecutor,
+)
 from storage_paths import PATHS
+from telegram_write_identity import (
+    TelegramWriteIdentity,
+    validate_schedule_write_identity,
+)
 
 HOME = Path.home()
 PROJECT = HOME / "울트론" / "ai-agent"
@@ -565,6 +578,86 @@ def _format_list(events: list[dict], header: str = "📅 일정") -> str:
     return "\n".join(lines)
 
 
+def _list_for_display(
+    *,
+    action: str,
+    limit: int,
+    chat_id: str | None,
+    db_path: Path | str | None,
+    private_client: PrivateDataClient | None,
+) -> list[dict]:
+    # 명시적 db_path는 테스트·복구 경계이므로 API를 사용하지 않는다.
+    if (
+        db_path is None
+        and chat_id is not None
+        and (private_client is not None or private_api_enabled())
+    ):
+        try:
+            events = (private_client or PrivateDataClient()).list_schedule(
+                chat_id,
+                upcoming_only=(action == "upcoming"),
+                limit=limit,
+            )
+            for event in events:
+                event["when_pretty"] = fmt_when(str(event["when_at"]))
+            return events
+        except (PrivateAPIError, ValueError) as exc:
+            # Token·chat_id·일정 본문은 로그에 넣지 않는다.
+            log.warning(
+                "Private API schedule 읽기 실패, 로컬 DB fallback: %s",
+                type(exc).__name__,
+            )
+    return list_events(
+        upcoming_only=(action == "upcoming"),
+        limit=limit,
+        chat_id=chat_id,
+        db_path=db_path or DEFAULT_DB_PATH,
+    )
+
+
+def _format_private_write_outcome(
+    action: str,
+    outcome: ScheduleExecutionResult,
+) -> str:
+    result = outcome.result
+    if action == "delete":
+        event_id = int(result["event_id"])
+        return (
+            f"🗑 일정 #{event_id} 삭제 완료"
+            if result["deleted"]
+            else f"⚠️ #{event_id} 일정을 찾지 못했습니다."
+        )
+    if action == "complete":
+        event_id = int(result["event_id"])
+        return (
+            f"✅ 일정 #{event_id} 완료 표시"
+            if result["completed"]
+            else f"⚠️ #{event_id} 일정을 찾지 못했습니다."
+        )
+
+    extra_lines = []
+    if result.get("rrule_freq"):
+        recurring = str(result["rrule_freq"])
+        if result.get("rrule_byday"):
+            recurring += f" ({result['rrule_byday']})"
+        if result.get("rrule_until"):
+            recurring += f" until {result['rrule_until']}"
+        extra_lines.append(f"🔁 반복: {recurring}")
+    pre_values = result.get("pre_notify_minutes_list") or []
+    if len(pre_values) == 1:
+        extra_lines.append(f"🔔 사전 알림: {pre_values[0]}분 전")
+    elif pre_values:
+        parts = ", ".join(f"{minutes}분 전" for minutes in pre_values)
+        extra_lines.append(f"🔔 사전 알림 ({len(pre_values)}회): {parts}")
+    return (
+        f"✅ 일정 등록 #{result['id']}\n"
+        f"📌 {result['title']}\n"
+        f"📅 {fmt_when(str(result['when_at']))}"
+        + (f"\n📝 {result['notes']}" if result.get("notes") else "")
+        + ("\n" + "\n".join(extra_lines) if extra_lines else "")
+    )
+
+
 def run(
     action: str,
     title: str | None = None,
@@ -573,7 +666,11 @@ def run(
     notes: str | None = None,
     chat_id: str | None = None,
     limit: int = 20,
-    db_path: Path | str = DEFAULT_DB_PATH,
+    db_path: Path | str | None = None,
+    private_client: PrivateDataClient | None = None,
+    write_identity: TelegramWriteIdentity | None = None,
+    write_executor: ScheduleWriteExecutor | None = None,
+    write_user_approved: bool = False,
     **kwargs,
 ) -> tuple[str, list[dict]]:
     """라우터에서 호출하는 단일 entrypoint.
@@ -582,6 +679,30 @@ def run(
     knowledge_bot과 동일한 (answer, chunks) 인터페이스.
     """
     action = (action or "").strip().lower()
+    path = db_path or DEFAULT_DB_PATH
+    if write_identity is not None:
+        validate_schedule_write_identity(write_identity, action=action)
+    if write_executor is not None and action in {"add", "delete", "complete"}:
+        if db_path is not None:
+            raise ValueError("explicit db_path and Private write executor cannot be combined")
+        if write_identity is None:
+            raise ValueError("Private write executor requires Telegram write identity")
+        write_executor.require_ready(user_approved=write_user_approved)
+        outcome = write_executor.execute(
+            action=action,
+            chat_id=chat_id,
+            identity=write_identity,
+            user_approved=write_user_approved,
+            title=title,
+            when_at=when_at,
+            event_id=event_id,
+            notes=notes,
+            rrule_freq=kwargs.get("rrule_freq"),
+            rrule_byday=kwargs.get("rrule_byday"),
+            rrule_until=kwargs.get("rrule_until"),
+            pre_notify_minutes=kwargs.get("pre_notify_minutes"),
+        )
+        return _format_private_write_outcome(action, outcome), []
 
     try:
         if action == "add":
@@ -600,7 +721,7 @@ def run(
             conflicts = find_conflicts(
                 when_at, chat_id,
                 window_minutes=conflict_window,
-                db_path=db_path,
+                db_path=path,
             )
             try:
                 eid = add_event(
@@ -609,11 +730,11 @@ def run(
                     rrule_byday=kwargs.get("rrule_byday"),
                     rrule_until=kwargs.get("rrule_until"),
                     pre_notify_minutes=kwargs.get("pre_notify_minutes"),
-                    db_path=db_path,
+                    db_path=path,
                 )
             except ValueError as e:
                 return (f"❌ 등록 실패: {e}", [])
-            ev = get_event(eid, db_path=db_path)
+            ev = get_event(eid, db_path=path)
             extra_lines = []
             if ev.get("rrule_freq"):
                 rep = ev["rrule_freq"]
@@ -649,11 +770,12 @@ def run(
             )
 
         if action in ("list", "upcoming"):
-            events = list_events(
-                upcoming_only=(action == "upcoming"),
+            events = _list_for_display(
+                action=action,
                 limit=limit,
                 chat_id=chat_id,
                 db_path=db_path,
+                private_client=private_client,
             )
             header = "📅 다가오는 일정" if action == "upcoming" else "📅 전체 일정"
             return (_format_list(events, header), [])
@@ -661,7 +783,7 @@ def run(
         if action == "delete":
             if event_id is None:
                 return ("❌ 삭제할 일정 번호(event_id)를 알려주세요. 예: '#3 삭제해줘'", [])
-            ok = delete_event(int(event_id), db_path=db_path)
+            ok = delete_event(int(event_id), db_path=path)
             return (
                 f"🗑 일정 #{event_id} 삭제 완료" if ok else f"⚠️ #{event_id} 일정을 찾지 못했습니다.",
                 [],
@@ -670,7 +792,7 @@ def run(
         if action == "complete":
             if event_id is None:
                 return ("❌ 완료 처리할 일정 번호(event_id)를 알려주세요.", [])
-            ok = mark_completed(int(event_id), db_path=db_path)
+            ok = mark_completed(int(event_id), db_path=path)
             return (
                 f"✅ 일정 #{event_id} 완료 표시" if ok else f"⚠️ #{event_id} 일정을 찾지 못했습니다.",
                 [],

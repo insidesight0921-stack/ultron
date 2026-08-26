@@ -18,7 +18,8 @@ import invest_bot as ib
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _clear_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(ib, "_DISK_CACHE_DIR", tmp_path / "ticker-cache")
     ib._TICKER_MAP_CACHE.clear()
     yield
     ib._TICKER_MAP_CACHE.clear()
@@ -173,6 +174,32 @@ def test_detect_signals_empty_on_error():
 # ─── resolve_ticker ─────────────────────────────────
 
 
+def test_ticker_map_adapters_delegate_to_collector(monkeypatch, tmp_path):
+    seen = []
+    fake = {"005930": "삼성전자"}
+
+    monkeypatch.setattr(
+        ib,
+        "fetch_ticker_map_data",
+        lambda date: seen.append(("fetch", date)) or dict(fake),
+    )
+    monkeypatch.setattr(
+        ib,
+        "write_ticker_map_cache",
+        lambda date, mapping, cache_dir: seen.append(
+            ("write", date, mapping, cache_dir)
+        ),
+    )
+    monkeypatch.setattr(ib, "_DISK_CACHE_DIR", tmp_path)
+
+    assert ib._fetch_ticker_map_raw("20260822") == fake
+    ib._save_disk_cache("20260822", fake)
+    assert seen == [
+        ("fetch", "20260822"),
+        ("write", "20260822", fake, tmp_path),
+    ]
+
+
 def test_resolve_ticker_direct_six_digits(monkeypatch):
     monkeypatch.setattr(ib, "_fetch_ticker_map_raw",
                         lambda d: {"005930": "삼성전자", "035420": "NAVER"})
@@ -214,6 +241,96 @@ def test_resolve_ticker_six_digit_unknown_passes(monkeypatch):
     monkeypatch.setattr(ib, "_fetch_ticker_map_raw", lambda d: {})
     res = ib.resolve_ticker("999999")
     assert res == ("999999", "999999")
+
+
+def test_resolve_ticker_uses_data_api_when_enabled(monkeypatch):
+    class FakeClient:
+        def get_instrument(self, ticker):
+            return {"ticker": ticker, "name": "삼성전자"}
+
+        def search_instruments(self, query, limit=20):
+            return []
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(ib, "_DATA_API_CLIENT", FakeClient())
+    monkeypatch.setattr(
+        ib,
+        "get_ticker_map",
+        lambda: (_ for _ in ()).throw(AssertionError("기존 캐시가 호출되면 안 됨")),
+    )
+    assert ib.resolve_ticker("005930") == ("005930", "삼성전자")
+
+
+def test_resolve_name_uses_data_api_search_when_enabled(monkeypatch):
+    class FakeClient:
+        def get_instrument(self, ticker):
+            return None
+
+        def search_instruments(self, query, limit=20):
+            return [
+                {"ticker": "005935", "name": "삼성전자우"},
+                {"ticker": "005930", "name": "삼성전자"},
+            ]
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "true")
+    monkeypatch.setattr(ib, "_DATA_API_CLIENT", FakeClient())
+    assert ib.resolve_ticker("삼성") == ("005930", "삼성전자")
+
+
+def test_resolve_ticker_data_api_failure_falls_back(monkeypatch):
+    class FailingClient:
+        def get_instrument(self, ticker):
+            raise ib.DataAPIError("down")
+
+        def search_instruments(self, query, limit=20):
+            raise ib.DataAPIError("down")
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(ib, "_DATA_API_CLIENT", FailingClient())
+    monkeypatch.setattr(ib, "_fetch_ticker_map_raw", lambda d: {"005930": "삼성전자"})
+    assert ib.resolve_ticker("005930") == ("005930", "삼성전자")
+
+
+def test_fetch_ohlcv_uses_data_api_before_collector(monkeypatch):
+    class FakeClient:
+        def latest_ohlcv(self, ticker):
+            return {
+                "ticker": ticker,
+                "as_of": "20260821",
+                "series": {
+                    "date": ["20260820", "20260821"],
+                    "close": [70000, 71000],
+                    "volume": [10, 20],
+                },
+            }
+
+    monkeypatch.setenv("AI_AGENT_DATA_API_ENABLED", "1")
+    monkeypatch.setattr(ib, "_DATA_API_CLIENT", FakeClient())
+    monkeypatch.setattr(
+        ib,
+        "_fetch_ohlcv_raw",
+        lambda *args: (_ for _ in ()).throw(AssertionError("collector called")),
+    )
+    frame = ib.fetch_ohlcv("005930", days=2)
+    assert frame["종가"].tolist() == [70000, 71000]
+    assert frame["거래량"].tolist() == [10, 20]
+
+
+def test_ohlcv_compatibility_wrapper_delegates_to_collector(monkeypatch):
+    seen = []
+
+    def fake_collect(ticker, start, end, ohlcv_dir):
+        seen.append((ticker, start, end, ohlcv_dir))
+        return {
+            "ticker": ticker,
+            "as_of": end,
+            "series": {"date": [end], "close": [71000], "volume": [20]},
+        }
+
+    monkeypatch.setattr(ib, "collect_ohlcv", fake_collect)
+    frame = ib._fetch_ohlcv_raw("005930", "20260801", "20260821")
+    assert frame["종가"].tolist() == [71000]
+    assert seen[0][3] == ib.PATHS.shareable_cache_dir / "ohlcv"
 
 
 # ─── analyze ────────────────────────────────────────

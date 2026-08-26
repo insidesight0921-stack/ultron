@@ -27,12 +27,17 @@ LOG_DIR = PATHS.logs_dir
 
 # 접속 정보 (paper_ui.py 기본 포트와 동기화)
 PAPER_PORT = 8080
+DATA_API_PORT = 8090
+PRIVATE_DATA_API_PORT = 8091
 
 # 상시 실행 서비스 (agent_services.sh LABEL_* 와 동기화)
 SERVICES = [
+    ("data-api", f"http://127.0.0.1:{DATA_API_PORT}", "shareable 데이터 API (로컬 전용)"),
+    ("private-data-api", f"http://127.0.0.1:{PRIVATE_DATA_API_PORT}", "인증 Private API · watchlist/일정 읽기 (로컬 전용)"),
     ("watch-raw", "-", "raw/ 폴더 감시 → 정제 → 인덱싱"),
     ("telegram", "-", "텔레그램 봇 (라우터 → 도구)"),
     ("paper", f"http://localhost:{PAPER_PORT}", "paper trading 사이트"),
+    ("market-data-collector", "-", "매일 16:20 KOSPI 공개 지수 갱신"),
 ]
 
 # 등록된 봇/도구 (라우터 KNOWN_TOOLS + 에이전트)
@@ -89,6 +94,8 @@ def access_info() -> str:
     return (
         "🔌 접속 정보\n"
         f"• Paper 트레이딩: http://localhost:{PAPER_PORT}\n"
+        f"• Data API: http://127.0.0.1:{DATA_API_PORT} (로컬 전용)\n"
+        f"• Private API: http://127.0.0.1:{PRIVATE_DATA_API_PORT} (로컬 전용·인증 필요)\n"
         f"• 로그 경로: {LOG_DIR}\n"
         f"• watch_raw 로그: {PATHS.watch_raw_log}"
     )

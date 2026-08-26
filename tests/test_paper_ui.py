@@ -280,6 +280,206 @@ def test_all_paper_endpoints_exist(client):
         assert r.status_code == 200, f"{path} 실패: {r.status_code}"
 
 
+def test_paper_private_reads_are_api_first(client, monkeypatch):
+    import paper_ui
+
+    class FakePrivateClient:
+        def list_paper_portfolios(self):
+            return [{
+                "id": 9, "name": "API", "seed_capital": 1.0,
+                "created_at": "2026-08-24",
+            }]
+
+        def list_paper_positions(self, slot=None):
+            return [{
+                "id": 8, "slot_id": 7, "ticker": "005930", "name": "삼성전자",
+                "quantity": 1, "avg_price": 1.0, "opened_at": "2026-08-24",
+                "updated_at": "2026-08-24", "slot_name": slot or "콴텍",
+            }]
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
+    monkeypatch.setattr(
+        paper_ui.pdb, "list_portfolios",
+        lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+    monkeypatch.setattr(
+        paper_ui.pdb, "list_positions",
+        lambda slot=None: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+
+    assert client.get("/api/paper/portfolios").json()[0]["name"] == "API"
+    assert client.get("/api/paper/positions?slot=콴텍").json()[0]["slot_name"] == "콴텍"
+
+
+def test_paper_private_read_failure_falls_back_to_local_db(client, monkeypatch):
+    import paper_ui
+    from private_data_api_client import PrivateAPIUnavailable
+
+    class DownPrivateClient:
+        def list_paper_portfolios(self):
+            raise PrivateAPIUnavailable("down")
+
+        def list_paper_positions(self, slot=None):
+            raise PrivateAPIUnavailable("down")
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: DownPrivateClient())
+    assert len(client.get("/api/paper/portfolios").json()) == 1
+    assert client.get("/api/paper/positions").status_code == 200
+
+
+def test_paper_slots_and_trades_are_api_first(client, monkeypatch):
+    import paper_ui
+
+    class FakePrivateClient:
+        def list_paper_slots(self):
+            return [{
+                "id": 2, "portfolio_id": 1, "name": "API 슬롯",
+                "allocation_pct": 0.4, "current_capital": 1.0,
+                "created_at": "2026-08-24", "n_positions": 3, "n_trades": 4,
+            }]
+
+        def list_paper_trades(self, slot=None, limit=100):
+            return [{
+                "id": 4, "slot_id": 2, "ticker": "005930", "name": "삼성전자",
+                "side": "buy", "quantity": 1, "price": 1.0, "fees": 0.0,
+                "notes": None, "executed_at": "2026-08-24", "slot_name": slot or "API 슬롯",
+            }][:limit]
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
+    monkeypatch.setattr(
+        paper_ui.pdb, "list_slots",
+        lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+    monkeypatch.setattr(
+        paper_ui.pdb, "list_trades",
+        lambda slot=None, limit=100: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+
+    assert client.get("/api/paper/slots").json()[0]["n_trades"] == 4
+    assert client.get("/api/paper/trades?slot=콴텍&limit=1").json()[0]["slot_name"] == "콴텍"
+
+
+def test_paper_slot_and_trade_failure_falls_back_to_local_db(client, monkeypatch):
+    import paper_ui
+    from private_data_api_client import PrivateAPIUnavailable
+
+    class DownPrivateClient:
+        def list_paper_slots(self):
+            raise PrivateAPIUnavailable("down")
+
+        def list_paper_trades(self, slot=None, limit=100):
+            raise PrivateAPIUnavailable("down")
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: DownPrivateClient())
+    assert len(client.get("/api/paper/slots").json()) == 4
+    assert client.get("/api/paper/trades?limit=1").status_code == 200
+
+
+def test_paper_ipo_reads_are_api_first(client, monkeypatch):
+    import paper_ui
+
+    class FakePrivateClient:
+        def list_paper_ipo_records(self):
+            return [{
+                "id": 5, "name": "API 공모주", "sub_start": None, "sub_end": None,
+                "listing_date": None, "grade": None, "score": None, "factors": None,
+                "subscribed": 0, "alloc_amount": None, "listing_price": None,
+                "return_pct": None, "notes": None, "created_at": "2026-08-24",
+                "updated_at": "2026-08-24",
+            }]
+
+        def list_paper_ipo_stats(self):
+            return [{
+                "grade": "A", "n": 1, "avg_return": 10.0,
+                "min_return": 10.0, "max_return": 10.0, "n_pos": 1,
+            }]
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
+    monkeypatch.setattr(
+        paper_ui.pdb, "ipo_list",
+        lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+    monkeypatch.setattr(
+        paper_ui.pdb, "ipo_stats",
+        lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+
+    assert client.get("/api/ipo/records").json()[0]["name"] == "API 공모주"
+    assert client.get("/api/ipo/stats").json()[0]["avg_return"] == 10.0
+
+
+def test_paper_ipo_read_failure_falls_back_to_local_db(client, monkeypatch):
+    import paper_ui
+    from private_data_api_client import PrivateAPIUnavailable
+
+    class DownPrivateClient:
+        def list_paper_ipo_records(self):
+            raise PrivateAPIUnavailable("down")
+
+        def list_paper_ipo_stats(self):
+            raise PrivateAPIUnavailable("down")
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: DownPrivateClient())
+    assert client.get("/api/ipo/records").status_code == 200
+    assert client.get("/api/ipo/stats").status_code == 200
+
+
+def test_paper_calculated_reads_are_api_first(client, monkeypatch):
+    import paper_ui
+
+    class FakePrivateClient:
+        def list_paper_performance(self):
+            return [{
+                "slot_id": 2, "slot_name": "API", "n_closed": 1,
+                "win_rate": 100.0, "total_pnl": 10_000,
+                "total_return_pct": 1.0, "max_drawdown_pct": 0.0,
+                "sharpe": None, "n_open_positions": 0, "open_cost": 0,
+            }]
+
+        def get_paper_myquant_tags(self):
+            return {
+                "tags": {"정배열": {"n": 1, "pnl": 10_000, "win_rate": 100.0}},
+                "text": "API 태그",
+            }
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
+    monkeypatch.setattr(
+        paper_ui.pdb, "performance_stats",
+        lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+    monkeypatch.setattr(
+        paper_ui.pdb, "list_trades",
+        lambda limit=100: (_ for _ in ()).throw(AssertionError("direct DB read")),
+    )
+
+    assert client.get("/api/performance").json()[0]["slot_name"] == "API"
+    assert client.get("/api/paper/myquant-tags").json()["text"] == "API 태그"
+
+
+def test_paper_calculated_read_failure_falls_back_to_local_db(client, monkeypatch):
+    import paper_ui
+    from private_data_api_client import PrivateAPIUnavailable
+
+    class DownPrivateClient:
+        def list_paper_performance(self):
+            raise PrivateAPIUnavailable("down")
+
+        def get_paper_myquant_tags(self):
+            raise PrivateAPIUnavailable("down")
+
+    monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
+    monkeypatch.setattr(paper_ui, "_private_client", lambda: DownPrivateClient())
+    assert client.get("/api/performance").status_code == 200
+    assert client.get("/api/paper/myquant-tags").status_code == 200
+
+
 def test_buy_flow_still_works(client):
     """v3.18 BC — kium-scan 추가에도 매수 정상."""
     body = {

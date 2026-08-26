@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper Trading — 디자인 시안</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane:        #f9f9f7;
+    --surface:      #ffffff;
+    --surface-2:    #f4f4f1;
+    --ink:          #0b0b0b;
+    --ink-2:        #52514e;
+    --ink-muted:    #898781;
+    --hairline:     #e1e0d9;
+    --ring:         rgba(11,11,11,0.10);
+    --accent:       #2a78d6;
+    --accent-ink:   #1c5cab;
+    --slot-1:       #2a78d6;
+    --slot-2:       #eb6834;
+    --slot-3:       #1baf7a;
+    --slot-4:       #eda100;
+    --good:         #006300;
+    --bad:          #c0322f;
+    --warning:      #fab219;
+    --radius:       10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --plane:      #0d0d0d;
+      --surface:    #1a1a19;
+      --surface-2:  #232321;
+      --ink:        #ffffff;
+      --ink-2:      #c3c2b7;
+      --ink-muted:  #898781;
+      --hairline:   #2c2c2a;
+      --ring:       rgba(255,255,255,0.10);
+      --accent:     #3987e5;
+      --accent-ink: #86b6ef;
+      --slot-1:     #3987e5;
+      --slot-2:     #d95926;
+      --slot-3:     #199e70;
+      --slot-4:     #c98500;
+      --good:       #0ca30c;
+      --bad:        #e66767;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--plane);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ── 헤더 ───────────────────────────── */
+  .masthead {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 28px;
+  }
+  .masthead h1 {
+    margin: 0; font-size: 22px; font-weight: 620; letter-spacing: -0.01em;
+  }
+  .masthead p { margin: 4px 0 0; color: var(--ink-muted); font-size: 13px; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--surface); border: 1px solid var(--hairline);
+    border-radius: 999px; padding: 6px 12px;
+    font-size: 12px; color: var(--ink-2);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+
+  /* ── KPI 타일 ───────────────────────── */
+  .kpis {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--hairline); border: 1px solid var(--hairline);
+    border-radius: var(--radius); overflow: hidden; margin-bottom: 28px;
+  }
+  .kpi { background: var(--surface); padding: 16px 18px; }
+  .kpi-label {
+    font-size: 12px; color: var(--ink-muted); margin-bottom: 6px;
+    letter-spacing: 0.01em;
+  }
+  .kpi-value { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+  .kpi-value .unit { font-size: 14px; font-weight: 500; color: var(--ink-2); margin-left: 2px; }
+  .kpi-meta { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
+  .delta { font-weight: 600; }
+  .delta.up { color: var(--good); }
+  .delta.down { color: var(--bad); }
+
+  /* ── 섹션 ───────────────────────────── */
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin: 0 0 12px;
+  }
+  .section-head h2 {
+    margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2);
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .section-head .note { font-size: 12px; color: var(--ink-muted); }
+
+  /* ── 배분 바 ────────────────────────── */
+  .alloc { margin-bottom: 12px; }
+  .alloc-bar {
+    display: flex; gap: 2px; height: 10px; margin-bottom: 10px;
+  }
+  .alloc-bar span { border-radius: 3px; }
+  .alloc-legend {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    font-size: 12px; color: var(--ink-2);
+  }
+  .alloc-legend i {
+    display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+    margin-right: 6px; vertical-align: 1px;
+  }
+
+  /* ── 슬롯 카드 ──────────────────────── */
+  .slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 32px; }
+  .slot {
+    background: var(--surface); border: 1px solid var(--hairline);
+    border-radius: var(--radius); padding: 14px 16px;
+    position: relative; overflow: hidden;
+  }
+  .slot::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--slot-color);
+  }
+  .slot-name { font-size: 13px; font-weight: 600; }
+  .slot-share { font-size: 12px; color: var(--ink-muted); font-weight: 400; margin-left: 4px; }
+  .slot-capital {
+    font-size: 19px; font-weight: 600; letter-spacing: -0.02em; margin-top: 6px;
+  }
+  .slot-meta {
+    font-size: 12px; color: var(--ink-muted); margin-top: 6px;
+    display: flex; gap: 10px;
+  }
+
+  /* ── 탭 ─────────────────────────────── */
+  .tabs {
+    display: flex; gap: 2px; border-bottom: 1px solid var(--hairline);
+    margin-bottom: 20px; overflow-x: auto;
+  }
+  .tab {
+    appearance: none; background: none; border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--ink-muted); font: inherit; font-size: 13px;
+    padding: 10px 14px; cursor: pointer; white-space: nowrap;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── 카드 ───────────────────────────── */
+  .card {
+    background: var(--surface); border: 1px solid var(--hairline);
+    border-radius: var(--radius);
+  }
+  .card + .card { margin-top: 20px; }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--hairline);
+  }
+  .card-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .card-body { padding: 18px; }
+  .card-foot {
+    padding: 10px 18px; border-top: 1px solid var(--hairline);
+    font-size: 12px; color: var(--ink-muted); background: var(--surface-2);
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+
+  /* ── 폼 ─────────────────────────────── */
+  .field { display: grid; gap: 6px; }
+  .field label { font-size: 12px; color: var(--ink-2); }
+  .form-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .form-grid .span-2 { grid-column: span 2; }
+  input, select {
+    background: var(--surface); color: var(--ink);
+    border: 1px solid var(--hairline); border-radius: 7px;
+    padding: 9px 11px; font: inherit; width: 100%;
+  }
+  input::placeholder { color: var(--ink-muted); }
+  input:focus, select:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent);
+  }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .btn {
+    appearance: none; font: inherit; font-weight: 600; font-size: 13px;
+    border-radius: 7px; padding: 10px 20px; cursor: pointer;
+    border: 1px solid var(--hairline); background: var(--surface); color: var(--ink);
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  .btn-buy { border-color: var(--good); color: var(--good); }
+  .btn-sell { border-color: var(--bad); color: var(--bad); }
+  .btn-sm { padding: 7px 14px; font-size: 12px; }
+
+  /* ── 표 ─────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 10px 18px; text-align: left; }
+  thead th {
+    font-size: 12px; font-weight: 500; color: var(--ink-muted);
+    border-bottom: 1px solid var(--hairline); white-space: nowrap;
+  }
+  tbody td { border-bottom: 1px solid var(--hairline); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--surface-2); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .ticker { color: var(--ink-muted); font-variant-numeric: tabular-nums; margin-left: 6px; font-size: 12px; }
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 2px 7px; border-radius: 5px; border: 1px solid var(--ring);
+    color: var(--ink-2);
+  }
+  .tag-buy { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+  .tag-sell { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .note-row {
+    display: flex; gap: 8px; align-items: flex-start;
+    font-size: 12px; color: var(--ink-2);
+  }
+
+  /* ── 슬롯 그룹 ──────────────────────── */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    appearance: none; font: inherit; font-size: 12px; cursor: pointer;
+    background: var(--surface); color: var(--ink-2);
+    border: 1px solid var(--hairline); border-radius: 999px; padding: 5px 12px;
+  }
+  .chip:hover { background: var(--surface-2); }
+  .chip[aria-pressed="true"] {
+    background: var(--surface-2); color: var(--ink); font-weight: 600;
+    border-color: var(--ring);
+  }
+  .chip i {
+    display: inline-block; width: 7px; height: 7px; border-radius: 2px;
+    margin-right: 6px; vertical-align: 1px;
+  }
+  tr.group td {
+    background: var(--surface-2); border-bottom: 1px solid var(--hairline);
+    padding-top: 8px; padding-bottom: 8px;
+  }
+  tr.group:hover td { background: var(--surface-2); }
+  .group-label { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+  .group-label i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .group-label .count { font-weight: 400; font-size: 12px; color: var(--ink-muted); }
+  .group-sum { font-size: 12px; color: var(--ink-2); }
+  tr.empty td { color: var(--ink-muted); font-size: 12px; }
+  .slot-tag { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-2); }
+  .slot-tag i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .indent { padding-left: 34px; }
+  .note-row .icon { color: var(--warning); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <h1>Paper Trading</h1>
+      <p>실주문 없음 · 가상 매매 · 6개월 검증 후 KIS 입문</p>
+    </div>
+    <span class="status-pill"><span class="dot"></span>모의 운용 중 · 기준일 2026-08-25</span>
+  </header>
+
+  <section class="kpis">
+    <div class="kpi">
+      <div class="kpi-label">총 평가금액</div>
+      <div class="kpi-value">91,300,599<span class="unit">원</span></div>
+      <div class="kpi-meta">투입 원금 91,000,000원</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">누적 손익</div>
+      <div class="kpi-value delta up">+300,599<span class="unit">원</span></div>
+      <div class="kpi-meta"><span class="delta up">＋0.33%</span> · 실현 +182,400원</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">코스피 대비</div>
+      <div class="kpi-value delta down">−1.12<span class="unit">%p</span></div>
+      <div class="kpi-meta">코스피 +1.45% · 동일 기간</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">보유 · 거래</div>
+      <div class="kpi-value">4<span class="unit">종목</span></div>
+      <div class="kpi-meta">누적 거래 169건 · 승률 54%</div>
+    </div>
+  </section>
+
+  <div class="section-head">
+    <h2>슬롯 배분</h2>
+    <span class="note">막대는 실제 평가금액 비중 · 괄호는 목표 비율(wiki/투자/분산_슬롯_비율.md)</span>
+  </div>
+
+  <div class="alloc">
+    <div class="alloc-bar">
+      <span style="flex:36263662; background: var(--slot-1)"></span>
+      <span style="flex:25036937; background: var(--slot-2)"></span>
+      <span style="flex:20000000; background: var(--slot-3)"></span>
+      <span style="flex:10000000; background: var(--slot-4)"></span>
+    </div>
+    <div class="alloc-legend">
+      <span><i style="background: var(--slot-1)"></i>콴텍 39.7% <span style="color:var(--ink-muted)">(목표 40%)</span></span>
+      <span><i style="background: var(--slot-2)"></i>키움 27.4% <span style="color:var(--ink-muted)">(목표 40%)</span></span>
+      <span><i style="background: var(--slot-3)"></i>IPO 21.9% <span style="color:var(--ink-muted)">(목표 20%)</span></span>
+      <span><i style="background: var(--slot-4)"></i>마이퀀트 11.0% <span style="color:var(--ink-muted)">(목표 10%)</span></span>
+    </div>
+  </div>
+
+  <div class="slots">
+    <div class="slot" style="--slot-color: var(--slot-1)">
+      <div class="slot-name">콴텍<span class="slot-share">40%</span></div>
+      <div class="slot-capital">36,263,662원</div>
+      <div class="slot-meta"><span>포지션 1</span><span>거래 42</span></div>
+    </div>
+    <div class="slot" style="--slot-color: var(--slot-2)">
+      <div class="slot-name">키움<span class="slot-share">40%</span></div>
+      <div class="slot-capital">25,036,937원</div>
+      <div class="slot-meta"><span>포지션 3</span><span>거래 127</span></div>
+    </div>
+    <div class="slot" style="--slot-color: var(--slot-3)">
+      <div class="slot-name">IPO<span class="slot-share">20%</span></div>
+      <div class="slot-capital">20,000,000원</div>
+      <div class="slot-meta"><span>포지션 0</span><span>거래 0</span></div>
+    </div>
+    <div class="slot" style="--slot-color: var(--slot-4)">
+      <div class="slot-name">마이퀀트<span class="slot-share">10%</span></div>
+      <div class="slot-capital">10,000,000원</div>
+      <div class="slot-meta"><span>포지션 0</span><span>거래 0</span></div>
+    </div>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-panel="p-order">주문</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-chart">차트</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-signal">키움봇 신호</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-quant">콴텍봇</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-ipo">IPO봇</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-myquant">나만의 퀀트</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-perf">성과</button>
+  </div>
+
+  <!-- 주문 -->
+  <section id="p-order" class="panel active">
+    <div class="card">
+      <div class="card-head">
+        <h3>주문</h3>
+        <span class="note-row">가상 매매만 실행됩니다</span>
+      </div>
+      <div class="card-body">
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-slot">슬롯</label>
+            <select id="f-slot"><option>콴텍</option><option>키움</option><option>IPO</option><option>마이퀀트</option></select>
+          </div>
+          <div class="field">
+            <label for="f-ticker">종목코드</label>
+            <input id="f-ticker" placeholder="005930">
+          </div>
+          <div class="field span-2">
+            <label for="f-name">종목명</label>
+            <input id="f-name" placeholder="자동 채움">
+          </div>
+          <div class="field">
+            <label for="f-qty">수량</label>
+            <input id="f-qty" placeholder="0">
+          </div>
+          <div class="field">
+            <label for="f-price">단가</label>
+            <input id="f-price" placeholder="현재가 불러오기">
+          </div>
+          <div class="field span-2">
+            <label for="f-memo">메모</label>
+            <input id="f-memo" placeholder="선택">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary">현재가 조회</button>
+          <button class="btn btn-buy">매수</button>
+          <button class="btn btn-sell">매도</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>보유 포지션</h3>
+        <div class="chips" data-filter="pos">
+          <button class="chip" aria-pressed="true" data-slot="all">전체 4종목</button>
+          <button class="chip" aria-pressed="false" data-slot="quantec"><i style="background:var(--slot-1)"></i>콴텍 1</button>
+          <button class="chip" aria-pressed="false" data-slot="kiwoom"><i style="background:var(--slot-2)"></i>키움 3</button>
+          <button class="chip" aria-pressed="false" data-slot="ipo"><i style="background:var(--slot-3)"></i>IPO 0</button>
+          <button class="chip" aria-pressed="false" data-slot="myquant"><i style="background:var(--slot-4)"></i>마이퀀트 0</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th><th class="num">평가손익</th><th class="num">수익률</th></tr>
+        </thead>
+        <tbody data-group="pos">
+          <tr class="group" data-slot="quantec">
+            <td colspan="4"><span class="group-label"><i style="background:var(--slot-1)"></i>콴텍<span class="count">1종목 · 평가 4,532,000원</span></span></td>
+            <td class="num group-sum delta up">+59,301</td>
+            <td class="num group-sum delta up">+1.33%</td>
+          </tr>
+          <tr data-slot="quantec">
+            <td class="indent">신세계<span class="ticker">004170</span></td>
+            <td class="num">11</td><td class="num">406,609</td><td class="num">412,000</td>
+            <td class="num delta up">+59,301</td><td class="num delta up">+1.33%</td>
+          </tr>
+
+          <tr class="group" data-slot="kiwoom">
+            <td colspan="4"><span class="group-label"><i style="background:var(--slot-2)"></i>키움<span class="count">3종목 · 평가 7,844,800원</span></span></td>
+            <td class="num group-sum delta up">+93,273</td>
+            <td class="num group-sum delta up">+1.20%</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td class="indent">삼성전기<span class="ticker">009150</span></td>
+            <td class="num">2</td><td class="num">1,318,976</td><td class="num">1,302,000</td>
+            <td class="num delta down">−33,952</td><td class="num delta down">−1.29%</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td class="indent">LS ELECTRIC<span class="ticker">010120</span></td>
+            <td class="num">21</td><td class="num">183,875</td><td class="num">191,400</td>
+            <td class="num delta up">+158,025</td><td class="num delta up">+4.09%</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td class="indent">한화오션<span class="ticker">042660</span></td>
+            <td class="num">14</td><td class="num">88,300</td><td class="num">86,100</td>
+            <td class="num delta down">−30,800</td><td class="num delta down">−2.49%</td>
+          </tr>
+
+          <tr class="group" data-slot="ipo">
+            <td colspan="4"><span class="group-label"><i style="background:var(--slot-3)"></i>IPO<span class="count">보유 없음</span></span></td>
+            <td class="num group-sum">—</td><td class="num group-sum">—</td>
+          </tr>
+          <tr class="group" data-slot="myquant">
+            <td colspan="4"><span class="group-label"><i style="background:var(--slot-4)"></i>마이퀀트<span class="count">보유 없음</span></span></td>
+            <td class="num group-sum">—</td><td class="num group-sum">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>거래 내역</h3>
+        <div class="chips" data-filter="trd">
+          <button class="chip" aria-pressed="true" data-slot="all">전체 169건</button>
+          <button class="chip" aria-pressed="false" data-slot="quantec"><i style="background:var(--slot-1)"></i>콴텍 42</button>
+          <button class="chip" aria-pressed="false" data-slot="kiwoom"><i style="background:var(--slot-2)"></i>키움 127</button>
+          <button class="chip" aria-pressed="false" data-slot="ipo"><i style="background:var(--slot-3)"></i>IPO 0</button>
+          <button class="chip" aria-pressed="false" data-slot="myquant"><i style="background:var(--slot-4)"></i>마이퀀트 0</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>시각</th><th>봇</th><th>종목</th><th>방향</th><th class="num">수량</th><th class="num">단가</th><th class="num">수수료</th></tr>
+        </thead>
+        <tbody data-group="trd">
+          <tr data-slot="kiwoom">
+            <td>08-25 14:22</td><td><span class="slot-tag"><i style="background:var(--slot-2)"></i>키움</span></td>
+            <td>LS ELECTRIC<span class="ticker">010120</span></td>
+            <td><span class="tag tag-buy">매수</span></td>
+            <td class="num">21</td><td class="num">183,875</td><td class="num">579</td>
+          </tr>
+          <tr data-slot="quantec">
+            <td>08-25 10:07</td><td><span class="slot-tag"><i style="background:var(--slot-1)"></i>콴텍</span></td>
+            <td>신세계<span class="ticker">004170</span></td>
+            <td><span class="tag tag-buy">매수</span></td>
+            <td class="num">11</td><td class="num">406,609</td><td class="num">671</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td>08-22 15:11</td><td><span class="slot-tag"><i style="background:var(--slot-2)"></i>키움</span></td>
+            <td>현대로템<span class="ticker">064350</span></td>
+            <td><span class="tag tag-sell">매도</span></td>
+            <td class="num">9</td><td class="num">214,500</td><td class="num">482</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td>08-22 09:41</td><td><span class="slot-tag"><i style="background:var(--slot-2)"></i>키움</span></td>
+            <td>한화오션<span class="ticker">042660</span></td>
+            <td><span class="tag tag-buy">매수</span></td>
+            <td class="num">14</td><td class="num">88,300</td><td class="num">185</td>
+          </tr>
+          <tr data-slot="quantec">
+            <td>08-21 13:38</td><td><span class="slot-tag"><i style="background:var(--slot-1)"></i>콴텍</span></td>
+            <td>KT&amp;G<span class="ticker">033780</span></td>
+            <td><span class="tag tag-sell">매도</span></td>
+            <td class="num">18</td><td class="num">136,700</td><td class="num">553</td>
+          </tr>
+          <tr data-slot="kiwoom">
+            <td>08-21 09:12</td><td><span class="slot-tag"><i style="background:var(--slot-2)"></i>키움</span></td>
+            <td>삼성전기<span class="ticker">009150</span></td>
+            <td><span class="tag tag-buy">매수</span></td>
+            <td class="num">2</td><td class="num">1,318,976</td><td class="num">791</td>
+          </tr>
+          <tr class="empty" data-slot="ipo" style="display:none"><td colspan="7">IPO 봇 거래가 아직 없습니다.</td></tr>
+          <tr class="empty" data-slot="myquant" style="display:none"><td colspan="7">마이퀀트 봇 거래가 아직 없습니다.</td></tr>
+        </tbody>
+      </table>
+      <div class="card-foot">최신순 · 칩을 누르면 해당 봇 거래만 남습니다</div>
+    </div>
+  </section>
+
+  <!-- 키움봇 신호 -->
+  <section id="p-signal" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <h3>키움봇 모멘텀 스캔</h3>
+        <div class="actions" style="margin:0">
+          <button class="btn btn-sm">설정</button>
+          <button class="btn btn-primary btn-sm">스캔 실행</button>
+        </div>
+      </div>
+      <div class="card-body" style="padding-bottom:0">
+        <div class="form-grid" style="grid-template-columns: repeat(3, 1fr)">
+          <div class="field"><label>대상 시장</label><select><option>KOSPI 200</option><option>KOSDAQ 150</option></select></div>
+          <div class="field"><label>상위 종목 수</label><input value="10"></div>
+          <div class="field"><label>크래시 감지</label><select><option>사용</option><option>사용 안 함</option></select></div>
+        </div>
+      </div>
+      <table style="margin-top:18px">
+        <thead><tr><th>#</th><th>종목</th><th class="num">점수</th><th class="num">최근 1M</th><th class="num">최근 12M</th><th class="num">현재가</th></tr></thead>
+        <tbody>
+          <tr><td class="num">1</td><td>HD현대일렉트릭<span class="ticker">267260</span></td><td class="num">2.84</td><td class="num delta up">+12.4%</td><td class="num delta up">+96.2%</td><td class="num">412,500</td></tr>
+          <tr><td class="num">2</td><td>두산에너빌리티<span class="ticker">034020</span></td><td class="num">2.31</td><td class="num delta up">+8.1%</td><td class="num delta up">+74.5%</td><td class="num">68,900</td></tr>
+          <tr><td class="num">3</td><td>한화에어로스페이스<span class="ticker">012450</span></td><td class="num">2.07</td><td class="num delta down">−2.6%</td><td class="num delta up">+61.3%</td><td class="num">802,000</td></tr>
+        </tbody>
+      </table>
+      <div class="card-foot">
+        <span class="note-row"><span class="icon">!</span>생존편향 주의 — 현재 상장 종목 기준이라 1~2%p 과대 추정될 수 있습니다. 종목을 클릭하면 매수 폼에 자동 입력됩니다.</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="p-chart" class="panel">
+    <div class="card"><div class="card-body" style="color:var(--ink-muted)">차트 영역 — 기존 Plotly 캔들차트가 이 카드 안에 들어갑니다.</div></div>
+  </section>
+  <section id="p-quant" class="panel">
+    <div class="card"><div class="card-body" style="color:var(--ink-muted)">콴텍봇 — 국면 카드 + 팩터 점수 표가 신호 탭과 같은 형식으로 들어갑니다.</div></div>
+  </section>
+  <section id="p-ipo" class="panel">
+    <div class="card"><div class="card-body" style="color:var(--ink-muted)">IPO봇 — 스캔 결과 / 청약 기록 / 등급별 통계 3개 카드.</div></div>
+  </section>
+  <section id="p-myquant" class="panel">
+    <div class="card"><div class="card-body" style="color:var(--ink-muted)">나만의 퀀트 — 조건 스캔 표 + 태그별 실현 성과.</div></div>
+  </section>
+  <section id="p-perf" class="panel">
+    <div class="card"><div class="card-body" style="color:var(--ink-muted)">성과 — 상단 KPI 타일과 같은 지표를 기간별로 표시.</div></div>
+  </section>
+
+</div>
+<script>
+  document.querySelectorAll('.tab').forEach(function (t) {
+    t.addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (x) { x.setAttribute('aria-selected', 'false'); });
+      document.querySelectorAll('.panel').forEach(function (p) { p.classList.remove('active'); });
+      t.setAttribute('aria-selected', 'true');
+      document.getElementById(t.dataset.panel).classList.add('active');
+    });
+  });
+
+  document.querySelectorAll('.chips').forEach(function (bar) {
+    var key = bar.dataset.filter;
+    var body = document.querySelector('tbody[data-group="' + key + '"]');
+    bar.addEventListener('click', function (e) {
+      var chip = e.target.closest('.chip');
+      if (!chip) return;
+      bar.querySelectorAll('.chip').forEach(function (c) { c.setAttribute('aria-pressed', 'false'); });
+      chip.setAttribute('aria-pressed', 'true');
+      var slot = chip.dataset.slot;
+      body.querySelectorAll('tr').forEach(function (row) {
+        var match = (slot === 'all' || row.dataset.slot === slot);
+        // 빈 상태 안내 줄은 해당 봇만 골랐을 때에만 보여준다
+        if (row.classList.contains('empty')) match = (row.dataset.slot === slot);
+        row.style.display = match ? '' : 'none';
+      });
+    });
+  });
+</script>
+</body>
+</html>

@@ -58,6 +58,11 @@ from schedule_bot import run as schedule_run  # noqa: E402
 from finance_bot import run as finance_run  # noqa: E402
 from invest_bot import run as invest_run  # noqa: E402
 from watchlist_bot import run as watchlist_run  # noqa: E402
+from telegram_write_identity import (  # noqa: E402
+    build_schedule_write_identity,
+    build_watchlist_write_identity,
+)
+from private_write_runtime import load_private_write_runtime_bundle  # noqa: E402
 from kium_bot import run as kium_run, scan_universe as kium_scan  # noqa: E402
 from quant_bot import run as quant_run, recommend_top_n as quant_recommend, snapshot as quant_snapshot  # noqa: E402  # v3.22 콴텍봇
 from ipo_bot import run as ipo_run, scan_upcoming as ipo_scan  # noqa: E402  # v3.26 IPO봇
@@ -145,6 +150,11 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("trafilatura").setLevel(logging.WARNING)
 logging.getLogger("pdfminer").setLevel(logging.WARNING)
 log = logging.getLogger("telegram_bot")
+
+# main()에서만 설정한다. bundle 환경키가 없으면 계속 None이며 기존 직접 쓰기를 유지한다.
+_PRIVATE_WRITE_CLIENT = None
+_PRIVATE_WRITE_EXECUTOR = None
+_PRIVATE_SCHEDULE_WRITE_EXECUTOR = None
 
 
 # ─── 유틸 ────────────────────────────────────────────
@@ -784,9 +794,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         sched_action = args.get("action", "")
         await notice.edit_text(f"{mode_emoji}📅 일정봇 처리 중... ({sched_action})")
         try:
-            answer, chunks = await asyncio.to_thread(
-                schedule_run, **{**args, "chat_id": chat_id}
-            )
+            write_identity = None
+            if sched_action in {"add", "delete", "complete"}:
+                write_identity = build_schedule_write_identity(
+                    update_id=update.update_id,
+                    chat_id=update.effective_chat.id,
+                    user_id=update.effective_user.id,
+                    message_id=update.message.message_id,
+                    action=sched_action,
+                )
+            schedule_args = {
+                **args,
+                "chat_id": chat_id,
+                "write_identity": write_identity,
+            }
+            if (
+                sched_action in {"add", "delete", "complete"}
+                and _PRIVATE_SCHEDULE_WRITE_EXECUTOR is not None
+            ):
+                schedule_args.update(
+                    write_executor=_PRIVATE_SCHEDULE_WRITE_EXECUTOR,
+                    write_user_approved=True,
+                )
+            answer, chunks = await asyncio.to_thread(schedule_run, **schedule_args)
         except Exception as e:
             log.exception("schedule_bot 실패")
             await notice.edit_text(f"❌ 일정봇 오류: {e}")
@@ -827,7 +857,25 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         wl_action = args.get("action", "")
         await notice.edit_text(f"{mode_emoji}⭐ 관심종목 처리 중... ({wl_action})")
         try:
-            answer, chunks = await asyncio.to_thread(watchlist_run, **args)
+            write_identity = None
+            if wl_action in {"add", "remove"}:
+                write_identity = build_watchlist_write_identity(
+                    update_id=update.update_id,
+                    chat_id=update.effective_chat.id,
+                    user_id=update.effective_user.id,
+                    message_id=update.message.message_id,
+                    action=wl_action,
+                )
+            watchlist_args = {**args, "write_identity": write_identity}
+            if _PRIVATE_WRITE_CLIENT is not None:
+                watchlist_args["private_client"] = _PRIVATE_WRITE_CLIENT
+            if wl_action in {"add", "remove"} and _PRIVATE_WRITE_EXECUTOR is not None:
+                watchlist_args.update(
+                    write_executor=_PRIVATE_WRITE_EXECUTOR,
+                    # add/remove를 요청한 동일한 사용자 메시지가 명시 승인 신호다.
+                    write_user_approved=True,
+                )
+            answer, chunks = await asyncio.to_thread(watchlist_run, **watchlist_args)
         except Exception as e:
             log.exception("watchlist_bot 실패")
             await notice.edit_text(f"❌ 관심종목 처리 오류: {e}")
@@ -2445,6 +2493,16 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ─── main ────────────────────────────────────────────
 
 def main() -> None:
+    global _PRIVATE_WRITE_CLIENT, _PRIVATE_WRITE_EXECUTOR
+    global _PRIVATE_SCHEDULE_WRITE_EXECUTOR
+    runtime_bundle = load_private_write_runtime_bundle()
+    if runtime_bundle is not None:
+        _PRIVATE_WRITE_CLIENT = runtime_bundle.build_client()
+        _PRIVATE_WRITE_EXECUTOR = runtime_bundle.build_executor(_PRIVATE_WRITE_CLIENT)
+        if runtime_bundle.schedule_writes_enabled:
+            _PRIVATE_SCHEDULE_WRITE_EXECUTOR = runtime_bundle.build_schedule_executor(
+                _PRIVATE_WRITE_CLIENT
+            )
     log.info(f"🤖 텔레그램 봇 시작 (허용 사용자: {len(ALLOWED_IDS)}명)")
     log.info(f"   마스터: {MASTER_MODEL} (라우팅)")
     log.info(f"   하위:   {LLM_MODEL} (지식봇)")

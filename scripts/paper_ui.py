@@ -45,6 +45,11 @@ except Exception:
 sys.path.insert(0, str(PROJECT / "scripts"))
 from storage_paths import PATHS  # noqa: E402
 import paper_db as pdb  # noqa: E402
+from private_data_api_client import (  # noqa: E402
+    PrivateAPIError,
+    PrivateDataClient,
+    private_api_enabled,
+)
 from kium_bot import run as kium_run  # noqa: E402  # v3.19 신호 탭
 import quant_bot as qb  # noqa: E402  # v3.23 콴텍 탭
 
@@ -63,6 +68,97 @@ except Exception:
 
 
 app = FastAPI(title="Paper Trading UI")
+
+
+def _private_client() -> PrivateDataClient:
+    return PrivateDataClient()
+
+
+def _list_portfolios() -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_portfolios()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API portfolio fallback: %s", type(exc).__name__)
+    return pdb.list_portfolios()
+
+
+def _list_positions(slot=None) -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_positions(slot=slot)
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API position fallback: %s", type(exc).__name__)
+    return pdb.list_positions(slot=slot)
+
+
+def _list_slots() -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_slots()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API slot fallback: %s", type(exc).__name__)
+    slots = pdb.list_slots()
+    out = []
+    for slot in slots:
+        summary = pdb.slot_summary(slot["id"]) or {}
+        out.append({
+            **slot,
+            "n_positions": summary.get("n_positions", 0),
+            "n_trades": summary.get("n_trades", 0),
+        })
+    return out
+
+
+def _list_trades(slot=None, *, limit: int = 100) -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_trades(slot=slot, limit=limit)
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API trade fallback: %s", type(exc).__name__)
+    return pdb.list_trades(slot=slot, limit=limit)
+
+
+def _list_ipo_records() -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_ipo_records()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API IPO records fallback: %s", type(exc).__name__)
+    return pdb.ipo_list()
+
+
+def _list_ipo_stats() -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_ipo_stats()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API IPO stats fallback: %s", type(exc).__name__)
+    return pdb.ipo_stats()
+
+
+def _get_performance() -> list[dict]:
+    if private_api_enabled():
+        try:
+            return _private_client().list_paper_performance()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API performance fallback: %s", type(exc).__name__)
+    return pdb.performance_stats()
+
+
+def _get_myquant_tags() -> dict:
+    if private_api_enabled():
+        try:
+            return _private_client().get_paper_myquant_tags()
+        except (PrivateAPIError, ValueError) as exc:
+            log.warning("Private API myquant-tags fallback: %s", type(exc).__name__)
+    import trade_analytics as ta
+
+    roundtrips = ta.compute_roundtrips(pdb.list_trades(limit=100000))
+    return {
+        "tags": ta.tag_performance(roundtrips),
+        "text": ta.format_tag_performance(roundtrips),
+    }
 
 
 
@@ -87,7 +183,7 @@ async def api_ipo_scan():
 
 @app.get("/api/ipo/records")
 async def api_ipo_records():
-    return JSONResponse(pdb.ipo_list())
+    return JSONResponse(_list_ipo_records())
 
 
 @app.post("/api/ipo/subscribe")
@@ -123,37 +219,27 @@ async def api_ipo_close(req: Request):
 
 @app.get("/api/ipo/stats")
 async def api_ipo_stats():
-    return JSONResponse(pdb.ipo_stats())
+    return JSONResponse(_list_ipo_stats())
 
 
 @app.get("/api/paper/portfolios")
 async def api_portfolios():
-    return JSONResponse(pdb.list_portfolios())
+    return JSONResponse(_list_portfolios())
 
 
 @app.get("/api/paper/slots")
 async def api_slots():
-    slots = pdb.list_slots()
-    # 슬롯별 요약 보강
-    out = []
-    for s in slots:
-        summary = pdb.slot_summary(s["id"]) or {}
-        out.append({
-            **s,
-            "n_positions": summary.get("n_positions", 0),
-            "n_trades": summary.get("n_trades", 0),
-        })
-    return JSONResponse(out)
+    return JSONResponse(_list_slots())
 
 
 @app.get("/api/paper/positions")
 async def api_positions(slot: str | None = None):
-    return JSONResponse(pdb.list_positions(slot=slot))
+    return JSONResponse(_list_positions(slot=slot))
 
 
 @app.get("/api/paper/trades")
 async def api_trades(slot: str | None = None, limit: int = 100):
-    return JSONResponse(pdb.list_trades(slot=slot, limit=limit))
+    return JSONResponse(_list_trades(slot=slot, limit=limit))
 
 
 @app.get("/api/paper/quote/{ticker}")
@@ -483,10 +569,7 @@ async def api_myquant_scan(market: str = "1028", refresh: bool = False):
 async def api_myquant_tags():
     """마이퀀트 태그별 실현 성과 (buy notes의 MQ[...] 기준)."""
     try:
-        import trade_analytics as ta
-        rts = ta.compute_roundtrips(pdb.list_trades(limit=100000))
-        return JSONResponse({"tags": ta.tag_performance(rts),
-                             "text": ta.format_tag_performance(rts)})
+        return JSONResponse(_get_myquant_tags())
     except Exception as e:
         log.exception("myquant-tags 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -496,7 +579,7 @@ async def api_myquant_tags():
 async def api_performance():
     """v3.31: 슬롯별 실현 성과 통계 (승률·수익률·MDD·샤프)."""
     try:
-        return JSONResponse(pdb.performance_stats())
+        return JSONResponse(_get_performance())
     except Exception as e:
         log.exception("performance 조회 실패")
         return JSONResponse({"error": str(e)}, status_code=500)

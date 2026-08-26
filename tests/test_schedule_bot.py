@@ -16,12 +16,24 @@ from pathlib import Path
 import pytest
 
 import schedule_bot as sb
+import telegram_write_identity as twi
+from private_data_api_client import PrivateAPIUnavailable
 
 
 @pytest.fixture
 def db(tmp_path: Path) -> Path:
     """매 테스트마다 새 SQLite 파일 — 격리 보장."""
     return tmp_path / "test_schedule.db"
+
+
+def _write_identity(action="add"):
+    return twi.build_schedule_write_identity(
+        update_id=8001,
+        chat_id=-100987654321,
+        user_id=654321,
+        message_id=4001,
+        action=action,
+    )
 
 
 # ─── parse_when ───────────────────────────────────────
@@ -224,6 +236,90 @@ def test_run_upcoming_lists(db):
     sb.add_event("앞일", "2027-01-01T10:00:00", db_path=db)
     msg, _ = sb.run("upcoming", db_path=db)
     assert "앞일" in msg
+
+
+def test_run_list_prefers_private_api_without_local_db(monkeypatch):
+    class Client:
+        def list_schedule(self, chat_id, *, upcoming_only, limit):
+            assert chat_id == "111"
+            assert upcoming_only is False
+            assert limit == 20
+            return [
+                {
+                    "id": 7,
+                    "title": "API 일정",
+                    "when_at": "2099-01-01T10:00:00",
+                    "notes": None,
+                    "completed": False,
+                    "rrule_freq": None,
+                    "rrule_byday": None,
+                    "rrule_until": None,
+                    "pre_notify_minutes": 0,
+                    "pre_notify_minutes_list": [],
+                }
+            ]
+
+    monkeypatch.setattr(
+        sb,
+        "list_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("local DB must not be read")),
+    )
+    message, _ = sb.run("list", chat_id="111", private_client=Client())
+    assert "API 일정" in message
+
+
+def test_run_upcoming_falls_back_when_private_api_is_unavailable(monkeypatch, db):
+    sb.add_event("폴백 일정", "2099-01-01T10:00:00", chat_id="111", db_path=db)
+
+    class Client:
+        def list_schedule(self, chat_id, *, upcoming_only, limit):
+            raise PrivateAPIUnavailable("down")
+
+    monkeypatch.setattr(sb, "DEFAULT_DB_PATH", db)
+    message, _ = sb.run("upcoming", chat_id="111", private_client=Client())
+    assert "폴백 일정" in message
+
+
+def test_schedule_writes_do_not_call_private_api(db):
+    class Client:
+        def list_schedule(self, *args, **kwargs):
+            raise AssertionError("write actions must not use Private API")
+
+    message, _ = sb.run(
+        "add",
+        title="직접 쓰기 유지",
+        when_at="2099-01-01T10:00:00",
+        chat_id="111",
+        db_path=db,
+        private_client=Client(),
+    )
+    assert "등록" in message
+
+
+def test_schedule_run_accepts_matching_identity_without_changing_direct_write(db):
+    message, _ = sb.run(
+        "add",
+        title="identity 일정",
+        when_at="2099-01-01T10:00:00",
+        chat_id="111",
+        db_path=db,
+        write_identity=_write_identity("add"),
+    )
+
+    assert "등록" in message
+    assert len(sb.list_events(upcoming_only=False, chat_id="111", db_path=db)) == 1
+
+
+def test_schedule_run_rejects_identity_for_different_operation(db):
+    with pytest.raises(ValueError, match="does not match"):
+        sb.run(
+            "complete",
+            event_id=1,
+            chat_id="111",
+            db_path=db,
+            write_identity=_write_identity("delete"),
+        )
+    assert db.exists() is False
 
 
 def test_run_delete_existing(db):

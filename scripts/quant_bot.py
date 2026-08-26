@@ -28,7 +28,7 @@ v3.23 (신규):
 외부 의존:
 - ECOS_API_KEY (CLI KR · BSI KR) — 거시 국면용
 - FRED_API_KEY (CLI US) — 거시 국면용
-- pykrx (KOSPI200 universe + ohlcv + fundamental + cap) — 팩터 스코어링용
+- Shareable API/collector (universe + OHLCV + fundamental + cap)
 """
 from __future__ import annotations
 
@@ -46,6 +46,13 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from storage_paths import PATHS
+from data_api_client import DataAPIError, ShareableDataClient, data_api_enabled
+from market_data_collector import (
+    collect_ohlcv,
+    fetch_fundamental_data,
+    fetch_market_cap_data,
+    write_ohlcv_cache,
+)
 
 log = logging.getLogger("quant_bot")
 if not log.handlers:
@@ -574,68 +581,41 @@ def parse_phase_weights_from_wiki(path: Path | None = None) -> dict[str, dict[st
     return _normalize_phase_weights(out)
 
 
-# ─── pykrx fundamental + market cap ─────────────
-
-
-def _fetch_fundamental_raw(date: str, market: str = "KOSPI"):
-    """pykrx 한 시장 전체 PBR/PER/EPS/BPS/DPS/DIV. 외부 호출."""
-    from pykrx import stock
-    return stock.get_market_fundamental_by_ticker(date, market=market)
-
-
-def _fetch_cap_raw(date: str, market: str = "KOSPI"):
-    """pykrx 한 시장 전체 시가총액·거래대금·상장주식수. 외부 호출."""
-    from pykrx import stock
-    return stock.get_market_cap_by_ticker(date, market=market)
+# ─── fundamental + market cap collector adapters ─────────────
 
 
 def fetch_fundamentals(market: str = "KOSPI") -> dict[str, dict[str, float]]:
-    """ticker → {BPS, PER, PBR, EPS, DPS, DIV}. 실패 시 빈 dict."""
+    """API 우선 ticker별 공개 fundamental. 실패 시 collector, 최종 빈 dict."""
+    if data_api_enabled():
+        try:
+            payload = _DATA_API_CLIENT.latest_factors(market)
+            if payload is not None:
+                return payload["fundamentals"]
+        except (DataAPIError, ValueError) as exc:
+            log.warning("Shareable Data API fundamental 실패 — collector 사용: %s", exc)
     today = datetime.now().strftime("%Y%m%d")
     try:
-        df = _fetch_fundamental_raw(today, market=market)
+        return fetch_fundamental_data(today, market=market)
     except Exception as e:
         log.warning(f"fundamental fetch 실패 ({market}): {e}")
         return {}
-    out: dict[str, dict[str, float]] = {}
-    if df is None or len(df) == 0:
-        return out
-    for ticker in df.index:
-        try:
-            row = df.loc[ticker]
-            out[str(ticker)] = {
-                "BPS": float(row.get("BPS", 0) or 0),
-                "PER": float(row.get("PER", 0) or 0),
-                "PBR": float(row.get("PBR", 0) or 0),
-                "EPS": float(row.get("EPS", 0) or 0),
-                "DPS": float(row.get("DPS", 0) or 0),
-                "DIV": float(row.get("DIV", 0) or 0),
-            }
-        except Exception:
-            continue
-    return out
 
 
 def fetch_market_caps(market: str = "KOSPI") -> dict[str, float]:
-    """ticker → 시가총액(원). 실패 시 빈 dict."""
+    """API 우선 ticker별 공개 시가총액. 실패 시 collector, 최종 빈 dict."""
+    if data_api_enabled():
+        try:
+            payload = _DATA_API_CLIENT.latest_factors(market)
+            if payload is not None:
+                return payload["market_caps"]
+        except (DataAPIError, ValueError) as exc:
+            log.warning("Shareable Data API 시가총액 실패 — collector 사용: %s", exc)
     today = datetime.now().strftime("%Y%m%d")
     try:
-        df = _fetch_cap_raw(today, market=market)
+        return fetch_market_cap_data(today, market=market)
     except Exception as e:
         log.warning(f"market cap fetch 실패 ({market}): {e}")
         return {}
-    out: dict[str, float] = {}
-    if df is None or len(df) == 0:
-        return out
-    for ticker in df.index:
-        try:
-            row = df.loc[ticker]
-            cap = float(row.get("시가총액", 0) or 0)
-            if cap > 0:
-                out[str(ticker)] = cap
-        except Exception:
-            continue
-    return out
 
 
 # ─── OHLCV 디스크 캐시 (v3.23.2) ───────────────
@@ -644,6 +624,7 @@ def fetch_market_caps(market: str = "KOSPI") -> dict[str, float]:
 
 OHLCV_TTL_SEC = 24 * 60 * 60
 _OHLCV_CACHE_DIR: Path = PATHS.shareable_cache_dir / "ohlcv"
+_DATA_API_CLIENT = ShareableDataClient()
 
 
 def _ohlcv_cache_path(ticker: str, end_date: str) -> Path:
@@ -652,6 +633,15 @@ def _ohlcv_cache_path(ticker: str, end_date: str) -> Path:
 
 def _load_ohlcv_cache(ticker: str, end_date: str):
     """ticker × end_date 캐시 hit → close pd.Series (DataFrame['종가'])로 복원. miss → None."""
+    if data_api_enabled():
+        try:
+            payload = _DATA_API_CLIENT.latest_ohlcv(ticker)
+            if payload is not None and payload["as_of"] == end_date:
+                import pandas as pd  # 지연 import
+                return pd.DataFrame({"종가": payload["series"]["close"]})
+        except (DataAPIError, ValueError) as exc:
+            log.debug("Shareable Data API OHLCV 실패 — 기존 캐시 사용 (%s): %s", ticker, exc)
+
     p = _ohlcv_cache_path(ticker, end_date)
     if not p.exists():
         return None
@@ -670,27 +660,23 @@ def _load_ohlcv_cache(ticker: str, end_date: str):
 
 def _save_ohlcv_cache(ticker: str, end_date: str, close_series) -> None:
     """close pd.Series/list → 디스크 캐시. 빈 응답·예외 시 skip (v3.21 패턴)."""
-    if close_series is None:
-        return
     try:
-        if hasattr(close_series, "tolist"):
-            close_list = [float(x) for x in close_series.tolist()]
-        else:
-            close_list = [float(x) for x in close_series]
-        if not close_list:
-            log.debug(f"OHLCV 캐시 skip — 빈 응답 ({ticker})")
-            return
-        _OHLCV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        p = _ohlcv_cache_path(ticker, end_date)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"close": close_list}), encoding="utf-8")
-        tmp.replace(p)
+        write_ohlcv_cache(
+            ticker,
+            end_date,
+            close_series,
+            ohlcv_dir=_OHLCV_CACHE_DIR,
+        )
     except Exception as e:
         log.debug(f"OHLCV 캐시 저장 실패 {ticker}: {e}")
 
 
+def _collect_ohlcv(ticker: str, start: str, end: str) -> dict:
+    return collect_ohlcv(ticker, start, end, ohlcv_dir=_OHLCV_CACHE_DIR)
+
+
 def fetch_ohlcv_cached(ticker: str, start: str, end: str):
-    """OHLCV with 24h 디스크 캐시. 외부 fetcher는 kium_bot._fetch_ohlcv_raw 재사용.
+    """OHLCV with 24h 디스크 캐시. 외부 수집·쓰기는 market_data_collector 소유.
 
     캐시 hit이면 close만 담은 DataFrame 반환 (다른 컬럼 필요 없음 — v3.23 팩터 점수는
     close만 사용. low_vol·momentum 모두 close 기반).
@@ -699,21 +685,12 @@ def fetch_ohlcv_cached(ticker: str, start: str, end: str):
     if cached is not None:
         return cached
     try:
-        from kium_bot import _fetch_ohlcv_raw
-        df = _fetch_ohlcv_raw(ticker, start, end)
+        payload = _collect_ohlcv(ticker, start, end)
     except Exception as e:
         log.debug(f"{ticker} ohlcv fetch 실패: {e}")
         return None
-    if df is None or len(df) == 0:
-        return None
-    close = None
-    for col in ("종가", "Close", "close"):
-        if hasattr(df, "columns") and col in df.columns:
-            close = df[col]
-            break
-    if close is not None:
-        _save_ohlcv_cache(ticker, end, close)
-    return df
+    import pandas as pd
+    return pd.DataFrame({"종가": payload["series"]["close"]})
 
 
 # ─── 5팩터 raw 점수 ────────────────────────────
@@ -863,7 +840,7 @@ def recommend_top_n(
       market: KOSPI200 / KOSDAQ150 / KOSPI200+KOSDAQ150
       top_n: 미지정 시 phase별 디폴트 (Recovery/Expansion 8 / Slowdown 6 / Contraction 4)
       weights: 미지정 시 wiki 파싱 → fallback (PHASE_FACTOR_WEIGHTS_FALLBACK)
-      fundamentals/market_caps: 직접 주입(테스트용). None이면 pykrx fetch.
+      fundamentals/market_caps: 직접 주입(테스트용). None이면 API/전용 수집 계층 사용.
 
     Returns:
       Top N StockRecommendation. universe 비었거나 phase 모르면 빈 list.
@@ -892,10 +869,20 @@ def recommend_top_n(
         top_n = PHASE_TOP_N_DEFAULT.get(phase, 8)
     top_n = max(1, int(top_n))
 
+    if market == "KOSDAQ150":
+        factor_markets = ("KOSDAQ",)
+    elif market == "KOSPI200+KOSDAQ150":
+        factor_markets = ("KOSPI", "KOSDAQ")
+    else:
+        factor_markets = ("KOSPI",)
     if fundamentals is None:
-        fundamentals = fetch_fundamentals()
+        fundamentals = {}
+        for factor_market in factor_markets:
+            fundamentals.update(fetch_fundamentals(factor_market))
     if market_caps is None:
-        market_caps = fetch_market_caps()
+        market_caps = {}
+        for factor_market in factor_markets:
+            market_caps.update(fetch_market_caps(factor_market))
 
     today = datetime.now()
     start_date = (

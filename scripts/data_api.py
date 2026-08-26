@@ -6,7 +6,7 @@ import argparse
 import ipaddress
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from shareable_store import ShareableNotFound, ShareableStore, ShareableStoreError
 from storage_paths import PATHS
@@ -56,10 +56,55 @@ def create_app(store: ShareableStore | None = None) -> FastAPI:
         except ShareableStoreError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.get("/v1/shareable/instruments")
+    async def search_instruments(
+        query: str = Query(min_length=1, max_length=100),
+        limit: int = Query(default=20, ge=1, le=50),
+    ):
+        try:
+            return shareable.search_instruments(query, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ShareableStoreError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/v1/shareable/universes/{market}/latest")
+    async def latest_universe(market: str):
+        try:
+            return shareable.latest_universe(market)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ShareableNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ShareableStoreError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/v1/shareable/market-indices/{index_name}/latest")
+    async def latest_market_index(index_name: str):
+        try:
+            return shareable.latest_market_index(index_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ShareableNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ShareableStoreError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @app.get("/v1/shareable/ohlcv/{ticker}/latest")
     async def latest_ohlcv(ticker: str):
         try:
             return shareable.latest_ohlcv(ticker)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ShareableNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ShareableStoreError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/v1/shareable/factors/{market}/latest")
+    async def latest_factors(market: str):
+        try:
+            return shareable.latest_factors(market)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ShareableNotFound as exc:

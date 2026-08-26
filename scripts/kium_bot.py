@@ -15,7 +15,7 @@ KOSPI200 universe(또는 KOSDAQ150/KOSPI200+KOSDAQ150)에 대해 12-1 모멘텀
   스캔 universe에서 누락. 이로 인해 모멘텀 수익률이 1~2%p 과대 추정.
   v3.16에서는 명시 경고만, v3.18+에서 해소(historical PIT universe).
 
-- mode='fast' 디폴트: pykrx 호출 + 순수계산만 (LLM 무호출). ~수초.
+- mode='fast' 디폴트: Shareable API/전용 수집기 + 순수계산만 (LLM 무호출).
 
 API:
   fetch_universe(market="KOSPI200") -> list[(ticker, name)]
@@ -35,6 +35,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd  # v3.17: 변동성·MA 계산용
+from data_api_client import DataAPIError, ShareableDataClient, data_api_enabled
+from market_data_collector import (
+    collect_market_index,
+    collect_ohlcv,
+    fetch_universe_data,
+    write_universe_cache,
+)
 from storage_paths import PATHS
 
 log = logging.getLogger("kium_bot")
@@ -46,17 +53,12 @@ PRICE_TTL_SEC = 1 * 60 * 60  # 1h — 같은 날 반복 스캔 시 캐시
 
 # in-memory cache: key=(market, date), value=(timestamp, list[(ticker, name)])
 _UNIVERSE_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+_DATA_API_CLIENT = ShareableDataClient()
 
 _DISK_CACHE_DIR: Path = PATHS.shareable_cache_dir
 
 
 # ─── universe (KRX 지수 구성종목) ───────────────────
-
-
-_INDEX_CODE = {
-    "KOSPI200": "1028",
-    "KOSDAQ150": "2203",
-}
 
 
 def _disk_cache_path(market: str, date: str) -> Path:
@@ -81,46 +83,18 @@ def _load_disk_cache(market: str, date: str) -> list[tuple[str, str]] | None:
 
 
 def _save_disk_cache(market: str, date: str, lst: list[tuple[str, str]]) -> None:
-    # v3.21 — 빈 list/None은 캐시하지 않는다. 휴장일 빈 응답이 24h 영속화되는
-    # 함정 차단 (월요일 fresh fetch가 정상 작동하도록).
     if not lst:
         log.info(f"universe 디스크 캐시 skip — 빈 응답 (market={market}, date={date})")
         return
     try:
-        _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        p = _disk_cache_path(market, date)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps([[t, n] for t, n in lst], ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(p)  # 원자적 쓰기
+        write_universe_cache(market, date, lst, cache_dir=_DISK_CACHE_DIR)
     except Exception as e:
         log.warning(f"universe 디스크 캐시 저장 실패 — 무시: {e}")
 
 
 def _fetch_universe_raw(market: str, date: str) -> list[tuple[str, str]]:
-    """KRX 지수 구성종목 → [(ticker, name)]. 외부 의존이라 테스트는 monkeypatch."""
-    from pykrx import stock  # 지연 import
-
-    market = (market or "").strip().upper()
-    if market in _INDEX_CODE:
-        tickers = stock.get_index_portfolio_deposit_file(_INDEX_CODE[market], date)
-    elif market == "KOSPI200+KOSDAQ150":
-        kospi = set(stock.get_index_portfolio_deposit_file(_INDEX_CODE["KOSPI200"], date))
-        kosdaq = set(stock.get_index_portfolio_deposit_file(_INDEX_CODE["KOSDAQ150"], date))
-        tickers = list(kospi | kosdaq)
-    else:
-        raise ValueError(f"지원하지 않는 universe: {market!r}")
-
-    out: list[tuple[str, str]] = []
-    for t in tickers:
-        try:
-            name = stock.get_market_ticker_name(t)
-        except Exception:
-            name = t
-        out.append((str(t), str(name)))
-    return out
+    """호환 wrapper. 실제 외부 수집 구현은 market_data_collector가 소유한다."""
+    return fetch_universe_data(market, date)
 
 
 def fetch_universe(market: str = "KOSPI200", force_refresh: bool = False) -> list[tuple[str, str]]:
@@ -129,6 +103,7 @@ def fetch_universe(market: str = "KOSPI200", force_refresh: bool = False) -> lis
     today = datetime.now().strftime("%Y%m%d")
     key = f"{market}_{today}"
 
+    stale_api_universe: list[tuple[str, str]] | None = None
     if not force_refresh:
         cached = _UNIVERSE_CACHE.get(key)
         if cached:
@@ -136,12 +111,45 @@ def fetch_universe(market: str = "KOSPI200", force_refresh: bool = False) -> lis
             if time.time() - ts < UNIVERSE_TTL_SEC:
                 return lst
 
+        if data_api_enabled():
+            try:
+                payload = _DATA_API_CLIENT.latest_universe(market)
+                if payload is not None and payload["as_of"] == today:
+                    api_universe = [
+                        (item["ticker"], item["name"])
+                        for item in payload["instruments"]
+                    ]
+                    _UNIVERSE_CACHE[key] = (time.time(), api_universe)
+                    return api_universe
+                if payload is not None:
+                    stale_api_universe = [
+                        (item["ticker"], item["name"])
+                        for item in payload["instruments"]
+                    ]
+            except (DataAPIError, ValueError) as exc:
+                log.debug(
+                    "Shareable Data API universe 실패 — 기존 캐시 사용 (%s): %s",
+                    market,
+                    exc,
+                )
+
         disk = _load_disk_cache(market, today)
         if disk is not None:
             _UNIVERSE_CACHE[key] = (time.time(), disk)
             return disk
 
-    lst = _fetch_universe_raw(market, today)
+    try:
+        lst = _fetch_universe_raw(market, today)
+    except Exception as exc:
+        if stale_api_universe:
+            log.warning(
+                "universe 최신 갱신 실패 — 마지막 Shareable 캐시 사용 (%s, %s): %s",
+                market,
+                payload["as_of"],
+                exc,
+            )
+            return stale_api_universe
+        raise
     # v3.21 — 빈 list면 in-memory + 디스크 둘 다 캐시 skip. 다음 호출에서 다시 fetch.
     # 휴장일/네트워크 오류 같은 일시적 빈 응답을 24h 영속화하는 함정 차단.
     if lst:
@@ -156,63 +164,83 @@ def fetch_universe(market: str = "KOSPI200", force_refresh: bool = False) -> lis
 
 
 def _fetch_ohlcv_raw(ticker: str, start: str, end: str):
-    """pykrx OHLCV. 외부 호출이라 테스트는 monkeypatch."""
-    from pykrx import stock
-    return stock.get_market_ohlcv(start, end, ticker)
+    """호환 wrapper. 실제 수집·캐시 쓰기는 market_data_collector가 소유한다."""
+    payload = collect_ohlcv(ticker, start, end)
+    return pd.DataFrame({"종가": payload["series"]["close"]})
+
+
+def _load_ohlcv(ticker: str, start: str, end: str):
+    """API 우선 OHLCV 읽기. 최신 기준일이 다르면 전용 수집기를 사용한다."""
+    if data_api_enabled():
+        try:
+            payload = _DATA_API_CLIENT.latest_ohlcv(ticker)
+            if payload is not None and payload["as_of"] == end:
+                return pd.DataFrame({"종가": payload["series"]["close"]})
+        except (DataAPIError, ValueError) as exc:
+            log.debug(
+                "Shareable Data API OHLCV 실패 — collector 사용 (%s): %s", ticker, exc
+            )
+    return _fetch_ohlcv_raw(ticker, start, end)
 
 
 # ─── KOSPI 지수 + VKOSPI fetch (v3.17) ──────────────
 
 
-def _fetch_kospi_close_raw(start: str, end: str):
-    """KOSPI 종합지수 일봉. KRX 지수코드 1001. 외부 호출이라 monkeypatch."""
-    from pykrx import stock
-    return stock.get_index_ohlcv_by_date(start, end, "1001")
+def _recent_market_index_payload(payload: dict | None, *, max_age_days: int = 4):
+    if not payload:
+        return None
+    try:
+        dates = payload["series"]["date"]
+        closes = payload["series"]["close"]
+        latest = datetime.strptime(dates[-1], "%Y%m%d")
+        age = (datetime.now().date() - latest.date()).days
+        if age < 0 or age > max_age_days or len(dates) != len(closes):
+            return None
+        return pd.Series(closes)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
 
-def _fetch_vkospi_raw(start: str, end: str):
-    """KOSPI200 변동성지수(V-KOSPI 200) 일봉. KRX 지수코드 1003."""
-    from pykrx import stock
-    return stock.get_index_ohlcv_by_date(start, end, "1003")
+def _collect_market_index(index_name: str, *, days: int) -> dict:
+    return collect_market_index(index_name, days=days)
 
 
 def fetch_kospi_close(days: int = 280):
     """KOSPI 일봉 종가 시리즈 (pd.Series). 영업일 days개 안전 확보."""
-    end = datetime.now()
-    start = (end - timedelta(days=int(days * 1.6) + 30)).strftime("%Y%m%d")
-    end_s = end.strftime("%Y%m%d")
+    if data_api_enabled():
+        try:
+            cached = _recent_market_index_payload(
+                _DATA_API_CLIENT.latest_market_index("KOSPI")
+            )
+            if cached is not None and len(cached) >= min(int(days), 200):
+                return cached
+        except (DataAPIError, ValueError) as exc:
+            log.debug("KOSPI Data API 실패 — collector 갱신: %s", exc)
     try:
-        df = _fetch_kospi_close_raw(start, end_s)
+        payload = _collect_market_index("KOSPI", days=int(days))
+        return pd.Series(payload["series"]["close"])
     except Exception as e:
         log.warning(f"KOSPI fetch 실패: {e}")
         return None
-    if df is None or len(df) == 0:
-        return None
-    for col in ("종가", "Close", "close"):
-        if hasattr(df, "columns") and col in df.columns:
-            return df[col]
-    return None
 
 
 def fetch_vkospi_latest():
     """VKOSPI 최신 종가 (단일 float). 실패 시 None."""
-    end = datetime.now()
-    start = (end - timedelta(days=10)).strftime("%Y%m%d")
-    end_s = end.strftime("%Y%m%d")
+    if data_api_enabled():
+        try:
+            cached = _recent_market_index_payload(
+                _DATA_API_CLIENT.latest_market_index("VKOSPI")
+            )
+            if cached is not None:
+                return float(cached.iloc[-1])
+        except (DataAPIError, ValueError) as exc:
+            log.debug("VKOSPI Data API 실패 — collector 갱신: %s", exc)
     try:
-        df = _fetch_vkospi_raw(start, end_s)
+        payload = _collect_market_index("VKOSPI", days=20)
+        return float(payload["series"]["close"][-1])
     except Exception as e:
         log.warning(f"VKOSPI fetch 실패: {e}")
         return None
-    if df is None or len(df) == 0:
-        return None
-    for col in ("종가", "Close", "close"):
-        if hasattr(df, "columns") and col in df.columns:
-            try:
-                return float(df[col].iloc[-1])
-            except Exception:
-                return None
-    return None
 
 
 # ─── 모멘텀 스코어 ──────────────────────────────────
@@ -288,14 +316,14 @@ def scan_universe(
     results: list[dict] = []
     for ticker, name in universe:
         try:
-            df = _fetch_ohlcv_raw(ticker, start_date, end_date)
+            df = _load_ohlcv(ticker, start_date, end_date)
         except Exception as e:
             log.debug(f"{ticker} ohlcv 호출 실패: {e}")
             continue
         if df is None or len(df) < lookback_days + 1:
             continue
 
-        # pykrx 한국어 컬럼: '종가'. 영어 fallback도 허용.
+        # collector/호환 테스트의 한국어·영어 종가 컬럼을 모두 허용.
         close = None
         for col in ("종가", "Close", "close"):
             if hasattr(df, "columns") and col in df.columns:

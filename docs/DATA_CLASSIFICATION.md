@@ -81,6 +81,7 @@ Vault 전체는 현재 하나의 Private 지식창고로 취급한다. 공개 �
 |---|---|---|
 | Telegram bot | watchlist, 일정, paper, vault RAG | user_id 화이트리스트 + local Gemma |
 | Paper UI 8080 | paper DB 조회 및 buy/sell 쓰기 | 인증은 없지만 `127.0.0.1`에만 바인딩 |
+| Private API 8091 | watchlist + chat별 일정 list/upcoming 읽기 | 별도 Bearer 인증·read-only SQLite·token은 `.env` 전용 |
 | agent bot `read_file` | 프로젝트 scripts/docs/README와 vault wiki의 허용 텍스트 | 디렉터리·확장자 allowlist, 숨김 파일·DB 차단 |
 | coding bot accurate mode | Anthropic API | 사용자 프롬프트가 외부 전송됨. Private 데이터 입력 금지 |
 | LanceDB RAG | vault 전체 | local-only, MCP 없음 |

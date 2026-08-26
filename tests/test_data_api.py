@@ -18,8 +18,38 @@ def client(tmp_path):
     (cache / "ticker_map_20260822.json").write_text(
         json.dumps({"005930": "삼성전자"}, ensure_ascii=False), encoding="utf-8"
     )
+    (cache / "universe_KOSPI200_20260822.json").write_text(
+        json.dumps([["005930", "삼성전자"]], ensure_ascii=False), encoding="utf-8"
+    )
+    indices = cache / "indices"
+    indices.mkdir()
+    (indices / "market_index_KOSPI_20260822.json").write_text(
+        json.dumps(
+            {
+                "index": "KOSPI",
+                "series": {"date": ["20260821", "20260822"], "close": [3100, 3110]},
+                "token": "must-not-leak",
+            }
+        ),
+        encoding="utf-8",
+    )
     (ohlcv / "005930_20260822.json").write_text(
         json.dumps({"close": [70000, 71000], "token": "must-not-leak"}),
+        encoding="utf-8",
+    )
+    factors = cache / "factors"
+    factors.mkdir()
+    (factors / "factor_snapshot_KOSPI_20260821.json").write_text(
+        json.dumps(
+            {
+                "market": "KOSPI",
+                "fundamentals": {
+                    "005930": {"BPS": 50000, "PBR": 1.2, "chat_id": "must-not-leak"}
+                },
+                "market_caps": {"005930": 4e15},
+                "portfolio": {"cash": 1},
+            }
+        ),
         encoding="utf-8",
     )
     return TestClient(create_app(ShareableStore(root)))
@@ -37,11 +67,56 @@ def test_instrument_endpoint(client):
     assert response.json()["name"] == "삼성전자"
 
 
+def test_instrument_search_endpoint(client):
+    response = client.get("/v1/shareable/instruments?query=삼성&limit=5")
+    assert response.status_code == 200
+    assert response.json() == [
+        {"ticker": "005930", "name": "삼성전자", "as_of": "20260822"}
+    ]
+
+
 def test_ohlcv_endpoint_filters_unexpected_fields(client):
     response = client.get("/v1/shareable/ohlcv/005930/latest")
     assert response.status_code == 200
     assert response.json()["series"] == {"close": [70000, 71000]}
     assert "token" not in response.text
+
+
+def test_universe_endpoint_filters_and_validates_market(client):
+    response = client.get("/v1/shareable/universes/KOSPI200/latest")
+    assert response.status_code == 200
+    assert response.json() == {
+        "market": "KOSPI200",
+        "as_of": "20260822",
+        "instruments": [{"ticker": "005930", "name": "삼성전자"}],
+    }
+    assert client.get("/v1/shareable/universes/../private/latest").status_code in {404, 422}
+
+
+def test_market_index_endpoint_is_allowlisted(client):
+    response = client.get("/v1/shareable/market-indices/KOSPI/latest")
+    assert response.status_code == 200
+    assert response.json() == {
+        "index": "KOSPI",
+        "as_of": "20260822",
+        "series": {"date": ["20260821", "20260822"], "close": [3100.0, 3110.0]},
+    }
+    assert "token" not in response.text
+    assert client.get("/v1/shareable/market-indices/VIX/latest").status_code == 422
+
+
+def test_factor_endpoint_filters_unexpected_fields(client):
+    response = client.get("/v1/shareable/factors/KOSPI/latest")
+    assert response.status_code == 200
+    assert response.json() == {
+        "market": "KOSPI",
+        "as_of": "20260821",
+        "fundamentals": {"005930": {"BPS": 50000.0, "PBR": 1.2}},
+        "market_caps": {"005930": 4e15},
+    }
+    assert "chat_id" not in response.text
+    assert "portfolio" not in response.text
+    assert client.get("/v1/shareable/factors/KOSPI200/latest").status_code == 422
 
 
 def test_invalid_ticker_rejected(client):
