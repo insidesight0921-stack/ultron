@@ -784,6 +784,21 @@ async def api_signal_accuracy(horizon: int = 5):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/strategy/compare")
+async def api_strategy_compare():
+    """v3.49: 전략별 성과 비교(탭 A). 완결 라운드트립을 축별로 집계한다.
+
+    진입 전략 태그 커버리지도 함께 돌려준다 — 커버리지가 0이면
+    "전략별 비교"라는 말 자체가 성립하지 않으므로 화면이 그 사실을 먼저 말해야 한다.
+    """
+    try:
+        import strategy_compare as sc
+        return JSONResponse(sc.overview(sc.load_roundtrips()))
+    except Exception as e:
+        log.exception("전략 비교 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ─── HTML 페이지 ────────────────────────────────────
 
 
@@ -996,6 +1011,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-quant">콴텍봇</button>
     <button class="tab" data-tab="tab-ipo">IPO봇</button>
     <button class="tab" data-tab="tab-myquant">나만의 퀀트</button>
+    <button class="tab" data-tab="tab-strategy">전략 비교</button>
     <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-perf">성과</button>
   </div>
@@ -1236,6 +1252,33 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <h3>태그별 실현 성과</h3>
       <pre id="myquant-tags" class="muted" style="white-space: pre-wrap;">아직 마이퀀트 거래가 없습니다.</pre>
       <p class="muted">※ 통계 관찰이며 투자 권유 아님. 표본 5건 미만(†)은 참고용.</p>
+    </div>
+  </div>
+
+  <!-- 탭 A: 전략별 성과 비교 (v3.49) -->
+  <div id="tab-strategy" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <div class="chips" id="strat-axes"></div>
+        <button type="button" class="btn-scan" id="btn-strat-refresh">새로고침</button>
+        <span id="strat-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:10px;" id="strat-caveat"></p>
+    </div>
+    <div id="strat-attr" style="margin-bottom:20px;"></div>
+    <div class="card">
+      <h3 id="strat-title">비교</h3>
+      <table>
+        <thead><tr>
+          <th>구분</th><th class="num">건수</th><th class="num">비중</th>
+          <th class="num">승률</th><th class="num">실현 손익</th>
+          <th class="num">평균 수익률</th><th class="num">전체 대비</th>
+          <th class="num">PF</th><th class="num">평균 보유</th>
+        </tr></thead>
+        <tbody id="strat-tbody">
+          <tr><td colspan="9" class="muted">완결된 거래가 아직 없습니다.</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -2043,6 +2086,103 @@ async function loadIpoStats() {
 // IPO 탭 클릭 시 기록 자동 로드
 document.querySelector(".tab[data-tab='tab-ipo']").addEventListener("click", () => {
   loadIpoRecords();
+});
+
+// ── 전략 비교 탭 (v3.49) ─────────────────────────────────────────────────────
+const STRAT_AXES = [["slot", "봇"], ["reason", "청산 사유"], ["hold", "보유 기간"],
+                    ["era", "규칙 전후"], ["tag", "진입 태그"]];
+let stratData = null, stratAxis = "slot";
+
+function renderStratAxes() {
+  document.getElementById("strat-axes").innerHTML = STRAT_AXES.map(
+    ([k, t]) => `<button type="button" class="chip" data-axis="${k}" ` +
+                `aria-pressed="${k === stratAxis}">${t}</button>`).join("");
+}
+
+function renderStratTable() {
+  const c = stratData.axes[stratAxis];
+  const tbody = document.getElementById("strat-tbody");
+  document.getElementById("strat-title").textContent =
+    `${c.title} (완결 ${c.total.n}건)`;
+  document.getElementById("strat-caveat").textContent = c.caveat || "";
+  const num = (x, u) => (x === null || x === undefined) ? "—" : x + (u || "");
+  const won = x => (x === null || x === undefined) ? "—" : x.toLocaleString() + "원";
+  tbody.innerHTML = c.rows.length ? c.rows.map(r => {
+    const pcls = r.pnl > 0 ? "up" : (r.pnl < 0 ? "down" : "");
+    const ecls = r.edge_ret === null ? "" : (r.edge_ret > 0 ? "up" : (r.edge_ret < 0 ? "down" : ""));
+    const edge = r.edge_ret === null ? "—" :
+                 (r.edge_ret > 0 ? "+" : "") + r.edge_ret + "%p";
+    return `<tr>
+      <td>${r.label}${r.small ? '<span class="ticker">†</span>' : ""}</td>
+      <td class="num">${r.n}</td>
+      <td class="num">${num(r.share_n, "%")}</td>
+      <td class="num">${num(r.win_rate, "%")}</td>
+      <td class="num delta ${pcls}">${won(r.pnl)}</td>
+      <td class="num">${num(r.avg_ret, "%")}</td>
+      <td class="num delta ${ecls}">${edge}</td>
+      <td class="num">${num(r.profit_factor)}</td>
+      <td class="num">${num(r.avg_hold_days, "일")}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="9" class="muted">해당 축에 거래가 없습니다.</td></tr>`;
+}
+
+function renderStratAttribution() {
+  const a = stratData.attribution;
+  const box = document.getElementById("strat-attr");
+  const cards = [];
+  const odd = stratData.outliers || [];
+  if (odd.length) {
+    cards.push(`<div class="card">
+      <div class="slot-name">수익률 이상치 ${odd.length}건 · ${stratData.outlier_pnl.toLocaleString()}원</div>
+      <p class="muted" style="margin-top:8px;">
+        아래 거래는 스윙 매매에서 나올 수 없는 수익률입니다. 초기에 UI를 시험하며
+        매수가를 임의로 입력한 기록으로 보입니다. <b>표에는 그대로 포함되어 있습니다</b> —
+        조용히 빼면 나중에 왜 숫자가 달라졌는지 알 수 없기 때문입니다. 정리 여부는 직접 판단하세요.
+      </p>
+      <div class="stat-rows" style="margin-top:10px;">
+        ${odd.map(o => `<span>${o.name || o.ticker} · ${o.slot}</span>` +
+          `<span>${o.ret > 0 ? "+" : ""}${o.ret}% · ${o.pnl.toLocaleString()}원 · ${(o.sell_at || "").slice(0, 10)}</span>`).join("")}
+      </div>
+    </div>`);
+  }
+  if (a.usable) { box.innerHTML = cards.join(""); return; }
+  cards.push(`<div class="card" style="margin-top:20px;">
+    <div class="slot-name">진입 전략 귀속 ${a.tagged}/${a.total}건 (${a.coverage === null ? "—" : a.coverage + "%"})</div>
+    <p class="muted" style="margin-top:8px;">
+      진입 조건(추세 위 눌림 · 정배열 · 신고가 돌파 · 과낙폭 반등)이 매수 기록에 남지 않아
+      <b>진입 조건별 비교는 아직 불가능</b>합니다. 아래 표는 봇·청산 사유·보유 기간·규칙 시기로만
+      나눈 것이며, 어느 진입 전략이 나은지는 말해 주지 않습니다.
+    </p>
+  </div>`);
+  box.innerHTML = cards.join("");
+}
+
+async function loadStrategyCompare() {
+  const status = document.getElementById("strat-status");
+  status.textContent = "로딩 중...";
+  try {
+    const d = await (await fetch("/api/strategy/compare")).json();
+    if (d.error) throw new Error(d.error);
+    stratData = d;
+    renderStratAxes();
+    renderStratAttribution();
+    renderStratTable();
+    status.textContent = `완결 ${d.n}건 · ` + new Date().toLocaleTimeString();
+  } catch (e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+
+document.getElementById("strat-axes").addEventListener("click", e => {
+  const chip = e.target.closest(".chip");
+  if (!chip || !stratData) return;
+  stratAxis = chip.dataset.axis;
+  renderStratAxes();
+  renderStratTable();
+});
+document.getElementById("btn-strat-refresh").addEventListener("click", loadStrategyCompare);
+document.querySelector(".tab[data-tab='tab-strategy']").addEventListener("click", () => {
+  if (!stratData) loadStrategyCompare();
 });
 
 // ── 신호 정확도 탭 (v3.48) ───────────────────────────────────────────────────
