@@ -658,10 +658,15 @@ def default_log_path() -> Path:
 def scan(log_path=None, now: Optional[str] = None) -> list[Signal]:
     """워치리스트 전체 스캔 → 신호 리스트(actionable만).
 
-    평가된 신호는 억제분까지 log_path(JSONL)에 기록한다.
+    평가된 신호는 억제분까지 `log_path`(JSONL)에 기록한다.
+
+    **log_path=None이면 기록하지 않는다.** 기본값을 운영 경로로 두었더니
+    `scan()`을 그냥 호출한 테스트들이 운영 기록에 가짜 신호를 써 넣었다
+    (2026-08-27 발견: 100건 중 86건이 테스트 픽스처 값 147.2였다).
+    기록할 곳은 부르는 쪽이 명시한다 — 운영 호출부는 `run()` 하나뿐이고
+    그쪽은 테스트로 지킨다. 테스트가 빠뜨리면 아무 일도 일어나지 않는 편이,
+    운영 데이터가 조용히 오염되는 것보다 낫다.
     """
-    if log_path is None:
-        log_path = default_log_path()
     stamp = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     signals: list[Signal] = []
     for item in load_watchlist():
@@ -680,7 +685,7 @@ def scan(log_path=None, now: Optional[str] = None) -> list[Signal]:
         if raw and MTF_ENABLED:
             trend = compute_trend(_fetch_daily_raw(sym) or [])
             sig = apply_mtf_filter(raw, trend)
-        if raw:
+        if raw and log_path is not None:
             append_log(log_path, build_log_record(
                 raw, at=stamp, trend=trend, suppressed=(sig is None),
                 asset_class=item.asset_class))
@@ -730,8 +735,11 @@ def format_watchlist(items: Optional[list] = None) -> str:
 
 
 def run() -> tuple[str, list[Signal]]:
-    """텔레그램 호출용 entrypoint. (메시지, 신호리스트) 반환."""
-    sigs = scan()
+    """텔레그램 호출용 entrypoint. (메시지, 신호리스트) 반환.
+
+    운영 기록 경로를 여기서 명시한다 — `scan()`의 기본값은 '기록 안 함'이다.
+    """
+    sigs = scan(log_path=default_log_path())
     return format_signals(sigs), sigs
 
 

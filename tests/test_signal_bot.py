@@ -7,6 +7,8 @@ from __future__ import annotations
 import math
 import pytest
 
+from pathlib import Path
+
 import signal_bot as sb
 
 
@@ -116,7 +118,7 @@ def test_too_few_candles_returns_none():
 # ─── 스캔 (외부 호출 mock) ──────────────────────────
 
 
-def test_scan_with_mocked_fetch(monkeypatch):
+def test_scan_with_mocked_fetch(monkeypatch, tmp_path):
     # 코드 해석·intraday fetch를 가짜로
     monkeypatch.setattr(sb, "resolve_etf_ticker", lambda name: "069500")
 
@@ -125,18 +127,21 @@ def test_scan_with_mocked_fetch(monkeypatch):
         return {"closes": [100 + i * 0.8 for i in range(60)],
                 "volumes": [100.0] * 60}
     monkeypatch.setattr(sb, "_fetch_intraday_raw", fake_fetch)
+    # 일봉도 반드시 mock한다 — 안 하면 실제 yfinance를 때린다(테스트가 장세에 따라 흔들린다)
+    monkeypatch.setattr(sb, "_fetch_daily_raw",
+                        lambda *a, **k: [100 + i for i in range(40)])   # 상승추세
 
-    sigs = sb.scan()
+    sigs = sb.scan(log_path=tmp_path / "log.jsonl")
     assert isinstance(sigs, list)
-    # macd 종목 2개는 홀딩유지 신호가 나와야
+    # macd 종목 2개는 홀딩유지 신호가 나와야 (일봉 상승이라 MTF 통과)
     macd_sigs = [s for s in sigs if s.strategy == "MACD"]
     assert len(macd_sigs) >= 1
 
 
-def test_scan_skips_on_empty_fetch(monkeypatch):
+def test_scan_skips_on_empty_fetch(monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "resolve_etf_ticker", lambda name: "069500")
     monkeypatch.setattr(sb, "_fetch_intraday_raw", lambda *a, **k: None)
-    assert sb.scan() == []
+    assert sb.scan(log_path=tmp_path / "log.jsonl") == []
 
 
 def test_format_signals_empty():
@@ -317,14 +322,14 @@ def test_mtf_none_signal():
     assert sb.apply_mtf_filter(None, "up") is None
 
 
-def test_scan_mtf_suppresses(monkeypatch):
+def test_scan_mtf_suppresses(monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "resolve_etf_ticker", lambda n: "069500")
     # 1시간봉: 강상승 → macd 홀딩유지 신호
     monkeypatch.setattr(sb, "_fetch_intraday_raw",
                         lambda *a, **k: {"closes": [100 + i * 0.8 for i in range(60)], "volumes": [100.0]*60})
     # 일봉: 하락추세 → 매수성(홀딩유지) 억제
     monkeypatch.setattr(sb, "_fetch_daily_raw", lambda *a, **k: [200 - i for i in range(40)])
-    sigs = sb.scan()
+    sigs = sb.scan(log_path=tmp_path / "log.jsonl")
     assert all(s.action not in sb._BULLISH for s in sigs)
 
 
@@ -466,3 +471,41 @@ def test_format_watchlist_groups_and_marks_interest():
 
 def test_format_watchlist_empty():
     assert "없습니다" in sb.format_watchlist([])
+
+
+# ─── 운영 기록 오염 방지 (2026-08-27 사고 회귀 테스트) ───
+#
+# scan()의 log_path 기본값이 운영 경로였던 탓에, 이 파일의 테스트들이
+# signal_log.jsonl에 가짜 신호를 써 넣고 있었다(100건 중 86건). 그 기록으로
+# "MACD 64건" 같은 분석을 하고 있었으므로, 조용한 오염이 잘못된 결론까지 만들었다.
+
+
+def test_scan_does_not_write_without_an_explicit_path(monkeypatch, tmp_path):
+    """log_path를 주지 않으면 아무 데도 쓰지 않는다."""
+    monkeypatch.setattr(sb, "resolve_etf_ticker", lambda n: "069500")
+    monkeypatch.setattr(sb, "_fetch_intraday_raw",
+                        lambda *a, **k: {"closes": [100 + i * 0.8 for i in range(60)],
+                                         "volumes": [100.0] * 60})
+    monkeypatch.setattr(sb, "_fetch_daily_raw", lambda *a, **k: [100 + i for i in range(40)])
+    written = []
+    monkeypatch.setattr(sb, "append_log", lambda p, r: written.append(p))
+
+    sb.scan()
+    assert written == []
+
+
+def test_run_supplies_the_production_log_path(monkeypatch):
+    """운영 호출부는 기록 경로를 명시해야 한다 — 여기가 유일한 호출부다."""
+    seen = {}
+    monkeypatch.setattr(sb, "scan", lambda **kw: seen.update(kw) or [])
+    sb.run()
+    assert seen.get("log_path") == sb.default_log_path()
+
+
+def test_no_test_in_this_file_calls_scan_without_a_log_path():
+    """이 파일 안에서 실수를 되풀이하지 않도록 소스를 직접 본다."""
+    import re
+    src = Path(__file__).read_text(encoding="utf-8")
+    bare = re.findall(r"sb\.scan\(\s*\)", src)
+    # test_scan_does_not_write_without_an_explicit_path 한 곳만 의도적으로 인자가 없다
+    assert len(bare) == 1
