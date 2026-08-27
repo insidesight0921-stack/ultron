@@ -48,6 +48,7 @@ LABEL_MARKET_COLLECTOR="com.hyunjun.ai-agent.market-data-collector"
 LABEL_LOG_ROTATE="com.hyunjun.ai-agent.log-rotation"
 LABEL_PRIVATE_BACKUP="com.hyunjun.ai-agent.private-backup"
 LABEL_PAPER_WEEKLY="com.hyunjun.ai-agent.paper-weekly-report"
+LABEL_SIGNAL_REVIEW="com.hyunjun.ai-agent.signal-review"
 
 PLIST_DATA_API="$LA_DIR/${LABEL_DATA_API}.plist"
 PLIST_PRIVATE_DATA_API="$LA_DIR/${LABEL_PRIVATE_DATA_API}.plist"
@@ -59,6 +60,7 @@ PLIST_MARKET_COLLECTOR="$LA_DIR/${LABEL_MARKET_COLLECTOR}.plist"
 PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
 PLIST_PRIVATE_BACKUP="$LA_DIR/${LABEL_PRIVATE_BACKUP}.plist"
 PLIST_PAPER_WEEKLY="$LA_DIR/${LABEL_PAPER_WEEKLY}.plist"
+PLIST_SIGNAL_REVIEW="$LA_DIR/${LABEL_SIGNAL_REVIEW}.plist"
 
 LOG_DATA_API_OUT="$LOG_DIR/data_api.out.log"
 LOG_DATA_API_ERR="$LOG_DIR/data_api.err.log"
@@ -78,6 +80,8 @@ LOG_PRIVATE_BACKUP_OUT="$LOG_DIR/private_backup.out.log"
 LOG_PRIVATE_BACKUP_ERR="$LOG_DIR/private_backup.err.log"
 LOG_PAPER_WEEKLY_OUT="$LOG_DIR/paper_weekly_report.out.log"
 LOG_PAPER_WEEKLY_ERR="$LOG_DIR/paper_weekly_report.err.log"
+LOG_SIGNAL_REVIEW_OUT="$LOG_DIR/signal_review.out.log"
+LOG_SIGNAL_REVIEW_ERR="$LOG_DIR/signal_review.err.log"
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
 
@@ -529,6 +533,51 @@ write_plist_paper_weekly() {
 EOF
 }
 
+write_plist_signal_review() {
+    # StartCalendarInterval: 매일 16:40 — 신호 적중률(탭 B) 결과 갱신
+    # market-data-collector(16:20) 뒤, 일봉 확정 후에 돌린다.
+    # 조회 실패는 다음 날 재시도된다(pending은 계속 재평가 대상).
+    cat > "$PLIST_SIGNAL_REVIEW" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL_SIGNAL_REVIEW}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${SCRIPTS}/signal_review.py</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>16</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT}</string>
+    <key>StandardOutPath</key>
+    <string>${LOG_SIGNAL_REVIEW_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_SIGNAL_REVIEW_ERR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>ko_KR.UTF-8</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+</dict>
+</plist>
+EOF
+}
+
 check_telegram_env() {
     if [ ! -f "$PROJECT/.env" ]; then
         echo "⚠️  .env 없음 — 텔레그램 봇 비활성화"
@@ -606,6 +655,11 @@ cmd_install() {
         echo "  ✅ plist 생성: $PLIST_PAPER_WEEKLY"
     fi
 
+    if [ -f "$SCRIPTS/signal_review.py" ]; then
+        write_plist_signal_review
+        echo "  ✅ plist 생성: $PLIST_SIGNAL_REVIEW"
+    fi
+
     write_plist_data_api
     echo "  ✅ plist 생성: $PLIST_DATA_API"
 
@@ -674,6 +728,7 @@ cmd_start() {
     [ -f "$PLIST_LOG_ROTATE" ] && launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
     [ -f "$PLIST_PRIVATE_BACKUP" ] && launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
     [ -f "$PLIST_PAPER_WEEKLY" ] && launchctl unload "$PLIST_PAPER_WEEKLY" 2>/dev/null || true
+    [ -f "$PLIST_SIGNAL_REVIEW" ] && launchctl unload "$PLIST_SIGNAL_REVIEW" 2>/dev/null || true
     sleep 1
 
     # 로드
@@ -712,6 +767,10 @@ cmd_start() {
         launchctl load "$PLIST_PAPER_WEEKLY"
         echo "  ✅ 페이퍼 주간 성과 리포트 등록 (매주 금 16:30)"
     fi
+    if [ -f "$PLIST_SIGNAL_REVIEW" ]; then
+        launchctl load "$PLIST_SIGNAL_REVIEW"
+        echo "  ✅ 신호 적중률 갱신 등록 (매일 16:40)"
+    fi
     echo "▶️  서비스 시작됨"
     sleep 2
     cmd_status
@@ -746,6 +805,9 @@ cmd_stop() {
     if [ -f "$PLIST_PAPER_WEEKLY" ]; then
         launchctl unload "$PLIST_PAPER_WEEKLY" 2>/dev/null && echo "⏸  페이퍼 주간 리포트 중지" || echo "(페이퍼 주간 리포트 이미 중지됨)"
     fi
+    if [ -f "$PLIST_SIGNAL_REVIEW" ]; then
+        launchctl unload "$PLIST_SIGNAL_REVIEW" 2>/dev/null && echo "⏸  신호 적중률 갱신 중지" || echo "(신호 적중률 갱신 이미 중지됨)"
+    fi
 }
 
 cmd_restart() {
@@ -770,6 +832,7 @@ cmd_status() {
     [ -f "$PLIST_MARKET_COLLECTOR" ] && LABELS+=("$LABEL_MARKET_COLLECTOR")
     [ -f "$PLIST_LOG_ROTATE" ] && LABELS+=("$LABEL_LOG_ROTATE")
     [ -f "$PLIST_PRIVATE_BACKUP" ] && LABELS+=("$LABEL_PRIVATE_BACKUP")
+    [ -f "$PLIST_SIGNAL_REVIEW" ] && LABELS+=("$LABEL_SIGNAL_REVIEW")
 
     for label in "${LABELS[@]}"; do
         info=$(launchctl list | grep "$label" || echo "")
