@@ -276,7 +276,7 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
 
 ### 10c. system_info(topic)
 - 목적: 봇 자기/시스템 상태 질문에 실제 상태로 답변(접속주소·서비스·봇목록·자동작업·신호/리밸런싱/스캔 실행여부)
-- topic ∈ {{"access","service","bots","automation","signal","rebalance","scan","performance","feedback","analysis","status"}}
+- topic ∈ {{"access","service","bots","automation","signal","signal_targets","rebalance","scan","performance","feedback","analysis","status"}}
 - 사용 케이스: "paper 주소 뭐야", "무슨 봇 돌고 있어", "마지막 신호 언제", "리밸런싱 됐어?"
 - 예시: "paper 주소 뭐야" → {{"tool":"system_info","args":{{"topic":"access"}},"mode":"fast"}}
 
@@ -1021,7 +1021,7 @@ def _validate_news_args(args: dict) -> dict:
 # ─── system_info (봇 자기/시스템 인식, v3.45) ─────
 _SI_TOPICS = {"access", "service", "bots", "automation",
               "signal", "rebalance", "scan", "performance", "feedback",
-              "analysis", "edge", "status"}
+              "analysis", "edge", "signal_targets", "status"}
 
 
 def _detect_system_info(query: str):
@@ -1049,6 +1049,11 @@ def _detect_system_info(query: str):
         return {"topic": "performance"}
     if re.search(r"리밸런싱", q) and re.search(r"됐|완료|했|언제|반영|돌았|끝났", q):
         return {"topic": "rebalance"}
+    if (re.search(r"신호", q)
+            and re.search(r"종목|워치리스트|watchlist|대상|목록|리스트|뭐\s*보", q, re.I)):
+        return {"topic": "signal_targets"}
+    if re.search(r"(기술적|technical)\s*(신호|분석).*(종목|목록|리스트)", q, re.I):
+        return {"topic": "signal_targets"}
     if re.search(r"마지막.*신호|신호.*(언제|마지막|보냈|쐈|줬)", q):
         return {"topic": "signal"}
     if re.search(r"(마지막|최근|언제).*스캔|스캔.*(언제|마지막|했)|주간\s*스캔", q):

@@ -28,6 +28,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from typing import Optional
 import os
 import re
 import sys
@@ -1402,6 +1403,21 @@ def _save_intraday_state(state: dict) -> None:
         log.warning(f"장중 모니터 상태 저장 실패: {e}")
 
 
+def _slot_hard_stop_reason(slot_name: str) -> Optional[str]:
+    """슬롯 일일 손실 한도로 신규 매수가 막혀 있으면 사유, 아니면 None.
+
+    모듈·상태 파일이 없으면 None(허용). 한도를 '판정하지 못한 것'과 '한도에 걸린 것'은
+    다르며, 전자로 매수를 막으면 원인 모를 차단이 된다.
+    """
+    try:
+        import slot_hard_stop
+        return slot_hard_stop.guard_buy(str(slot_name))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("일일 한도 확인 실패(매수 허용): %s", exc)
+        return None
+
+
+
 # ─── 장 중 실시간 손절·익절 모니터 (v3.31, 판정 v3.44=exit_rules) ─────────────
 
 
@@ -1546,6 +1562,18 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if alerts_health:
         alerts.append(alerts_health)
+
+    # v3.48 — 슬롯 일일 손실 한도. 청산은 하지 않고 신규 매수만 막는다.
+    # 판정·상태 저장은 여기(장중 모니터)가 소유하고, 매수 경로는 상태만 읽는다.
+    try:
+        import slot_hard_stop
+        _, _, fresh_stops = await asyncio.to_thread(slot_hard_stop.check_and_record)
+        stop_alert = slot_hard_stop.format_alert(fresh_stops)
+        if stop_alert:
+            alerts.append(stop_alert)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("슬롯 일일 한도 점검 실패: %s", exc)
+
     _save_intraday_state(
         {
             "peaks": exit_rules.prune_peaks(peaks, live_keys),
@@ -2324,6 +2352,11 @@ async def handle_kium_paper_callback(
     new_results = [r for r in results if r["ticker"] not in existing_tickers]
     alloc_per = slot_cap / len(results) if results else 0
 
+    hard_stop = _slot_hard_stop_reason(slot_name)
+    if hard_stop:
+        new_results = []          # 매도·교체는 이미 위에서 끝났고, 신규 진입만 막는다
+        lines_result.append(f"  🛑 {hard_stop}")
+
     for result_index, r in enumerate(new_results):
         price = r.get("current_price", 0)
         if not price or price <= 0:
@@ -2497,6 +2530,11 @@ async def handle_quant_paper_callback(
 
     # 3) 신규 매수: 새 추천에 있지만 보유 안 한 것만
     new_recs = [r for r in recs if _rec_attr(r, "ticker", "") not in held]
+
+    hard_stop = _slot_hard_stop_reason(slot_name)
+    if hard_stop:
+        new_recs = []             # 퇴출 청산은 이미 끝났고, 신규 진입만 막는다
+        lines_result.append(f"  🛑 {hard_stop}")
     if new_recs:
         # 청산 후 슬롯 자본 재조회
         try:

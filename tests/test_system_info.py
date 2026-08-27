@@ -198,3 +198,60 @@ def test_is_self_referential_positive(q):
 ])
 def test_is_self_referential_negative(q):
     assert rb.is_self_referential(q) is False
+
+
+# ─── 신호 대상 종목 (v3.48) ──────────────────────────
+
+
+def test_signal_targets_topic_registered():
+    assert "signal_targets" in si._DISPATCH
+
+
+def test_signal_targets_uses_signal_bot_watchlist(monkeypatch):
+    """단일 진실 유지 — 별도 목록을 만들지 않고 signal_bot이 스캔하는 목록을 그대로 보여준다."""
+    import types, sys
+    stub = types.ModuleType("signal_bot")
+    stub.format_watchlist = lambda: "📡 목록 본문"
+    sys.modules["signal_bot"] = stub
+    try:
+        assert si.answer("signal_targets") == "📡 목록 본문"
+    finally:
+        del sys.modules["signal_bot"]
+
+
+def test_signal_targets_degrades_gracefully(monkeypatch):
+    import types, sys
+    stub = types.ModuleType("signal_bot")
+    def boom():
+        raise RuntimeError("DB 없음")
+    stub.format_watchlist = boom
+    sys.modules["signal_bot"] = stub
+    try:
+        out = si.answer("signal_targets")
+        assert "불러오지 못했습니다" in out and "핵심_자산배분_포트폴리오" in out
+    finally:
+        del sys.modules["signal_bot"]
+
+
+def test_signal_targets_is_separate_from_signal_topic():
+    """'마지막 신호 언제'(signal)와 '신호 보는 종목'(signal_targets)은 다른 답이다."""
+    assert si._DISPATCH["signal"] is not si._DISPATCH["signal_targets"]
+
+
+def test_router_detects_signal_targets():
+    """'기술적 신호를 보는 종목들 리스트' — 도구가 없어 위키 검색으로 폴백하던 발화."""
+    for q in ["기술적 신호를 보는 종목들 리스트",
+              "신호 대상 종목 뭐야",
+              "신호 보는 종목 알려줘",
+              "기술적 분석 종목 목록"]:
+        assert router._detect_system_info(q) == {"topic": "signal_targets"}, q
+
+
+def test_router_keeps_last_signal_topic():
+    """'마지막 신호 언제'는 여전히 발송 이력(signal)으로 간다."""
+    for q in ["마지막 신호 언제 보냈어", "신호 언제 줬어"]:
+        assert router._detect_system_info(q) == {"topic": "signal"}, q
+
+
+def test_router_validates_signal_targets_topic():
+    assert router._validate_system_info({"topic": "signal_targets"}) == {"topic": "signal_targets"}

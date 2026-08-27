@@ -228,6 +228,21 @@ def performance_info() -> str:
         return f"📊 paper 성과 조회 실패: {e}"
 
 
+def signal_targets_info() -> str:
+    """기술적 신호 대상 종목 목록 — 자산배분 + 개인 관심종목.
+
+    signal_bot이 실제로 스캔하는 목록을 그대로 보여준다(단일 진실 유지).
+    조회 실패 시에도 사용자에게 무엇을 확인해야 하는지 알린다.
+    """
+    try:
+        import signal_bot
+        return signal_bot.format_watchlist()
+    except Exception as e:  # noqa: BLE001
+        log.warning("신호 대상 조회 실패: %s", e)
+        return ("📡 신호 대상 종목을 불러오지 못했습니다.\n"
+                "wiki/투자/핵심_자산배분_포트폴리오.md와 관심종목 DB를 확인하세요.")
+
+
 def status_summary(cache_dir: Optional[Path] = None,
                    sched_path: Optional[Path] = None) -> str:
     return "\n\n".join([
@@ -245,6 +260,7 @@ _DISPATCH = {
     "bots": lambda c, s: bots_info(),
     "automation": lambda c, s: automation_info(cache_dir=c, sched_path=s),
     "signal": lambda c, s: signal_info(cache_dir=c),
+    "signal_targets": lambda c, s: signal_targets_info(),
     "rebalance": lambda c, s: rebalance_info(cache_dir=c),
     "scan": lambda c, s: scan_info(cache_dir=c),
     "performance": lambda c, s: performance_info(),

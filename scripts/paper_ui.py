@@ -437,6 +437,20 @@ async def api_chart_data(ticker: str, days: int = 180):
         return JSONResponse({"error": str(e)}, status_code=410)
 
 
+def _slot_hard_stop_reason(slot) -> str | None:
+    """슬롯 일일 손실 한도로 매수가 막혀 있으면 사유, 아니면 None.
+
+    모듈·상태 파일이 없으면 None(허용)을 돌려준다. 한도를 '판정하지 못한 것'과
+    '한도에 걸린 것'은 다르며, 전자로 매수를 막으면 원인 모를 차단이 된다.
+    """
+    try:
+        import slot_hard_stop
+        return slot_hard_stop.guard_buy(str(slot))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("일일 한도 확인 실패(매수 허용): %s", exc)
+        return None
+
+
 @app.post("/api/paper/buy")
 async def api_buy(request: Request):
     try:
@@ -457,6 +471,12 @@ async def api_buy(request: Request):
             {"error": "필수 인자: slot, ticker, quantity, price"},
             status_code=400,
         )
+
+    # v3.48 — 슬롯 일일 손실 한도. 막힌 슬롯은 신규 매수만 거부하고
+    # 보유 종목의 손절·트레일링은 건드리지 않는다(매도는 항상 허용).
+    blocked = _slot_hard_stop_reason(slot)
+    if blocked:
+        return JSONResponse({"error": blocked}, status_code=409)
 
     try:
         if _PAPER_WRITE_EXECUTOR is None:
@@ -741,6 +761,29 @@ async def api_performance():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/signal/accuracy")
+async def api_signal_accuracy(horizon: int = 5):
+    """v3.48: 기술적 신호 적중률(탭 B). 저장된 결과만 집계한다.
+
+    가격 조회·결과 채우기는 `signal_review.py`(매일 스케줄)가 소유한다.
+    UI 요청이 외부 API를 때리면 화면이 느려지고 장중에 값이 흔들린다.
+    """
+    try:
+        import signal_review as sv
+        outcomes = sv.load_outcomes()
+        summary = sv.summarize(outcomes.values(), horizon=int(horizon))
+        pending = sum(1 for o in outcomes.values() if o.get("pending"))
+        recent = sorted(
+            (o for o in outcomes.values() if not o.get("pending")),
+            key=lambda o: str(o.get("at") or ""), reverse=True,
+        )[:30]
+        return JSONResponse({"summary": summary, "pending": pending,
+                             "evaluated": len(outcomes) - pending, "recent": recent})
+    except Exception as e:
+        log.exception("신호 적중률 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ─── HTML 페이지 ────────────────────────────────────
 
 
@@ -749,129 +792,278 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>📑 Paper Trading</title>
+<title>Paper Trading</title>
 <style>
+  /* v3.48 리디자인 — 라이트 기본 + OS 다크 자동. 색은 손익 부호와 슬롯 식별에만 쓴다. */
   :root {
-    --bg: #0f1419; --fg: #e6e6e6; --muted: #888;
-    --card: #1a2028; --border: #2a3038;
-    --accent: #4ea1ff; --buy: #00c853; --sell: #ff5252;
-    --warn: #ffb300;
+    color-scheme: light;
+    --plane:#f9f9f7; --surface:#fff; --surface-2:#f4f4f1;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+    --hairline:#e1e0d9; --ring:rgba(11,11,11,.10);
+    --accent:#2a78d6; --accent-ink:#1c5cab;
+    --slot-1:#2a78d6; --slot-2:#eb6834; --slot-3:#1baf7a; --slot-4:#eda100;
+    --buy:#006300; --sell:#c0322f; --warn:#fab219;
+    --bg:var(--plane); --fg:var(--ink); --card:var(--surface); --border:var(--hairline);
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --plane:#0d0d0d; --surface:#1a1a19; --surface-2:#232321;
+      --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+      --hairline:#2c2c2a; --ring:rgba(255,255,255,.10);
+      --accent:#3987e5; --accent-ink:#86b6ef;
+      --slot-1:#3987e5; --slot-2:#d95926; --slot-3:#199e70; --slot-4:#c98500;
+      --buy:#0ca30c; --sell:#e66767;
+    }
   }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', system-ui, sans-serif;
-         background: var(--bg); color: var(--fg); margin: 0; padding: 1rem; }
-  h1, h2, h3 { margin: 0.5rem 0; }
-  .container { max-width: 1100px; margin: 0 auto; }
-  .grid { display: grid; gap: 1rem; }
-  .grid-3 { grid-template-columns: repeat(3, 1fr); }
-  .grid-2 { grid-template-columns: repeat(2, 1fr); }
-  @media (max-width: 760px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
-  .card { background: var(--card); border: 1px solid var(--border);
-          border-radius: 8px; padding: 1rem; }
-  .slot-card { display: flex; justify-content: space-between; align-items: baseline; }
-  .slot-name { font-weight: bold; }
-  .slot-capital { color: var(--accent); font-size: 1.2rem; }
-  .muted { color: var(--muted); font-size: 0.9rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: normal; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  form { display: grid; gap: 0.5rem; }
-  form .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
-  input, select, button {
-    background: var(--bg); color: var(--fg);
-    border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.5rem; font-size: 0.95rem;
-  }
-  button { cursor: pointer; font-weight: bold; }
-  .btn-buy { background: var(--buy); color: white; border: none; }
-  .btn-sell { background: var(--sell); color: white; border: none; }
-  .btn-quote { background: var(--accent); color: white; border: none; }
-  .btn-scan { background: var(--accent); color: white; border: none; padding: 0.6rem 1rem; }
-  .toast { position: fixed; bottom: 1rem; right: 1rem;
-           background: var(--card); border: 1px solid var(--border);
-           padding: 0.5rem 1rem; border-radius: 4px; opacity: 0; transition: opacity 0.3s; }
-  .toast.show { opacity: 1; }
-  .toast.error { border-color: var(--sell); }
-  .badge-buy { color: var(--buy); }
-  .badge-sell { color: var(--sell); }
-  /* 탭 */
-  .tabs { display: flex; gap: 0.5rem; border-bottom: 1px solid var(--border);
-          margin: 1rem 0 0; }
-  .tab { background: none; border: none; color: var(--muted);
-         padding: 0.6rem 1rem; cursor: pointer; font-size: 0.95rem;
-         border-bottom: 2px solid transparent; }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-  .tab-content { display: none; padding-top: 1rem; }
-  .tab-content.active { display: block; }
-  /* 차트 */
-  #tv-chart-container { width: 100%; height: 540px;
-                        background: var(--card); border: 1px solid var(--border);
-                        border-radius: 8px; }
-  /* 신호 */
-  .crash-warn { background: var(--warn); color: #000;
-                padding: 0.5rem 1rem; border-radius: 4px; font-weight: bold; }
-  .crash-ok { background: var(--buy); color: white;
-              padding: 0.5rem 1rem; border-radius: 4px; }
-  .crash-mid { background: var(--accent); color: white;
-               padding: 0.5rem 1rem; border-radius: 4px; }
-  .signal-row td { cursor: pointer; }
-  .signal-row:hover td { background: var(--border); }
-  .weight-line { color: var(--accent); font-size: 1rem; margin: 0.4rem 0; }
+  html, body { margin:0; }
+  body { background:var(--plane); color:var(--ink); font-size:14px; line-height:1.5;
+         font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+         -webkit-font-smoothing:antialiased; }
+  .container { max-width:1120px; margin:0 auto; padding:32px 24px 64px; }
+  h1 { font-size:22px; font-weight:620; letter-spacing:-.01em; margin:0; }
+  h2 { font-size:13px; font-weight:600; color:var(--ink-2); letter-spacing:.04em;
+       text-transform:uppercase; margin:0 0 12px; }
+  h3 { font-size:14px; font-weight:600; margin:0; }
+  .muted { color:var(--muted); font-size:12px; }
+  .grid { display:grid; gap:12px; }
+  .grid-2 { grid-template-columns:repeat(2,1fr); }
+  .grid-3, .grid-4 { grid-template-columns:repeat(4,1fr); }
+  .grid-auto { grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); }
+  .stat-rows { display:grid; grid-template-columns:auto 1fr; gap:6px 16px;
+               margin-top:10px; font-size:13px; }
+  .stat-rows > :nth-child(odd) { color:var(--muted); }
+  .stat-rows > :nth-child(even) { text-align:right; font-variant-numeric:tabular-nums; }
+  @media (max-width:860px){ .grid-3,.grid-2,.grid-4{grid-template-columns:1fr} .kpis{grid-template-columns:1fr 1fr} }
+
+  .masthead { display:flex; align-items:flex-end; justify-content:space-between;
+              gap:16px; flex-wrap:wrap; margin-bottom:24px; }
+  .status-pill { display:inline-flex; align-items:center; gap:7px; background:var(--surface);
+                 border:1px solid var(--hairline); border-radius:999px; padding:6px 12px;
+                 font-size:12px; color:var(--ink-2); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--buy); }
+
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--hairline);
+          border:1px solid var(--hairline); border-radius:var(--radius);
+          overflow:hidden; margin-bottom:28px; }
+  .kpi { background:var(--surface); padding:16px 18px; }
+  .kpi-label { font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .kpi-value { font-size:22px; font-weight:600; letter-spacing:-.02em; }
+  .kpi-value .unit { font-size:13px; font-weight:500; color:var(--ink-2); margin-left:2px; }
+  .kpi-meta { font-size:12px; color:var(--muted); margin-top:4px; }
+  .delta.up { color:var(--buy); font-weight:600; }
+  .delta.down { color:var(--sell); font-weight:600; }
+
+  .alloc-bar { display:flex; gap:2px; height:10px; margin-bottom:10px; }
+  .alloc-bar span { border-radius:3px; }
+  .alloc-legend { display:flex; flex-wrap:wrap; gap:16px; font-size:12px; color:var(--ink-2); }
+  .alloc-legend i, .slot-tag i, .group-label i, .chip i {
+    display:inline-block; width:8px; height:8px; border-radius:2px; }
+  .alloc-legend i { margin-right:6px; vertical-align:1px; }
+
+  /* 레거시 탭(신호·콴텍·IPO·마이퀀트·성과)은 카드 안에 내용을 바로 넣는다 → 기본 여백 필요.
+     card-head/card-body를 쓰는 새 카드만 .flush로 여백을 0으로 만든다. */
+  .card { background:var(--surface); border:1px solid var(--hairline);
+          border-radius:var(--radius); padding:18px; }
+  .card.flush { padding:0; }
+  .card.flush > .card-body { padding:18px; }
+  .card > table { margin-left:-18px; width:calc(100% + 36px); }
+  .card > h3 { margin-bottom:12px; }
+  .card + .card { margin-top:20px; }
+  .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .toolbar + p, .toolbar + .muted { margin-top:10px; }
+  .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px;
+               padding:14px 18px; border-bottom:1px solid var(--hairline); flex-wrap:wrap; }
+  .card-body { padding:18px; }
+  .card-foot { padding:10px 18px; border-top:1px solid var(--hairline); font-size:12px;
+               color:var(--muted); background:var(--surface-2);
+               border-radius:0 0 var(--radius) var(--radius); }
+
+  .slot { background:var(--surface); border:1px solid var(--hairline); border-radius:var(--radius);
+          padding:14px 16px; position:relative; overflow:hidden; }
+  .slot::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px;
+                  background:var(--slot-color, var(--accent)); }
+  .slot-name { font-size:13px; font-weight:600; }
+  .slot-share { font-size:12px; color:var(--muted); font-weight:400; margin-left:4px; }
+  .slot-capital { font-size:19px; font-weight:600; letter-spacing:-.02em; margin-top:6px; }
+  .slot-meta { font-size:12px; color:var(--muted); margin-top:6px; display:flex; gap:10px; }
+  .slot-card { display:flex; justify-content:space-between; align-items:baseline; }
+
+  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--hairline);
+          margin:0 0 20px; overflow-x:auto; }
+  .tab { appearance:none; background:none; border:0; border-bottom:2px solid transparent;
+         color:var(--muted); font:inherit; font-size:13px; padding:10px 14px;
+         cursor:pointer; white-space:nowrap; }
+  .tab:hover { color:var(--ink); }
+  .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tab-content { display:none; }
+  .tab-content.active { display:block; }
+
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:10px 18px; text-align:left; }
+  thead th { font-size:12px; font-weight:500; color:var(--muted);
+             border-bottom:1px solid var(--hairline); white-space:nowrap; }
+  tbody td { border-bottom:1px solid var(--hairline); }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr:hover td { background:var(--surface-2); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .ticker { color:var(--muted); font-variant-numeric:tabular-nums; margin-left:6px; font-size:12px; }
+  tr.group td { background:var(--surface-2); padding:8px 18px; }
+  tr.group:hover td { background:var(--surface-2); }
+  .group-label { display:flex; align-items:center; gap:8px; font-weight:600; font-size:13px; }
+  .group-label .count { font-weight:400; font-size:12px; color:var(--muted); }
+  .indent { padding-left:34px; }
+  .slot-tag { display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--ink-2); }
+
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { appearance:none; font:inherit; font-size:12px; cursor:pointer; background:var(--surface);
+          color:var(--ink-2); border:1px solid var(--hairline); border-radius:999px; padding:5px 12px; }
+  .chip:hover { background:var(--surface-2); }
+  .chip[aria-pressed="true"] { background:var(--surface-2); color:var(--ink);
+                               font-weight:600; border-color:var(--ring); }
+  .chip i { margin-right:6px; vertical-align:1px; }
+
+  form { display:grid; gap:12px; }
+  form .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  label.field { display:grid; gap:6px; font-size:12px; color:var(--ink-2); }
+  input, select { background:var(--surface); color:var(--ink); border:1px solid var(--hairline);
+                  border-radius:7px; padding:9px 11px; font:inherit; width:100%; }
+  /* 체크박스·라디오는 폭 100%를 상속하면 안 된다 */
+  input[type="checkbox"], input[type="radio"] { width:auto; margin:0; padding:0; }
+  label.muted { display:inline-flex; align-items:center; gap:6px; }
+  select { max-width:260px; }
+  #tab-order select { max-width:none; }
+  input::placeholder { color:var(--muted); }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px;
+                              border-color:var(--accent); }
+  button { font:inherit; font-weight:600; font-size:13px; border-radius:7px; padding:9px 18px;
+           cursor:pointer; border:1px solid var(--hairline); background:var(--surface); color:var(--ink); }
+  button:hover { background:var(--surface-2); }
+  .btn-quote, .btn-scan { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn-quote:hover, .btn-scan:hover { background:var(--accent-ink); border-color:var(--accent-ink); }
+  .btn-buy { border-color:var(--buy); color:var(--buy); background:var(--surface); }
+  .btn-sell { border-color:var(--sell); color:var(--sell); background:var(--surface); }
+  .tag { display:inline-block; font-size:11px; font-weight:600; padding:2px 7px;
+         border-radius:5px; border:1px solid var(--ring); color:var(--ink-2); }
+  .badge-buy, .tag-buy { color:var(--buy); }
+  .badge-sell, .tag-sell { color:var(--sell); }
+
+  .toast { position:fixed; bottom:16px; right:16px; background:var(--surface);
+           border:1px solid var(--hairline); box-shadow:0 4px 16px var(--ring);
+           padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .3s; }
+  .toast.show { opacity:1; }
+  .toast.error { border-color:var(--sell); }
+
+  #tv-chart-container { width:100%; height:540px; background:var(--surface);
+                        border:1px solid var(--hairline); border-radius:var(--radius); }
+  .crash-warn { background:var(--warn); color:#000; padding:8px 14px; border-radius:7px; font-weight:600; }
+  .crash-ok { background:var(--buy); color:#fff; padding:8px 14px; border-radius:7px; }
+  .crash-mid { background:var(--accent); color:#fff; padding:8px 14px; border-radius:7px; }
+  .signal-row td { cursor:pointer; }
+  .signal-row:hover td { background:var(--surface-2); }
+  .weight-line { color:var(--accent); font-size:14px; margin:6px 0; }
+  /* 태그별 성과처럼 줄맞춤이 필요한 텍스트 블록 */
+  pre { margin:0; font:12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color:var(--ink-2); white-space:pre-wrap; }
+  .card > p:last-child, .card > .muted:last-child { margin-bottom:0; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>📑 Paper Trading</h1>
-  <p class="muted">실주문 안 함 · 가상 매매 · 6개월 검증 후 KIS 입문</p>
+  <header class="masthead">
+    <div>
+      <h1>Paper Trading</h1>
+      <p class="muted">실주문 없음 · 가상 매매 · 6개월 검증 후 KIS 입문</p>
+    </div>
+    <span class="status-pill"><span class="dot"></span><span id="asof">모의 운용 중</span></span>
+  </header>
 
-  <h2>슬롯</h2>
-  <div id="slots" class="grid grid-3"></div>
+  <section id="kpis" class="kpis"></section>
+
+  <h2>슬롯 배분</h2>
+  <div class="alloc" style="margin-bottom:12px;">
+    <div id="alloc-bar" class="alloc-bar"></div>
+    <div id="alloc-legend" class="alloc-legend"></div>
+  </div>
+  <div id="slots" class="grid grid-4" style="margin-bottom:28px;"></div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="tab-order">📝 주문</button>
-    <button class="tab" data-tab="tab-chart">📈 차트</button>
-    <button class="tab" data-tab="tab-signals">📊 키움봇 신호</button>
-    <button class="tab" data-tab="tab-quant">🌐 콴텍봇</button>
-    <button class="tab" data-tab="tab-ipo">🏷️ IPO봇</button>
-    <button class="tab" data-tab="tab-myquant">🧪 나만의 퀀트</button>
-    <button class="tab" data-tab="tab-perf">📊 성과</button>
+    <button class="tab active" data-tab="tab-order">주문</button>
+    <button class="tab" data-tab="tab-chart">차트</button>
+    <button class="tab" data-tab="tab-signals">키움봇 신호</button>
+    <button class="tab" data-tab="tab-quant">콴텍봇</button>
+    <button class="tab" data-tab="tab-ipo">IPO봇</button>
+    <button class="tab" data-tab="tab-myquant">나만의 퀀트</button>
+    <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
+    <button class="tab" data-tab="tab-perf">성과</button>
   </div>
 
   <!-- 탭 1: 주문 -->
   <div id="tab-order" class="tab-content active">
-    <div class="card">
-      <form id="order-form">
-        <div class="row">
-          <select name="slot" id="slot-select" required></select>
-          <div style="display: flex; gap: 0.5rem;">
-            <input type="text" name="ticker" id="ticker" placeholder="종목 (005930)" required style="flex:1">
-            <button type="button" class="btn-quote" id="btn-quote">현재가</button>
+    <div class="card flush">
+      <div class="card-head">
+        <h3>주문</h3>
+        <span class="muted">가상 매매만 실행됩니다</span>
+      </div>
+      <div class="card-body">
+        <form id="order-form">
+          <div class="row">
+            <label class="field">슬롯
+              <select name="slot" id="slot-select" required></select>
+            </label>
+            <label class="field">종목코드
+              <span style="display:flex; gap:8px;">
+                <input type="text" name="ticker" id="ticker" placeholder="005930" required style="flex:1">
+                <button type="button" class="btn-quote" id="btn-quote">현재가</button>
+              </span>
+            </label>
           </div>
-        </div>
-        <input type="text" name="name" id="name" placeholder="종목명 (자동 채움)">
-        <div class="row">
-          <input type="number" name="quantity" id="quantity" placeholder="수량" min="1" required>
-          <input type="number" name="price" id="price" placeholder="단가" min="1" step="any" required>
-        </div>
-        <input type="text" name="notes" id="notes" placeholder="메모 (선택)">
-        <div class="row">
-          <button type="button" class="btn-buy" id="btn-buy">🟢 매수</button>
-          <button type="button" class="btn-sell" id="btn-sell">🔴 매도</button>
-        </div>
-      </form>
+          <label class="field">종목명
+            <input type="text" name="name" id="name" placeholder="자동 채움">
+          </label>
+          <div class="row">
+            <label class="field">수량
+              <input type="number" name="quantity" id="quantity" placeholder="0" min="1" required>
+            </label>
+            <label class="field">단가
+              <input type="number" name="price" id="price" placeholder="현재가 조회" min="1" step="any" required>
+            </label>
+          </div>
+          <label class="field">메모
+            <input type="text" name="notes" id="notes" placeholder="선택">
+          </label>
+          <div class="row">
+            <button type="button" class="btn-buy" id="btn-buy">매수</button>
+            <button type="button" class="btn-sell" id="btn-sell">매도</button>
+          </div>
+        </form>
+      </div>
     </div>
 
-    <h3 style="margin-top: 1.5rem;">보유 포지션</h3>
-    <div id="positions" class="card"><table><thead>
-      <tr><th>슬롯</th><th>종목</th><th class="num">수량</th><th class="num">평균가</th></tr>
-    </thead><tbody></tbody></table></div>
+    <div class="card flush">
+      <div class="card-head">
+        <h3>보유 포지션</h3>
+        <div class="chips" id="chips-pos" data-filter="pos"></div>
+      </div>
+      <div id="positions"><table><thead>
+        <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">평가금액</th></tr>
+      </thead><tbody data-group="pos"></tbody></table></div>
+      <div class="card-foot">봇별로 묶어 표시 · 평가금액은 평균가 기준 장부가입니다</div>
+    </div>
 
-    <h3 style="margin-top: 1.5rem;">거래 내역 (최근 100건)</h3>
-    <div id="trades" class="card"><table><thead>
-      <tr><th>시각</th><th>슬롯</th><th>종목</th><th>방향</th>
-          <th class="num">수량</th><th class="num">단가</th><th class="num">수수료</th></tr>
-    </thead><tbody></tbody></table></div>
+    <div class="card flush">
+      <div class="card-head">
+        <h3>거래 내역</h3>
+        <div class="chips" id="chips-trd" data-filter="trd"></div>
+      </div>
+      <div id="trades"><table><thead>
+        <tr><th>시각</th><th>봇</th><th>종목</th><th>방향</th>
+            <th class="num">수량</th><th class="num">단가</th><th class="num">수수료</th></tr>
+      </thead><tbody data-group="trd"></tbody></table></div>
+      <div class="card-foot">최신순 100건 · 칩을 누르면 해당 봇 거래만 남습니다</div>
+    </div>
   </div>
 
   <!-- 탭 2: 차트 -->
@@ -1017,13 +1209,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-</div>
-
   <!-- 탭 6.5: 나만의 퀀트 (v3.47) -->
   <div id="tab-myquant" class="tab-content">
     <div class="card">
-      <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-        <button type="button" class="btn-scan" id="btn-myquant-scan">🔍 조건 스캔 (KOSPI200)</button>
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-myquant-scan">조건 스캔 (KOSPI200)</button>
         <label class="muted"><input type="checkbox" id="myquant-refresh"> 캐시 무시(재스캔)</label>
         <span id="myquant-status" class="muted"></span>
       </div>
@@ -1043,23 +1233,55 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </table>
     </div>
     <div class="card" style="margin-top: 1rem;">
-      <h3 style="margin-top:0">🏷️ 태그별 실현 성과</h3>
+      <h3>태그별 실현 성과</h3>
       <pre id="myquant-tags" class="muted" style="white-space: pre-wrap;">아직 마이퀀트 거래가 없습니다.</pre>
       <p class="muted">※ 통계 관찰이며 투자 권유 아님. 표본 5건 미만(†)은 참고용.</p>
     </div>
   </div>
 
+  <!-- 탭 B: 신호 정확도 (v3.48) -->
+  <div id="tab-signal-acc" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-sigacc-refresh">새로고침</button>
+        <select id="sigacc-horizon">
+          <option value="1">1거래일</option>
+          <option value="5" selected>5거래일</option>
+        </select>
+        <span id="sigacc-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:10px;">
+        신호 후 수익률을 <b>같은 종목의 '아무 날이나 진입했을 때' 평균(베이스라인)</b>과 비교한다.
+        차이(edge)가 양수여야 신호에 값이 있다. MTF 필터에 억제된 신호도 함께 평가해
+        필터가 값을 더하는지 확인한다. 체결·수수료·슬리피지는 반영하지 않는다.
+      </p>
+    </div>
+    <div id="sigacc-summary" class="grid grid-auto" style="margin-bottom:20px;"></div>
+    <div class="card">
+      <h3>최근 평가된 신호</h3>
+      <table>
+        <thead><tr>
+          <th>시각</th><th>종목</th><th>전략</th><th>액션</th>
+          <th class="num">수익률</th><th class="num">베이스라인</th><th class="num">edge</th><th>발송</th>
+        </tr></thead>
+        <tbody id="sigacc-tbody">
+          <tr><td colspan="8" class="muted">아직 평가된 신호가 없습니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- 탭 6: 성과 통계 (v3.31) -->
   <div id="tab-perf" class="tab-content">
-    <div class="card" style="margin-bottom:1rem;">
-      <div style="display:flex;gap:0.5rem;align-items:center;">
-        <button type="button" class="btn-scan" id="btn-perf-refresh">🔄 새로고침</button>
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-perf-refresh">새로고침</button>
         <span id="perf-status" class="muted"></span>
       </div>
     </div>
-    <div id="perf-grid" class="grid grid-3" style="margin-bottom:1.5rem;"></div>
+    <div id="perf-grid" class="grid grid-auto" style="margin-bottom:20px;"></div>
     <div class="card">
-      <h3 style="margin-top:0;">완결 거래 성과 상세</h3>
+      <h3>완결 거래 성과 상세</h3>
       <table>
         <thead><tr>
           <th>슬롯</th><th class="num">완결 거래</th><th class="num">승률</th>
@@ -1076,6 +1298,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       ※ 승률·손익은 FIFO 매칭 완결 거래 기준. 샤프는 거래 단위 연환산(252회/년 가정).
     </p>
   </div>
+</div>
 
 <div id="toast" class="toast"></div>
 
@@ -1101,60 +1324,175 @@ document.querySelectorAll(".tab").forEach(btn => {
   });
 });
 
+const SLOT_COLORS = ["var(--slot-1)", "var(--slot-2)", "var(--slot-3)", "var(--slot-4)"];
+let SLOT_ORDER = [];            // 화면 표시 순서(자본 큰 순)
+let SLOT_COLOR = {};            // 슬롯명 → 색 (성과 탭도 참조)
+const won = n => fmt(Math.round(Number(n) || 0)) + "원";
+const signed = n => (Number(n) > 0 ? "+" : "") + fmt(Math.round(Number(n) || 0));
+
 async function loadSlots() {
-  const r = await fetch("/api/paper/slots");
-  const slots = await r.json();
+  const slots = await (await fetch("/api/paper/slots")).json();
   const sel = $("slot-select");
+  const prev = sel.value;
   sel.innerHTML = "";
-  $("slots").innerHTML = "";
+  SLOT_ORDER = slots.map(s => s.name);
+  SLOT_COLOR = {};
+  slots.forEach((s, i) => { SLOT_COLOR[s.name] = SLOT_COLORS[i % SLOT_COLORS.length]; });
+  window.SLOT_COLOR = SLOT_COLOR;
+
   for (const s of slots) {
     const opt = document.createElement("option");
     opt.value = s.name; opt.textContent = s.name;
     sel.appendChild(opt);
-    const card = document.createElement("div");
-    card.className = "card slot-card";
-    card.innerHTML = `
-      <div>
-        <div class="slot-name">${s.name} (${(s.allocation_pct*100).toFixed(0)}%)</div>
-        <div class="muted">포지션 ${s.n_positions} · 거래 ${s.n_trades}</div>
-      </div>
-      <div class="slot-capital">${fmt(Math.round(s.current_capital))}원</div>`;
-    $("slots").appendChild(card);
   }
+  if (prev) sel.value = prev;
+
+  // 슬롯 카드
+  $("slots").innerHTML = slots.map(s => `
+    <div class="slot" style="--slot-color:${SLOT_COLOR[s.name]}">
+      <div class="slot-name">${s.name}<span class="slot-share">${(s.allocation_pct*100).toFixed(0)}%</span></div>
+      <div class="slot-capital">${won(s.current_capital)}</div>
+      <div class="slot-meta"><span>포지션 ${s.n_positions}</span><span>거래 ${s.n_trades}</span></div>
+    </div>`).join("");
+
+  // 배분 막대 — 목표 비율이 아니라 실제 자본 비중을 그린다
+  const total = slots.reduce((a, s) => a + Number(s.current_capital || 0), 0);
+  $("alloc-bar").innerHTML = slots.map(s =>
+    `<span style="flex:${Math.max(Number(s.current_capital) || 0, 1)};background:${SLOT_COLOR[s.name]}"></span>`
+  ).join("");
+  $("alloc-legend").innerHTML = slots.map(s => {
+    const share = total ? (Number(s.current_capital) / total * 100).toFixed(1) : "0.0";
+    return `<span><i style="background:${SLOT_COLOR[s.name]}"></i>${s.name} ${share}%` +
+           ` <span class="muted">(목표 ${(s.allocation_pct*100).toFixed(0)}%)</span></span>`;
+  }).join("");
+  window._slots = slots;
+  return slots;
+}
+
+async function loadKpis() {
+  let perf = [];
+  try { perf = await (await fetch("/api/performance")).json(); } catch (e) { perf = []; }
+  if (!Array.isArray(perf)) perf = [];
+  const slots = window._slots || [];
+  const capital = slots.reduce((a, s) => a + Number(s.current_capital || 0), 0);
+  const pnl = perf.reduce((a, s) => a + Number(s.total_pnl || 0), 0);
+  const closed = perf.reduce((a, s) => a + Number(s.n_closed || 0), 0);
+  const wins = perf.reduce((a, s) =>
+    a + (s.win_rate === null ? 0 : Number(s.win_rate) / 100 * Number(s.n_closed || 0)), 0);
+  const winRate = closed ? (wins / closed * 100).toFixed(1) + "%" : "—";
+  const open = perf.reduce((a, s) => a + Number(s.n_open_positions || 0), 0);
+  const openCost = perf.reduce((a, s) => a + Number(s.open_cost || 0), 0);
+  const cls = pnl > 0 ? "up" : (pnl < 0 ? "down" : "");
+  $("kpis").innerHTML = `
+    <div class="kpi"><div class="kpi-label">슬롯 자본 합계</div>
+      <div class="kpi-value">${fmt(Math.round(capital))}<span class="unit">원</span></div>
+      <div class="kpi-meta">슬롯 ${slots.length}개</div></div>
+    <div class="kpi"><div class="kpi-label">실현손익</div>
+      <div class="kpi-value delta ${cls}">${signed(pnl)}<span class="unit">원</span></div>
+      <div class="kpi-meta">완결 ${closed}건</div></div>
+    <div class="kpi"><div class="kpi-label">승률</div>
+      <div class="kpi-value">${winRate}</div>
+      <div class="kpi-meta">완결 거래 기준</div></div>
+    <div class="kpi"><div class="kpi-label">보유</div>
+      <div class="kpi-value">${open}<span class="unit">종목</span></div>
+      <div class="kpi-meta">매입원가 ${fmt(Math.round(openCost))}원</div></div>`;
+  $("asof").textContent = "모의 운용 중 · " + new Date().toLocaleString("ko-KR", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderChips(barId, counts, totalLabel) {
+  const bar = $(barId);
+  const order = SLOT_ORDER.length ? SLOT_ORDER : Object.keys(counts);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  bar.innerHTML = `<button class="chip" aria-pressed="true" data-slot="all">전체 ${total}${totalLabel}</button>` +
+    order.map(name =>
+      `<button class="chip" aria-pressed="false" data-slot="${name}">` +
+      `<i style="background:${SLOT_COLOR[name] || "var(--muted)"}"></i>${name} ${counts[name] || 0}</button>`
+    ).join("");
+}
+
+function wireChips(barId, key) {
+  $(barId).addEventListener("click", e => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    $(barId).querySelectorAll(".chip").forEach(c => c.setAttribute("aria-pressed", "false"));
+    chip.setAttribute("aria-pressed", "true");
+    const slot = chip.dataset.slot;
+    document.querySelectorAll(`tbody[data-group="${key}"] tr`).forEach(row => {
+      const match = slot === "all" || row.dataset.slot === slot;
+      row.style.display = (row.classList.contains("empty") ? row.dataset.slot === slot : match) ? "" : "none";
+    });
+  });
 }
 
 async function loadPositions() {
-  const r = await fetch("/api/paper/positions");
-  const positions = await r.json();
-  const tbody = $("positions").querySelector("tbody");
-  tbody.innerHTML = positions.length === 0
-    ? "<tr><td colspan='4' class='muted'>(보유 포지션 없음)</td></tr>"
-    : positions.map(p => `<tr>
-        <td>${p.slot_name}</td><td>${p.name || ''} (${p.ticker})</td>
-        <td class="num">${fmt(p.quantity)}</td>
-        <td class="num">${fmt(Math.round(p.avg_price))}원</td>
-      </tr>`).join("");
+  const positions = await (await fetch("/api/paper/positions")).json();
+  const tbody = document.querySelector('tbody[data-group="pos"]');
+  const counts = {};
+  SLOT_ORDER.forEach(n => { counts[n] = 0; });
+  positions.forEach(p => { counts[p.slot_name] = (counts[p.slot_name] || 0) + 1; });
+  renderChips("chips-pos", counts, "종목");
+
+  const order = SLOT_ORDER.length ? SLOT_ORDER : [...new Set(positions.map(p => p.slot_name))];
+  let html = "";
+  for (const slot of order) {
+    const rows = positions.filter(p => p.slot_name === slot);
+    const amount = rows.reduce((a, p) => a + p.quantity * p.avg_price, 0);
+    const color = SLOT_COLOR[slot] || "var(--muted)";
+    if (!rows.length) {
+      html += `<tr class="group" data-slot="${slot}"><td colspan="4">
+        <span class="group-label"><i style="background:${color}"></i>${slot}
+        <span class="count">보유 없음</span></span></td></tr>`;
+      continue;
+    }
+    html += `<tr class="group" data-slot="${slot}"><td colspan="3">
+      <span class="group-label"><i style="background:${color}"></i>${slot}
+      <span class="count">${rows.length}종목</span></span></td>
+      <td class="num">${won(amount)}</td></tr>`;
+    html += rows.map(p => `<tr data-slot="${slot}">
+      <td class="indent">${p.name || ""}<span class="ticker">${p.ticker}</span></td>
+      <td class="num">${fmt(p.quantity)}</td>
+      <td class="num">${fmt(Math.round(p.avg_price))}</td>
+      <td class="num">${won(p.quantity * p.avg_price)}</td></tr>`).join("");
+  }
+  tbody.innerHTML = html || `<tr><td colspan="4" class="muted">보유 포지션 없음</td></tr>`;
 }
 
 async function loadTrades() {
-  const r = await fetch("/api/paper/trades?limit=100");
-  const trades = await r.json();
-  const tbody = $("trades").querySelector("tbody");
-  tbody.innerHTML = trades.length === 0
-    ? "<tr><td colspan='7' class='muted'>(거래 내역 없음)</td></tr>"
-    : trades.map(t => `<tr>
-        <td class="muted">${t.executed_at}</td>
-        <td>${t.slot_name}</td>
-        <td>${t.name || ''} (${t.ticker})</td>
-        <td class="badge-${t.side}">${t.side === 'buy' ? '🟢 매수' : '🔴 매도'}</td>
-        <td class="num">${fmt(t.quantity)}</td>
-        <td class="num">${fmt(Math.round(t.price))}원</td>
-        <td class="num">${fmt(Math.round(t.fees))}원</td>
-      </tr>`).join("");
+  const trades = await (await fetch("/api/paper/trades?limit=100")).json();
+  const tbody = document.querySelector('tbody[data-group="trd"]');
+  const counts = {};
+  SLOT_ORDER.forEach(n => { counts[n] = 0; });
+  trades.forEach(t => { counts[t.slot_name] = (counts[t.slot_name] || 0) + 1; });
+  renderChips("chips-trd", counts, "건");
+
+  if (!trades.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">거래 내역 없음</td></tr>`;
+    return;
+  }
+  // 최신순 그대로 두고 봇은 색점으로 구분한다(시간 흐름이 우선).
+  let html = trades.map(t => `<tr data-slot="${t.slot_name}">
+      <td class="muted">${t.executed_at}</td>
+      <td><span class="slot-tag"><i style="background:${SLOT_COLOR[t.slot_name] || "var(--muted)"}"></i>${t.slot_name}</span></td>
+      <td>${t.name || ""}<span class="ticker">${t.ticker}</span></td>
+      <td><span class="tag tag-${t.side}">${t.side === "buy" ? "매수" : "매도"}</span></td>
+      <td class="num">${fmt(t.quantity)}</td>
+      <td class="num">${fmt(Math.round(t.price))}</td>
+      <td class="num">${fmt(Math.round(t.fees))}</td>
+    </tr>`).join("");
+  // 거래가 없는 봇을 칩으로 고르면 빈 표 대신 안내를 보여준다
+  html += SLOT_ORDER.filter(n => !counts[n]).map(n =>
+    `<tr class="empty" data-slot="${n}" style="display:none">
+      <td colspan="7" class="muted">${n} 봇 거래가 아직 없습니다.</td></tr>`).join("");
+  tbody.innerHTML = html;
 }
 
+wireChips("chips-pos", "pos");
+wireChips("chips-trd", "trd");
+
 async function reload() {
-  await Promise.all([loadSlots(), loadPositions(), loadTrades()]);
+  await loadSlots();                       // 슬롯 색·순서를 먼저 확정
+  await Promise.all([loadPositions(), loadTrades(), loadKpis()]);
 }
 
 // ─── 현재가 + 매매 ─────────────────────────────────
@@ -1707,6 +2045,68 @@ document.querySelector(".tab[data-tab='tab-ipo']").addEventListener("click", () 
   loadIpoRecords();
 });
 
+// ── 신호 정확도 탭 (v3.48) ───────────────────────────────────────────────────
+function sigaccCard(title, a) {
+  const pct = v => (v === null || v === undefined) ? "—" : v + "%";
+  const edge = a.avg_edge;
+  const cls = edge === null ? "" : (edge > 0 ? "up" : (edge < 0 ? "down" : ""));
+  return `<div class="slot">
+    <div class="slot-name">${title}</div>
+    <div class="slot-capital delta ${cls}">${edge === null ? "—" : (edge > 0 ? "+" : "") + edge + "%p"}</div>
+    <div class="stat-rows">
+      <span>표본</span><span>${a.n}건</span>
+      <span>적중률</span><span>${pct(a.hit_rate)}</span>
+      <span>평균 수익률</span><span>${pct(a.avg_ret)}</span>
+      <span>판정</span><span>${a.verdict}</span>
+    </div>
+  </div>`;
+}
+
+async function loadSignalAccuracy() {
+  const status = document.getElementById("sigacc-status");
+  const box = document.getElementById("sigacc-summary");
+  const tbody = document.getElementById("sigacc-tbody");
+  const horizon = document.getElementById("sigacc-horizon").value;
+  status.textContent = "로딩 중...";
+  try {
+    const d = await (await fetch(`/api/signal/accuracy?horizon=${horizon}`)).json();
+    if (d.error) throw new Error(d.error);
+    const s = d.summary;
+    const cards = [sigaccCard("전체", s.total),
+                   sigaccCard("발송된 신호", s.mtf.sent),
+                   sigaccCard("MTF 억제분", s.mtf.suppressed)];
+    for (const [k, a] of Object.entries(s.by_strategy)) cards.push(sigaccCard(k, a));
+    box.innerHTML = cards.join("");
+
+    const rows = d.recent || [];
+    const key = `ret_${horizon}d`, bkey = `base_${horizon}d`, ekey = `edge_${horizon}d`;
+    tbody.innerHTML = rows.length ? rows.map(r => {
+      const v = r[key], e = r[ekey];
+      const cls = v === null ? "" : (v > 0 ? "up" : (v < 0 ? "down" : ""));
+      const ecls = e === null ? "" : (e > 0 ? "up" : (e < 0 ? "down" : ""));
+      const num = x => (x === null || x === undefined) ? "—" : x + "%";
+      return `<tr>
+        <td class="muted">${r.at || ""}</td>
+        <td>${r.name || ""}<span class="ticker">${r.ticker || ""}</span></td>
+        <td>${r.strategy || ""}</td>
+        <td>${r.action || ""}</td>
+        <td class="num delta ${cls}">${num(v)}</td>
+        <td class="num">${num(r[bkey])}</td>
+        <td class="num delta ${ecls}">${num(e)}</td>
+        <td>${r.suppressed ? "억제" : "발송"}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="8" class="muted">아직 평가된 신호가 없습니다.</td></tr>`;
+
+    status.textContent = `평가 ${d.evaluated}건 · 대기 ${d.pending}건 · ` +
+      new Date().toLocaleTimeString();
+  } catch (e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+document.getElementById("btn-sigacc-refresh").addEventListener("click", loadSignalAccuracy);
+document.getElementById("sigacc-horizon").addEventListener("change", loadSignalAccuracy);
+document.querySelector(".tab[data-tab='tab-signal-acc']").addEventListener("click", loadSignalAccuracy);
+
 // ── 성과 탭 (v3.31) ──────────────────────────────────────────────────────────
 async function loadPerformance() {
   const status = document.getElementById("perf-status");
@@ -1718,38 +2118,37 @@ async function loadPerformance() {
     if (data.error) throw new Error(data.error);
 
     grid.innerHTML = data.map(s => {
-      const pnlColor = s.total_pnl >= 0 ? "var(--buy)" : "var(--sell)";
+      const cls = s.total_pnl > 0 ? "up" : (s.total_pnl < 0 ? "down" : "");
+      const retCls = s.total_return_pct > 0 ? "up" : (s.total_return_pct < 0 ? "down" : "");
       const wrText = s.win_rate !== null ? s.win_rate + "%" : "—";
       const sharpeText = s.sharpe !== null ? parseFloat(s.sharpe).toFixed(2) : "—";
-      return `<div class="card">
-        <div class="slot-card">
-          <span class="slot-name">${s.slot_name}</span>
-          <span style="color:${pnlColor};font-size:1.1rem;font-weight:bold;">
-            ${s.total_pnl >= 0 ? "+" : ""}${s.total_pnl.toLocaleString()}원
-          </span>
-        </div>
-        <div style="margin-top:0.5rem;display:grid;grid-template-columns:1fr 1fr;gap:0.3rem;">
-          <span class="muted">승률</span><span>${wrText}</span>
-          <span class="muted">수익률</span>
-          <span style="color:${pnlColor}">${s.total_return_pct >= 0 ? "+" : ""}${s.total_return_pct}%</span>
-          <span class="muted">MDD</span><span>${s.max_drawdown_pct}%</span>
-          <span class="muted">샤프</span><span>${sharpeText}</span>
-          <span class="muted">보유</span><span>${s.n_open_positions}종목</span>
-          <span class="muted">완결</span><span>${s.n_closed}건</span>
+      const color = (window.SLOT_COLOR || {})[s.slot_name] || "var(--accent)";
+      return `<div class="slot" style="--slot-color:${color}">
+        <div class="slot-name">${s.slot_name}</div>
+        <div class="slot-capital delta ${cls}">
+          ${s.total_pnl > 0 ? "+" : ""}${s.total_pnl.toLocaleString()}원</div>
+        <div class="stat-rows">
+          <span>승률</span><span>${wrText}</span>
+          <span>수익률</span><span class="delta ${retCls}">${s.total_return_pct > 0 ? "+" : ""}${s.total_return_pct}%</span>
+          <span>MDD</span><span>${s.max_drawdown_pct}%</span>
+          <span>샤프</span><span>${sharpeText}</span>
+          <span>보유</span><span>${s.n_open_positions}종목</span>
+          <span>완결</span><span>${s.n_closed}건</span>
         </div>
       </div>`;
     }).join("");
 
     tbody.innerHTML = data.map(s => {
-      const pnlColor = s.total_pnl >= 0 ? "var(--buy)" : "var(--sell)";
+      const cls = s.total_pnl > 0 ? "up" : (s.total_pnl < 0 ? "down" : "");
+      const retCls = s.total_return_pct > 0 ? "up" : (s.total_return_pct < 0 ? "down" : "");
       return `<tr>
         <td>${s.slot_name}</td>
         <td class="num">${s.n_closed}</td>
         <td class="num">${s.win_rate !== null ? s.win_rate + "%" : "—"}</td>
-        <td class="num" style="color:${pnlColor}">
-          ${s.total_pnl >= 0 ? "+" : ""}${s.total_pnl.toLocaleString()}원</td>
-        <td class="num" style="color:${pnlColor}">
-          ${s.total_return_pct >= 0 ? "+" : ""}${s.total_return_pct}%</td>
+        <td class="num delta ${cls}">
+          ${s.total_pnl > 0 ? "+" : ""}${s.total_pnl.toLocaleString()}원</td>
+        <td class="num delta ${retCls}">
+          ${s.total_return_pct > 0 ? "+" : ""}${s.total_return_pct}%</td>
         <td class="num">${s.max_drawdown_pct}%</td>
         <td class="num">${s.sharpe !== null ? s.sharpe : "—"}</td>
         <td class="num">${s.n_open_positions}</td>
