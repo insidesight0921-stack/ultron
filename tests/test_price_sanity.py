@@ -109,6 +109,12 @@ def test_small_deviation_is_silent():
     assert v["warnings"] == []
 
 
+def test_ordinary_volatility_does_not_warn():
+    """이 시장은 일간 표준편차가 ~7%다. 2σ에서 경고하면 곧 무시하게 된다."""
+    v = ps.inspect_batch([_item("010120", 240000)], SERIES, TODAY)   # +15.4%
+    assert v["warnings"] == []
+
+
 def test_deviation_pct_handles_missing_values():
     assert ps.deviation_pct(100, None) is None
     assert ps.deviation_pct(0, 100) is None

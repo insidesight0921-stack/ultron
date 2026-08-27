@@ -800,6 +800,23 @@ async def api_strategy_compare():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/benchmark")
+async def api_benchmark(rf: float = 0.0):
+    """v3.52: 일간 자산곡선 · 코스피 대비 비교(탭 E).
+
+    완결 거래 순서가 아니라 **달력 위의 하루**를 단위로 자산을 센다. 그래야
+    보유 중 평가손실이 MDD에 잡히고, √252 연환산이 의미를 가진다.
+    """
+    try:
+        import equity_curve as ec
+        ev = ec.report(rf_annual=float(rf))
+        ev["verdict"] = ec.verdict(ev)
+        return JSONResponse(ev)
+    except Exception as e:
+        log.exception("벤치마크 비교 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ─── HTML 페이지 ────────────────────────────────────
 
 
@@ -1015,6 +1032,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-strategy">전략 비교</button>
     <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-perf">성과</button>
+    <button class="tab" data-tab="tab-bench">벤치마크</button>
   </div>
 
   <!-- 탭 1: 주문 -->
@@ -1310,6 +1328,36 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </tr></thead>
         <tbody id="sigacc-tbody">
           <tr><td colspan="8" class="muted">아직 평가된 신호가 없습니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 탭 E: 벤치마크 비교 (v3.52) -->
+  <div id="tab-bench" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-bench-refresh">새로고침</button>
+        <label class="field" style="grid-auto-flow:column; align-items:center; gap:8px;">
+          <span>무위험수익률(연)</span>
+          <select id="bench-rf">
+            <option value="0" selected>0% (미차감)</option>
+            <option value="0.03">3%</option>
+          </select>
+        </label>
+        <span id="bench-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:10px;" id="bench-note"></p>
+    </div>
+    <div id="bench-grid" class="grid grid-auto" style="margin-bottom:20px;"></div>
+    <div class="card">
+      <h3>실전 전환 기준 대조</h3>
+      <table>
+        <thead><tr>
+          <th>기준</th><th class="num">현재</th><th class="num">기준값</th><th>판정</th>
+        </tr></thead>
+        <tbody id="bench-tbody">
+          <tr><td colspan="4" class="muted">아직 평가할 거래일이 없습니다.</td></tr>
         </tbody>
       </table>
     </div>
@@ -2280,6 +2328,66 @@ async function loadSignalAccuracy() {
 document.getElementById("btn-sigacc-refresh").addEventListener("click", loadSignalAccuracy);
 document.getElementById("sigacc-horizon").addEventListener("change", loadSignalAccuracy);
 document.querySelector(".tab[data-tab='tab-signal-acc']").addEventListener("click", loadSignalAccuracy);
+
+// ── 벤치마크 탭 (v3.52) ──────────────────────────────────────────────────────
+function benchCard(title, value, unit, meta, invert) {
+  const v = (value === null || value === undefined) ? null : value;
+  const cls = v === null ? "" : ((invert ? -v : v) > 0 ? "up" : ((invert ? -v : v) < 0 ? "down" : ""));
+  const shown = v === null ? "—" : (v > 0 && !invert ? "+" : "") + v + unit;
+  return `<div class="slot">
+    <div class="slot-name">${title}</div>
+    <div class="slot-capital delta ${cls}">${shown}</div>
+    <div class="slot-meta"><span>${meta}</span></div>
+  </div>`;
+}
+
+async function loadBenchmark() {
+  const status = document.getElementById("bench-status");
+  const grid = document.getElementById("bench-grid");
+  const tbody = document.getElementById("bench-tbody");
+  const note = document.getElementById("bench-note");
+  const rf = document.getElementById("bench-rf").value;
+  status.textContent = "로딩 중...";
+  try {
+    const d = await (await fetch(`/api/benchmark?rf=${rf}`)).json();
+    if (d.error) throw new Error(d.error);
+    const num = (v, u) => (v === null || v === undefined) ? "—" : v + (u || "");
+
+    grid.innerHTML = [
+      benchCard("초과수익 (vs 코스피)", d.excess_return, "%p",
+                `내 ${num(d.port_return, "%")} · 코스피 ${num(d.bench_return, "%")}`),
+      benchCard("MDD", d.mdd, "%", `코스피 ${num(d.bench_mdd, "%")}`, true),
+      benchCard("샤프 (연환산)", d.sharpe, "", `코스피 ${num(d.bench_sharpe, "")}`),
+      benchCard("알파 (연환산)", d.alpha, "%", `베타 ${num(d.beta, "")}`),
+    ].join("");
+
+    const parts = [`${d.start}~${d.end} · ${d.n_days}거래일 · 커버리지 ${d.coverage === null ? "—" : Math.round(d.coverage * 100) + "%"}`];
+    if (!d.usable) parts.push(`<b>판정 보류: ${(d.reasons || []).join(" / ")}</b>`);
+    if (d.missing_days) parts.push(`가격을 모르는 종목이 있어 건너뛴 날 ${d.missing_days}일 — 직전 값으로 메우지 않았습니다.`);
+    if (!Number(rf)) parts.push("무위험수익률을 빼지 않은 샤프입니다(그만큼 후하게 나옵니다).");
+    parts.push("완결 거래 순서가 아니라 <b>달력 위의 하루</b>를 단위로 센 값입니다. 보유 중 평가손실이 MDD에 반영됩니다.");
+    note.innerHTML = parts.join("<br>");
+
+    const rows = d.verdict || [];
+    tbody.innerHTML = rows.length ? rows.map(c => {
+      const mark = c.passed === null ? '<span class="muted">판정 불가</span>'
+        : (c.passed ? '<span class="delta up">✅ 충족</span>' : '<span class="delta down">❌ 미충족</span>');
+      return `<tr>
+        <td>${c.name}</td>
+        <td class="num">${c.value === null ? "—" : c.value}</td>
+        <td class="num muted">${c.threshold} ${c.direction}</td>
+        <td>${mark}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="4" class="muted">아직 평가할 거래일이 없습니다.</td></tr>`;
+
+    status.textContent = "업데이트: " + new Date().toLocaleTimeString();
+  } catch(e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+document.getElementById("btn-bench-refresh").addEventListener("click", loadBenchmark);
+document.getElementById("bench-rf").addEventListener("change", loadBenchmark);
+document.querySelector(".tab[data-tab='tab-bench']").addEventListener("click", loadBenchmark);
 
 // ── 성과 탭 (v3.31) ──────────────────────────────────────────────────────────
 async function loadPerformance() {
