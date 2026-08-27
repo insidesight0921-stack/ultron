@@ -1421,6 +1421,86 @@ def _slot_hard_stop_reason(slot_name: str) -> Optional[str]:
 # ─── 장 중 실시간 손절·익절 모니터 (v3.31, 판정 v3.44=exit_rules) ─────────────
 
 
+async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str]:
+    """v3.50: 장외에 쌓인 대기 주문을 개장 후 실제 가격으로 재평가해 체결한다.
+
+    장외 기록가(대개 당일 종가)로는 실제로 살 수 없다 — 그 가격으로 진입한 것처럼
+    기록하면 성과가 부풀거나 꺼진다(look-ahead). 그래서 체결을 개장까지 미루고,
+    개장가와 신호가의 괴리가 크면 아예 버린다.
+    """
+    import pending_orders as po
+
+    orders = await asyncio.to_thread(po.load)
+    if not orders:
+        return []
+
+    prices: dict = {}
+    tickers = [o.get("ticker") for o in orders]
+    fetched = await asyncio.gather(
+        *(asyncio.to_thread(_get_naver_price, t) for t in tickers)
+    )
+    for t, px in zip(tickers, fetched):
+        prices[t] = px or await asyncio.to_thread(_get_pykrx_price, t)
+
+    results = po.revalidate_all(orders, prices, now.date())
+    slot_ids = {s["name"]: s["id"] for s in await asyncio.to_thread(_pdb.list_slots)}
+    cycle_id = now.strftime("%Y%m%dT%H%M")
+
+    for i, r in enumerate(results):
+        if r["verdict"] != "fill":
+            log.info("대기 주문 취소 %s — %s", r.get("ticker"), r["reason"])
+            continue
+        slot_id = slot_ids.get(r.get("slot"))
+        if slot_id is None:
+            r["verdict"] = "cancel"
+            r["reason"] = f"슬롯 '{r.get('slot')}'을 찾지 못함"
+            continue
+        # 한도에 걸린 슬롯이면 대기 주문도 들어가지 않는다
+        blocked = _slot_hard_stop_reason(r.get("slot"))
+        if blocked:
+            r["verdict"] = "cancel"
+            r["reason"] = "슬롯 일일 손실 한도로 신규 매수 차단"
+            continue
+        o = r["order"]
+        notes = f"[AUTO] {o.get('source', '봇')} 대기체결 (신호 {o.get('signal_at', '')[:16]}, 갭 {r['gap']:+.2f}%)"
+        try:
+            import entry_tags
+            notes = entry_tags.format_note(notes, r.get("tags"))
+        except Exception:
+            log.warning("대기 체결 태그 생성 실패", exc_info=True)
+        try:
+            if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                await asyncio.to_thread(
+                    _pdb.record_buy, int(slot_id), r["ticker"], r.get("name") or r["ticker"],
+                    int(r["qty"]), float(r["price"]), notes,
+                )
+            else:
+                await _execute_private_paper_write(
+                    caller="telegram-pending",
+                    action="buy",
+                    slot_id=int(slot_id),
+                    actor_id="pending-queue",
+                    source_event_id=cycle_id,
+                    item_key=f"pending-{i}",
+                    ticker=r["ticker"],
+                    name=r.get("name"),
+                    quantity=int(r["qty"]),
+                    price=float(r["price"]),
+                    notes=notes,
+                    user_approved=True,      # 장외 배치 승인 시 이미 사람이 승인했다
+                    policy_approved=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            r["verdict"] = "cancel"
+            r["reason"] = f"체결 실패: {exc}"
+            log.warning("대기 주문 체결 실패 %s: %s", r.get("ticker"), exc)
+
+    # 처리한 것은 성공·실패와 무관하게 큐에서 비운다 — 남겨 두면 다음 사이클에 또 시도한다
+    await asyncio.to_thread(po.clear)
+    text = po.format_results(results)
+    return [text] if text else []
+
+
 async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """평일 09:05~15:30 사이 5분 간격으로 실행.
 
@@ -1440,8 +1520,22 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not (market_open <= now <= market_close):
         return
 
+    # v3.50 — 대기 주문 먼저. 보유 포지션이 없어도 체결해야 하므로 아래 조기 반환보다 앞에 둔다.
+    pending_alerts: list[str] = []
+    try:
+        pending_alerts = await _drain_pending_orders(ctx, now)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("대기 주문 처리 실패: %s", exc)
+
     positions = await asyncio.to_thread(_list_runtime_paper_positions)
     if not positions:
+        if pending_alerts:
+            for uid in ALLOWED_IDS:
+                try:
+                    await ctx.bot.send_message(chat_id=uid, text="\n\n".join(pending_alerts),
+                                               parse_mode="Markdown")
+                except Exception as e:
+                    log.warning(f"대기 주문 알림 실패 (uid={uid}): {e}")
         return
 
     log.info(
@@ -1451,7 +1545,7 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     state = _load_intraday_state()
     peaks, last_px = state["peaks"], state["px"]
     live_keys: set = set()
-    alerts: list[str] = []
+    alerts: list[str] = list(pending_alerts)
 
     # v3.45 — 유효 포지션 시세 병렬 조회(네이버 1차) / v3.46 — 시세원 건강 감시
     valid = [
@@ -2360,6 +2454,31 @@ async def handle_kium_paper_callback(
     # v3.49: 진입 근거 태그 — 스캔 순위는 필터 전 원본 목록 기준이라야 의미가 있다
     _rank_of = {r.get("ticker"): i + 1 for i, r in enumerate(results)}
 
+    # v3.50: 장외 신호는 체결하지 않고 큐에 넣는다.
+    # 21시의 "현재가"는 당일 종가라 실전에서는 그 가격에 살 수 없다.
+    import pending_orders as _po
+
+    _now_kst_ = _now_kst()
+    if new_results and not _po.is_market_hours(_now_kst_):
+        _queued = []
+        for _r in new_results:
+            _px = _r.get("current_price", 0)
+            if not _px or _px <= 0:
+                continue
+            try:
+                import entry_tags as _et
+                _tags = _et.kium_tags(_r, _rank_of.get(_r["ticker"]))
+            except Exception:
+                _tags = []
+            _queued.append(_po.make_order(
+                slot=slot_name, ticker=_r["ticker"], name=_r["name"],
+                signal_price=float(_px), alloc=float(alloc_per),
+                signal_at=_now_kst_, source=f"{week_key} 키움봇", tags=_tags))
+        if _queued:
+            await asyncio.to_thread(_po.enqueue, _queued)
+            lines_result.append(_po.format_queued(_queued))
+            new_results = []
+
     for result_index, r in enumerate(new_results):
         price = r.get("current_price", 0)
         if not price or price <= 0:
@@ -2567,6 +2686,32 @@ async def handle_quant_paper_callback(
         except Exception:
             available_cap = slot_cap
         alloc_per = available_cap / len(new_recs) if new_recs else 0
+
+        # v3.50: 장외 신호는 체결하지 않고 큐에 넣는다(키움 경로와 같은 이유)
+        import pending_orders as _po
+
+        _now_q = _now_kst()
+        if not _po.is_market_hours(_now_q):
+            _queued = []
+            for _rec in new_recs:
+                _px = _rec_attr(_rec, "current_price", 0) or 0
+                if _px <= 0:
+                    continue
+                try:
+                    import entry_tags as _et
+                    _tags = _et.quant_tags(_rec, _entry_phase)
+                except Exception:
+                    _tags = []
+                _queued.append(_po.make_order(
+                    slot=slot_name, ticker=_rec_attr(_rec, "ticker", ""),
+                    name=_rec_attr(_rec, "name", "?"), signal_price=float(_px),
+                    alloc=float(alloc_per), signal_at=_now_q,
+                    source=f"{month_key} 콴텍봇", tags=_tags))
+            if _queued:
+                await asyncio.to_thread(_po.enqueue, _queued)
+                lines_result.append(_po.format_queued(_queued))
+                new_recs = []
+
         for result_index, rec in enumerate(new_recs):
             try:
                 price = _rec_attr(rec, "current_price", 0) or 0

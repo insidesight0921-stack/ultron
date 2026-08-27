@@ -214,4 +214,7 @@ def test_telegram_auto_buy_paths_guarded():
     """키움·콴텍 두 자동 매수 경로 모두 관문을 지난다."""
     src = _read("telegram_bot.py")
     assert src.count("hard_stop = _slot_hard_stop_reason(slot_name)") == 2
-    assert src.count("new_results = []") == 1 and src.count("new_recs = []") == 1
+    # 각 관문이 자기 목록을 비우는지 — 카운트가 아니라 관문 바로 아래를 본다
+    for anchor in ("new_results = []", "new_recs = []"):
+        i = src.index(f"        {anchor}")
+        assert "hard_stop" in src[max(0, i - 200):i]

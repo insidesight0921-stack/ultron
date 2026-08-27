@@ -128,15 +128,15 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 def test_both_auto_buy_paths_write_tags():
     """키움·콴텍 두 자동 매수 경로 모두 태그를 남겨야 커버리지가 찬다."""
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
-    assert "entry_tags.kium_tags" in src
-    assert "entry_tags.quant_tags" in src
-    assert src.count("entry_tags.format_note") == 2
+    assert src.count("kium_tags(") == 2       # 즉시 체결 · 대기 큐 적재
+    assert src.count("quant_tags(") == 2
+    assert src.count("format_note(") == 3      # 키움 · 콴텍 · 대기 체결
 
 
 def test_tagging_failure_does_not_block_the_buy():
     """태그는 부가 정보다. 태그를 못 만들었다고 매수가 실패하면 안 된다."""
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
-    for marker in ("entry_tags.kium_tags", "entry_tags.quant_tags"):
+    for marker in ("kium_tags(", "quant_tags("):
         i = src.index(marker)
         window = src[max(0, i - 400):i + 200]
         assert "except Exception" in window
