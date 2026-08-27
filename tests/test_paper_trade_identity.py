@@ -57,6 +57,46 @@ def _direct_calls(module_name):
     return found
 
 
+def _is_executor_none_guard(test, executor_name):
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == executor_name
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Is)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    )
+
+
+def _unguarded_direct_calls(function, executor_name):
+    found = []
+
+    def walk(node, guarded=False):
+        if isinstance(node, ast.If):
+            direct_fallback = _is_executor_none_guard(node.test, executor_name)
+            for child in node.body:
+                walk(child, guarded or direct_fallback)
+            for child in node.orelse:
+                walk(child, guarded)
+            return
+        if isinstance(node, ast.Call):
+            target = node.func
+            name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else target.id if isinstance(target, ast.Name) else ""
+            )
+            if name in {"record_buy", "record_sell"} and not guarded:
+                found.append((name, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            walk(child, guarded)
+
+    walk(function)
+    return found
+
+
 def test_direct_paper_writer_inventory_matches_every_production_callsite():
     expected = {}
     for policy in PAPER_DIRECT_WRITER_INVENTORY:
@@ -73,6 +113,31 @@ def test_direct_paper_writer_inventory_matches_every_production_callsite():
     assert actual == expected
 
 
+def test_operational_direct_calls_are_reachable_only_when_v3_executor_is_absent():
+    executor_by_module = {
+        "paper_ui.py": "_PAPER_WRITE_EXECUTOR",
+        "telegram_bot.py": "_PRIVATE_PAPER_WRITE_EXECUTOR",
+    }
+    operational = [
+        policy
+        for policy in PAPER_DIRECT_WRITER_INVENTORY
+        if policy.target_mode == "private-client"
+    ]
+
+    for module_name, executor_name in executor_by_module.items():
+        source = (ROOT / "scripts" / module_name).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for policy in operational:
+            if policy.module != module_name:
+                continue
+            assert _unguarded_direct_calls(functions[policy.function], executor_name) == []
+
+
 def test_inventory_assigns_single_future_db_writer_and_retires_cli_direct_path():
     operational = [
         policy
@@ -84,6 +149,14 @@ def test_inventory_assigns_single_future_db_writer_and_retires_cli_direct_path()
     cli = next(policy for policy in PAPER_DIRECT_WRITER_INVENTORY if policy.key == "operator-cli")
     assert cli.target_owner == "none"
     assert cli.target_mode == "retire-direct-rollback-only"
+    rehearsal = next(
+        policy
+        for policy in PAPER_DIRECT_WRITER_INVENTORY
+        if policy.key == "verified-backup-clone-rehearsal"
+    )
+    assert rehearsal.target_owner == "none"
+    assert rehearsal.target_mode == "verified-backup-clone-only"
+    assert rehearsal.approval_mode == "isolated-rehearsal"
     intraday = next(
         policy for policy in PAPER_DIRECT_WRITER_INVENTORY if policy.key == "telegram-intraday"
     )

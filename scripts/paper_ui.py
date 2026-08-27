@@ -20,12 +20,14 @@ Paper Trading UI — 5단계 검증 사이트 골격 (v3.18 MVP).
     # 원격 접속은 인증을 적용한 뒤 Tailscale IPv4를 명시적으로 지정한다.
     python paper_ui.py --host <Tailscale IPv4>
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
 import sys
+import uuid
 from pathlib import Path
 
 import uvicorn
@@ -38,6 +40,7 @@ PROJECT = HOME / "울트론" / "ai-agent"
 # .env 로드 — ECOS/FRED/DART API 키 등
 try:
     from dotenv import load_dotenv as _ldenv
+
     _ldenv(PROJECT / ".env")
 except Exception:
     pass
@@ -50,10 +53,28 @@ from private_data_api_client import (  # noqa: E402
     PrivateDataClient,
     private_api_enabled,
 )
+from paper_trade_identity import build_paper_trade_write_identity  # noqa: E402
+from private_write_runtime import load_private_write_runtime_bundle  # noqa: E402
 from kium_bot import run as kium_run  # noqa: E402  # v3.19 신호 탭
 import quant_bot as qb  # noqa: E402  # v3.23 콴텍 탭
 
 log = logging.getLogger("paper_ui")
+
+
+# main()에서 v3 bundle 전체가 검증된 경우에만 설정한다. import/test와 v1/v2는
+# 기존 direct Paper 경로를 유지한다.
+_PAPER_WRITE_CLIENT = None
+_PAPER_WRITE_EXECUTOR = None
+
+
+def _configure_paper_write_runtime(runtime_bundle) -> None:
+    global _PAPER_WRITE_CLIENT, _PAPER_WRITE_EXECUTOR
+    _PAPER_WRITE_CLIENT = None
+    _PAPER_WRITE_EXECUTOR = None
+    if runtime_bundle is None or not runtime_bundle.paper_writes_enabled:
+        return
+    _PAPER_WRITE_CLIENT = runtime_bundle.build_paper_client()
+    _PAPER_WRITE_EXECUTOR = runtime_bundle.build_paper_executor(_PAPER_WRITE_CLIENT)
 
 
 # 앱 시작 시 시드
@@ -72,6 +93,67 @@ app = FastAPI(title="Paper Trading UI")
 
 def _private_client() -> PrivateDataClient:
     return PrivateDataClient()
+
+
+def _paper_slot_id(slot: object) -> int:
+    if _PAPER_WRITE_CLIENT is None:
+        raise RuntimeError("Paper Private client is unavailable")
+    value = str(slot or "").strip()
+    slots = _PAPER_WRITE_CLIENT.list_paper_slots()
+    match = next(
+        (
+            item
+            for item in slots
+            if str(item.get("id")) == value or str(item.get("name", "")) == value
+        ),
+        None,
+    )
+    if match is None:
+        raise ValueError("Paper slot was not found")
+    return int(match["id"])
+
+
+def _execute_paper_ui_write(
+    action: str,
+    *,
+    source_event_id: object,
+    slot: object,
+    ticker: str,
+    quantity: int,
+    price: float,
+    name: str | None = None,
+    notes: str | None = None,
+) -> dict[str, object]:
+    if _PAPER_WRITE_EXECUTOR is None:
+        raise RuntimeError("Paper Private executor is unavailable")
+    slot_id = _paper_slot_id(slot)
+    event_id = str(source_event_id or "").strip()
+    try:
+        uuid.UUID(event_id)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Paper order event ID is required") from exc
+    identity = build_paper_trade_write_identity(
+        caller="paper-ui",
+        operation=f"paper.{action}",
+        slot_id=slot_id,
+        actor_id="local-paper-ui",
+        source_event_id=event_id,
+        item_key="single-order",
+    )
+    execution = _PAPER_WRITE_EXECUTOR.execute(
+        caller="paper-ui",
+        action=action,
+        slot_id=slot_id,
+        identity=identity,
+        user_approved=True,
+        policy_approved=False,
+        ticker=ticker,
+        name=name,
+        quantity=quantity,
+        price=price,
+        notes=notes,
+    )
+    return {**execution.result, "replayed": execution.replayed}
 
 
 def _list_portfolios() -> list[dict]:
@@ -102,11 +184,13 @@ def _list_slots() -> list[dict]:
     out = []
     for slot in slots:
         summary = pdb.slot_summary(slot["id"]) or {}
-        out.append({
-            **slot,
-            "n_positions": summary.get("n_positions", 0),
-            "n_trades": summary.get("n_trades", 0),
-        })
+        out.append(
+            {
+                **slot,
+                "n_positions": summary.get("n_positions", 0),
+                "n_trades": summary.get("n_trades", 0),
+            }
+        )
     return out
 
 
@@ -161,22 +245,27 @@ def _get_myquant_tags() -> dict:
     }
 
 
-
 # ─── IPO봇 API (v3.29) ────────────────────────────────────────────────────────
+
 
 @app.get("/api/ipo/scan")
 async def api_ipo_scan():
     """ipo_bot scan 실행 → JSON 반환."""
     import subprocess, json as _json, sys
+
     try:
         result = subprocess.run(
             [sys.executable, str(PROJECT / "scripts" / "ipo_bot.py"), "scan", "--json"],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(PROJECT)
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(PROJECT),
         )
         if result.returncode == 0 and result.stdout.strip():
             return JSONResponse(_json.loads(result.stdout))
-        return JSONResponse({"error": result.stderr[:500] or "scan 실패"}, status_code=500)
+        return JSONResponse(
+            {"error": result.stderr[:500] or "scan 실패"}, status_code=500
+        )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -248,6 +337,7 @@ async def api_quote(ticker: str):
     try:
         from pykrx import stock
         from datetime import datetime, timedelta
+
         end = datetime.now()
         start = end - timedelta(days=10)
         df = stock.get_market_ohlcv(
@@ -263,9 +353,13 @@ async def api_quote(ticker: str):
                     name = stock.get_market_ticker_name(str(ticker).strip())
                 except Exception:
                     name = str(ticker)
-                return JSONResponse({
-                    "ticker": str(ticker), "name": name, "price": price,
-                })
+                return JSONResponse(
+                    {
+                        "ticker": str(ticker),
+                        "name": name,
+                        "price": price,
+                    }
+                )
         return JSONResponse({"error": "종가 컬럼 없음"}, status_code=500)
     except Exception as e:
         log.warning(f"quote 실패 {ticker}: {e}")
@@ -282,23 +376,29 @@ async def api_chart_data(ticker: str, days: int = 180):
     try:
         from pykrx import stock
         from datetime import datetime, timedelta
+
         end = datetime.now()
         start = end - timedelta(days=int(days * 1.6) + 14)  # 비영업일 여유
         df = stock.get_market_ohlcv(
-            start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
-            str(ticker).strip()
+            start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), str(ticker).strip()
         )
         if df is None or len(df) == 0:
             return JSONResponse({"error": "데이터 없음"}, status_code=404)
 
         # 컬럼 — 한글/영어 모두 지원
         col_map = {}
-        for src_col, dst_col in [("시가", "open"), ("고가", "high"),
-                                  ("저가", "low"), ("종가", "close"),
-                                  ("거래량", "volume"),
-                                  ("Open", "open"), ("High", "high"),
-                                  ("Low", "low"), ("Close", "close"),
-                                  ("Volume", "volume")]:
+        for src_col, dst_col in [
+            ("시가", "open"),
+            ("고가", "high"),
+            ("저가", "low"),
+            ("종가", "close"),
+            ("거래량", "volume"),
+            ("Open", "open"),
+            ("High", "high"),
+            ("Low", "low"),
+            ("Close", "close"),
+            ("Volume", "volume"),
+        ]:
             if src_col in df.columns and dst_col not in col_map:
                 col_map[dst_col] = src_col
         if not all(k in col_map for k in ("open", "high", "low", "close")):
@@ -315,19 +415,23 @@ async def api_chart_data(ticker: str, days: int = 180):
         except Exception:
             name = str(ticker)
 
-        return JSONResponse({
-            "ticker": str(ticker), "name": name,
-            "dates": [d.strftime("%Y-%m-%d") for d in df.index],
-            "opens": [float(x) for x in df[col_map["open"]]],
-            "highs": [float(x) for x in df[col_map["high"]]],
-            "lows": [float(x) for x in df[col_map["low"]]],
-            "closes": [float(x) for x in df[col_map["close"]]],
-            "volumes": (
-                [float(x) for x in df[col_map["volume"]]]
-                if "volume" in col_map else []
-            ),
-            "n": len(df),
-        })
+        return JSONResponse(
+            {
+                "ticker": str(ticker),
+                "name": name,
+                "dates": [d.strftime("%Y-%m-%d") for d in df.index],
+                "opens": [float(x) for x in df[col_map["open"]]],
+                "highs": [float(x) for x in df[col_map["high"]]],
+                "lows": [float(x) for x in df[col_map["low"]]],
+                "closes": [float(x) for x in df[col_map["close"]]],
+                "volumes": (
+                    [float(x) for x in df[col_map["volume"]]]
+                    if "volume" in col_map
+                    else []
+                ),
+                "n": len(df),
+            }
+        )
     except Exception as e:
         log.warning(f"chart-data 실패 {ticker}: {e}")
         return JSONResponse({"error": str(e)}, status_code=410)
@@ -346,6 +450,7 @@ async def api_buy(request: Request):
     quantity = body.get("quantity")
     price = body.get("price")
     notes = body.get("notes")
+    source_event_id = body.get("source_event_id")
 
     if not slot or not ticker or quantity is None or price is None:
         return JSONResponse(
@@ -354,11 +459,26 @@ async def api_buy(request: Request):
         )
 
     try:
-        out = pdb.record_buy(
-            slot=slot, ticker=ticker, name=name,
-            quantity=int(quantity), price=float(price),
-            notes=notes,
-        )
+        if _PAPER_WRITE_EXECUTOR is None:
+            out = pdb.record_buy(
+                slot=slot,
+                ticker=ticker,
+                name=name,
+                quantity=int(quantity),
+                price=float(price),
+                notes=notes,
+            )
+        else:
+            out = _execute_paper_ui_write(
+                "buy",
+                source_event_id=source_event_id,
+                slot=slot,
+                ticker=ticker,
+                name=name,
+                quantity=int(quantity),
+                price=float(price),
+                notes=notes,
+            )
         return JSONResponse({"ok": True, **out})
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -379,6 +499,7 @@ async def api_sell(request: Request):
     quantity = body.get("quantity")
     price = body.get("price")
     notes = body.get("notes")
+    source_event_id = body.get("source_event_id")
 
     if not slot or not ticker or quantity is None or price is None:
         return JSONResponse(
@@ -387,11 +508,24 @@ async def api_sell(request: Request):
         )
 
     try:
-        out = pdb.record_sell(
-            slot=slot, ticker=ticker,
-            quantity=int(quantity), price=float(price),
-            notes=notes,
-        )
+        if _PAPER_WRITE_EXECUTOR is None:
+            out = pdb.record_sell(
+                slot=slot,
+                ticker=ticker,
+                quantity=int(quantity),
+                price=float(price),
+                notes=notes,
+            )
+        else:
+            out = _execute_paper_ui_write(
+                "sell",
+                source_event_id=source_event_id,
+                slot=slot,
+                ticker=ticker,
+                quantity=int(quantity),
+                price=float(price),
+                notes=notes,
+            )
         return JSONResponse({"ok": True, **out})
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -413,20 +547,22 @@ async def api_quant_snapshot(months: int = 24):
         elif months > 60:
             months = 60
         snap = qb.snapshot(months=months)
-        return JSONResponse({
-            "phase_kr": snap.phase_kr,
-            "phase_us": snap.phase_us,
-            "cli_kr_level": snap.cli_kr_level,
-            "cli_kr_momentum": snap.cli_kr_momentum,
-            "cli_us_level": snap.cli_us_level,
-            "cli_us_momentum": snap.cli_us_momentum,
-            "bsi_trend": snap.bsi_trend,
-            "consensus_phase": snap.consensus_phase,
-            "confidence": snap.confidence,
-            "needs_recheck": snap.needs_recheck,
-            "summary_text": qb.format_snapshot(snap),
-            "months": months,
-        })
+        return JSONResponse(
+            {
+                "phase_kr": snap.phase_kr,
+                "phase_us": snap.phase_us,
+                "cli_kr_level": snap.cli_kr_level,
+                "cli_kr_momentum": snap.cli_kr_momentum,
+                "cli_us_level": snap.cli_us_level,
+                "cli_us_momentum": snap.cli_us_momentum,
+                "bsi_trend": snap.bsi_trend,
+                "consensus_phase": snap.consensus_phase,
+                "confidence": snap.confidence,
+                "needs_recheck": snap.needs_recheck,
+                "summary_text": qb.format_snapshot(snap),
+                "months": months,
+            }
+        )
     except Exception as e:
         log.exception("quant-snapshot 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -449,66 +585,79 @@ async def api_quant_recommend(
         elif months > 60:
             months = 60
         snap = qb.snapshot(months=months)
-        phase = (
-            phase_override if phase_override in qb.PHASES
-            else snap.consensus_phase
-        )
+        phase = phase_override if phase_override in qb.PHASES else snap.consensus_phase
         if not phase:
-            return JSONResponse({
-                "phase": None,
-                "confidence": snap.confidence,
-                "needs_recheck": snap.needs_recheck,
-                "weights": None,
-                "recommendations": [],
-                "error": "거시 국면 미확정 — ECOS/FRED 키 또는 네트워크 점검",
-                "snapshot": {
-                    "phase_kr": snap.phase_kr, "phase_us": snap.phase_us,
-                    "summary_text": qb.format_snapshot(snap),
-                },
-            })
+            return JSONResponse(
+                {
+                    "phase": None,
+                    "confidence": snap.confidence,
+                    "needs_recheck": snap.needs_recheck,
+                    "weights": None,
+                    "recommendations": [],
+                    "error": "거시 국면 미확정 — ECOS/FRED 키 또는 네트워크 점검",
+                    "snapshot": {
+                        "phase_kr": snap.phase_kr,
+                        "phase_us": snap.phase_us,
+                        "summary_text": qb.format_snapshot(snap),
+                    },
+                }
+            )
         weights_all = qb.parse_phase_weights_from_wiki()
         recs = qb.recommend_top_n(
-            phase=phase, market=market, top_n=top_n, weights=weights_all,
+            phase=phase,
+            market=market,
+            top_n=top_n,
+            weights=weights_all,
         )
-        return JSONResponse({
-            "phase": phase,
-            "confidence": snap.confidence,
-            "needs_recheck": snap.needs_recheck,
-            "weights": weights_all.get(phase),
-            "recommendations": [
-                {
-                    "ticker": r.ticker, "name": r.name,
-                    "composite_score": r.composite_score,
-                    "current_price": r.current_price,
-                    "z_factors": r.z_factors,
-                    "raw_factors": r.raw_factors,
-                }
-                for r in recs
-            ],
-            "snapshot": {
-                "phase_kr": snap.phase_kr, "phase_us": snap.phase_us,
-                "summary_text": qb.format_snapshot(snap),
-            },
-            "market": market,
-            "phase_override": phase_override,
-        })
+        return JSONResponse(
+            {
+                "phase": phase,
+                "confidence": snap.confidence,
+                "needs_recheck": snap.needs_recheck,
+                "weights": weights_all.get(phase),
+                "recommendations": [
+                    {
+                        "ticker": r.ticker,
+                        "name": r.name,
+                        "composite_score": r.composite_score,
+                        "current_price": r.current_price,
+                        "z_factors": r.z_factors,
+                        "raw_factors": r.raw_factors,
+                    }
+                    for r in recs
+                ],
+                "snapshot": {
+                    "phase_kr": snap.phase_kr,
+                    "phase_us": snap.phase_us,
+                    "summary_text": qb.format_snapshot(snap),
+                },
+                "market": market,
+                "phase_override": phase_override,
+            }
+        )
     except Exception as e:
         log.exception("quant-recommend 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/paper/kium-scan")
-async def api_kium_scan(top_n: int = 10, market: str = "KOSPI200",
-                       with_crash_signals: bool = True):
+async def api_kium_scan(
+    top_n: int = 10, market: str = "KOSPI200", with_crash_signals: bool = True
+):
     """v3.19: 키움봇 모멘텀 스캔 + 크래시 감지를 paper_ui에서 직접 호출.
 
     응답: {"results": [...], "crash_signals": {...}, "weight": {...}}
     또는 raw 텍스트 출력의 구조화 버전 (UI가 표·경고·비중 분리 렌더링).
     """
     try:
-        from kium_bot import scan_universe, fetch_kospi_close, \
-            fetch_vkospi_latest, detect_crash_signals, \
-            compute_weight_recommendation
+        from kium_bot import (
+            scan_universe,
+            fetch_kospi_close,
+            fetch_vkospi_latest,
+            detect_crash_signals,
+            compute_weight_recommendation,
+        )
+
         results = scan_universe(market=market, top_n=int(top_n))
         crash = None
         weight = None
@@ -524,20 +673,18 @@ async def api_kium_scan(top_n: int = 10, market: str = "KOSPI200",
                 )
             except Exception as e:
                 log.warning(f"crash_signals 계산 실패 — 결과만: {e}")
-        return JSONResponse({
-            "results": results,
-            "crash_signals": crash,
-            "weight": weight,
-            "market": market,
-            "top_n": top_n,
-        })
+        return JSONResponse(
+            {
+                "results": results,
+                "crash_signals": crash,
+                "weight": weight,
+                "market": market,
+                "top_n": top_n,
+            }
+        )
     except Exception as e:
         log.exception("kium-scan 실패")
-        return JSONResponse(
-            {"error": str(e)}, status_code=500
-        )
-
-
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ─── 나만의 퀀트 (v3.47) ─────────────────────────────
@@ -551,15 +698,24 @@ async def api_myquant_scan(market: str = "1028", refresh: bool = False):
     """
     try:
         import entry_backtest as eb
+
         if refresh:
             from datetime import datetime
             from pathlib import Path as _P
-            cpath = (PATHS.private_state_dir /
-                     f"myquant_scan_{datetime.now().strftime('%Y%m%d')}.json")
+
+            cpath = (
+                PATHS.private_state_dir
+                / f"myquant_scan_{datetime.now().strftime('%Y%m%d')}.json"
+            )
             cpath.unlink(missing_ok=True)
         items = eb.scan_current(market_code=market)
-        return JSONResponse({"items": items, "slot": MYQUANT_SLOT,
-                             "conditions": list(eb.SCAN_CONDITIONS)})
+        return JSONResponse(
+            {
+                "items": items,
+                "slot": MYQUANT_SLOT,
+                "conditions": list(eb.SCAN_CONDITIONS),
+            }
+        )
     except Exception as e:
         log.exception("myquant-scan 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -583,6 +739,7 @@ async def api_performance():
     except Exception as e:
         log.exception("performance 조회 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # ─── HTML 페이지 ────────────────────────────────────
 
@@ -1017,7 +1174,12 @@ $("btn-quote").addEventListener("click", async () => {
   } catch (e) { toast("현재가 실패: " + e.message, true); }
 });
 
+const PAPER_DUPLICATE_GUARD_MS = 60_000;
+
 async function submitOrder(side) {
+  if (window._paperOrderPending) {
+    return toast("주문 처리 중입니다. 잠시 기다려주세요.", true);
+  }
   const body = {
     slot: $("slot-select").value,
     ticker: $("ticker").value.trim(),
@@ -1028,18 +1190,46 @@ async function submitOrder(side) {
   };
   if (!body.ticker || !body.quantity || !body.price)
     return toast("종목·수량·단가 필요", true);
-  const r = await fetch(`/api/paper/${side}`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const d = await r.json();
-  if (d.ok) {
-    toast(`${side === 'buy' ? '🟢 매수' : '🔴 매도'} 완료`);
-    $("ticker").value = ""; $("name").value = "";
-    $("quantity").value = ""; $("price").value = ""; $("notes").value = "";
-    reload();
-  } else {
-    toast(`실패: ${d.error}`, true);
+  const signature = side + ":" + JSON.stringify(body);
+  const lastAppliedAt = Number(window._paperLastAppliedAt || 0);
+  if (
+    window._paperLastAppliedSignature === signature &&
+    Date.now() - lastAppliedAt < PAPER_DUPLICATE_GUARD_MS
+  ) {
+    return toast("같은 주문이 방금 처리됐습니다. 60초 후 다시 시도하거나 주문 내용을 변경하세요.", true);
+  }
+  if (window._paperOrderSignature !== signature) {
+    window._paperOrderSignature = signature;
+    window._paperOrderEventId = crypto.randomUUID();
+  }
+  body.source_event_id = window._paperOrderEventId;
+  window._paperOrderPending = true;
+  $("btn-buy").disabled = true;
+  $("btn-sell").disabled = true;
+  try {
+    const r = await fetch(`/api/paper/${side}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json().catch(() => ({error: `HTTP ${r.status}`}));
+    if (d.ok) {
+      window._paperLastAppliedSignature = signature;
+      window._paperLastAppliedAt = Date.now();
+      window._paperOrderSignature = null;
+      window._paperOrderEventId = null;
+      toast(`${side === 'buy' ? '🟢 매수' : '🔴 매도'} 완료`);
+      $("ticker").value = ""; $("name").value = "";
+      $("quantity").value = ""; $("price").value = ""; $("notes").value = "";
+      reload();
+    } else {
+      toast(`실패: ${d.error}`, true);
+    }
+  } catch (e) {
+    toast(`주문 전송 실패: ${e.message}`, true);
+  } finally {
+    window._paperOrderPending = false;
+    $("btn-buy").disabled = false;
+    $("btn-sell").disabled = false;
   }
 }
 $("btn-buy").addEventListener("click", () => submitOrder("buy"));
@@ -1613,11 +1803,13 @@ async function myquantBuy(idx) {
   const qty = prompt(`${it.name} (${it.ticker}) 매수 수량? (현재가 ${Number(it.price).toLocaleString()}원)`);
   if (!qty || isNaN(parseInt(qty))) return;
   const notes = `MQ[${it.matched.join(",")}] 스캔매수`;
+  const sourceEventId = crypto.randomUUID();
   try {
     const res = await (await fetch("/api/paper/buy", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({slot: "마이퀀트", ticker: it.ticker, name: it.name,
-                            quantity: parseInt(qty), price: it.price, notes})
+                            quantity: parseInt(qty), price: it.price, notes,
+                            source_event_id: sourceEventId})
     })).json();
     if (res.error || res.ok === false) throw new Error(res.error || "실패");
     alert(`매수 기록 완료 — 태그: ${it.matched.join(", ")}`);
@@ -1656,6 +1848,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
+
+    _configure_paper_write_runtime(load_private_write_runtime_bundle())
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
     log.info(f"📑 Paper Trading UI: http://{args.host}:{args.port}")

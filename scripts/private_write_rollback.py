@@ -78,7 +78,11 @@ def _load_verified_backup(
     *,
     now: datetime,
     max_backup_age: timedelta,
+    database_name: str = "assistant.db",
 ) -> tuple[Path, dict[str, object]]:
+    if database_name not in {"assistant.db", "paper.db"}:
+        raise PrivateWriteRollbackError("unsupported_backup_database")
+    missing_code = f"{Path(database_name).stem}_backup_missing"
     if not _private_file(manifest_path) or manifest_path.name != "manifest.json":
         raise PrivateWriteRollbackError("invalid_manifest")
     try:
@@ -99,14 +103,14 @@ def _load_verified_backup(
 
     databases = payload.get("databases")
     if not isinstance(databases, list):
-        raise PrivateWriteRollbackError("assistant_backup_missing")
+        raise PrivateWriteRollbackError(missing_code)
     matches = [
         item
         for item in databases
-        if isinstance(item, dict) and item.get("database") == "assistant.db"
+        if isinstance(item, dict) and item.get("database") == database_name
     ]
     if len(matches) != 1:
-        raise PrivateWriteRollbackError("assistant_backup_missing")
+        raise PrivateWriteRollbackError(missing_code)
     item = matches[0]
     name = item.get("backup_file")
     if not isinstance(name, str) or not name or Path(name).name != name:

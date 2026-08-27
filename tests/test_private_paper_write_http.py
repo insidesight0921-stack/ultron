@@ -443,9 +443,11 @@ def test_query_duplicate_json_oversize_and_transition_body_are_rejected(
     assert _scoped_table_count(writer.db_path) == 0
 
 
-def test_operational_cli_has_no_paper_write_activation_option():
+def test_operational_cli_has_no_independent_paper_write_activation_option():
     source = (
         Path(__file__).resolve().parents[1] / "scripts" / "private_data_api.py"
     ).read_text(encoding="utf-8")
     assert 'parser.add_argument("--enable-paper' not in source
-    assert "build_paper" not in source
+    assert "AI_AGENT_PRIVATE_PAPER_WRITE" not in source
+    assert "runtime_bundle.paper_writes_enabled" in source
+    assert "runtime_bundle.build_paper_api_writer()" in source

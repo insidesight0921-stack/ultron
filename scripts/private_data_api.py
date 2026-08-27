@@ -8,6 +8,7 @@ It keeps its port, token, router, and storage implementation separate from the
 Shareable API.  Only allowlisted paper reads are present; generic file/SQL and
 all writes remain absent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,11 @@ from private_schedule_write_contract import (
     normalize_schedule_chat_id,
     validate_schedule_write_intent,
 )
-from private_write_contract import MAX_PAYLOAD_BYTES, WriteContractError, validate_write_intent
+from private_write_contract import (
+    MAX_PAYLOAD_BYTES,
+    WriteContractError,
+    validate_write_intent,
+)
 from private_write_readiness import require_private_write_activation_permit
 from private_read_store import (
     PrivateReadStoreError,
@@ -47,7 +52,6 @@ from private_read_store import (
     normalize_chat_id,
 )
 from storage_paths import PATHS
-
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8091
@@ -85,7 +89,9 @@ def validate_private_port(port: int) -> int:
     if not 1 <= value <= 65535:
         raise ValueError("port는 1~65535 범위여야 합니다.")
     if value in RESERVED_SERVICE_PORTS:
-        raise ValueError("Private Data API는 기존 서비스와 다른 포트를 사용해야 합니다.")
+        raise ValueError(
+            "Private Data API는 기존 서비스와 다른 포트를 사용해야 합니다."
+        )
     return value
 
 
@@ -116,21 +122,29 @@ async def _write_json(request: Request) -> dict[str, object]:
         try:
             length = int(content_length)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+            raise HTTPException(
+                status_code=400, detail="Invalid Content-Length"
+            ) from exc
         if length < 0:
             raise HTTPException(status_code=400, detail="Invalid Content-Length")
         if length > MAX_WRITE_REQUEST_BYTES:
-            raise HTTPException(status_code=413, detail="Private write request is too large")
+            raise HTTPException(
+                status_code=413, detail="Private write request is too large"
+            )
     chunks = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > MAX_WRITE_REQUEST_BYTES:
-            raise HTTPException(status_code=413, detail="Private write request is too large")
+            raise HTTPException(
+                status_code=413, detail="Private write request is too large"
+            )
         chunks.append(chunk)
     raw = b"".join(chunks)
     try:
-        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_duplicate_safe_object)
+        payload = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_duplicate_safe_object
+        )
     except (UnicodeDecodeError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if not isinstance(payload, dict):
@@ -232,10 +246,14 @@ def _paper_scope_header(request: Request) -> int:
     raw = request.headers.get("X-AI-Agent-Paper-Slot-ID", "").strip()
     try:
         if not raw.isdigit():
-            raise WriteContractError("invalid_paper_slot", "Paper slot scope is invalid")
+            raise WriteContractError(
+                "invalid_paper_slot", "Paper slot scope is invalid"
+            )
         slot_id = normalize_paper_slot_id(int(raw))
         if raw != str(slot_id):
-            raise WriteContractError("invalid_paper_slot", "Paper slot scope is invalid")
+            raise WriteContractError(
+                "invalid_paper_slot", "Paper slot scope is invalid"
+            )
         return slot_id
     except WriteContractError as exc:
         raise HTTPException(
@@ -287,17 +305,19 @@ def create_app(
     schedule_writes_active = bool(enable_schedule_writes)
     paper_trade_writes_active = bool(enable_paper_trade_writes)
     writes_active = (
-        watchlist_writes_active
-        or schedule_writes_active
-        or paper_trade_writes_active
+        watchlist_writes_active or schedule_writes_active or paper_trade_writes_active
     )
     if watchlist_writes_active and watchlist_writer is None:
         raise ValueError("watchlist writer is required when writes are enabled")
-    if watchlist_writes_active and not bool(getattr(watchlist_writer, "writes_enabled", False)):
+    if watchlist_writes_active and not bool(
+        getattr(watchlist_writer, "writes_enabled", False)
+    ):
         raise ValueError("watchlist writer must explicitly enable mutations")
     if schedule_writes_active and schedule_writer is None:
         raise ValueError("schedule writer is required when writes are enabled")
-    if schedule_writes_active and not bool(getattr(schedule_writer, "writes_enabled", False)):
+    if schedule_writes_active and not bool(
+        getattr(schedule_writer, "writes_enabled", False)
+    ):
         raise ValueError("schedule writer must explicitly enable mutations")
     if paper_trade_writes_active and paper_trade_writer is None:
         raise ValueError("Paper trade writer is required when writes are enabled")
@@ -414,7 +434,9 @@ def create_app(
             ) from exc
         return {"items": items, "count": len(items)}
 
-    def _schedule_response(request: Request, *, upcoming_only: bool) -> dict[str, object]:
+    def _schedule_response(
+        request: Request, *, upcoming_only: bool
+    ) -> dict[str, object]:
         try:
             chat_id = normalize_chat_id(request.headers.get("X-AI-Agent-Chat-ID", ""))
         except PrivateReadStoreError as exc:
@@ -531,6 +553,7 @@ def create_app(
             ) from exc
 
     if watchlist_writes_active:
+
         @app.post(
             "/v1/private/watchlist/write/intents",
             dependencies=private_dependencies,
@@ -538,7 +561,9 @@ def create_app(
         async def private_watchlist_write_intent(request: Request):
             body = await _write_json(request)
             if set(body) != {"operation", "expected_version", "payload"}:
-                raise HTTPException(status_code=400, detail="Invalid private write envelope")
+                raise HTTPException(
+                    status_code=400, detail="Invalid private write envelope"
+                )
             try:
                 intent = validate_write_intent(
                     operation=body["operation"],
@@ -563,7 +588,9 @@ def create_app(
             "/v1/private/watchlist/write/preflight",
             dependencies=private_dependencies,
         )
-        async def private_watchlist_write_preflight(request: Request) -> dict[str, object]:
+        async def private_watchlist_write_preflight(
+            request: Request,
+        ) -> dict[str, object]:
             await _require_empty_write_body(request)
             operation = request.headers.get("X-Write-Operation", "")
             idempotency_key = request.headers.get("Idempotency-Key", "")
@@ -604,7 +631,9 @@ def create_app(
             "/v1/private/watchlist/write/approvals/approve",
             dependencies=private_dependencies,
         )
-        async def private_watchlist_write_approve(request: Request) -> dict[str, object]:
+        async def private_watchlist_write_approve(
+            request: Request,
+        ) -> dict[str, object]:
             return await _transition(request, "approve")
 
         @app.post(
@@ -622,6 +651,7 @@ def create_app(
             return await _transition(request, "apply")
 
     if schedule_writes_active:
+
         @app.post(
             "/v1/private/schedule/write/intents",
             dependencies=private_dependencies,
@@ -629,7 +659,9 @@ def create_app(
         async def private_schedule_write_intent(request: Request):
             body = await _write_json(request)
             if set(body) != {"operation", "expected_version", "payload"}:
-                raise HTTPException(status_code=400, detail="Invalid private write envelope")
+                raise HTTPException(
+                    status_code=400, detail="Invalid private write envelope"
+                )
             chat_id = _schedule_scope_header(request)
             try:
                 intent = validate_schedule_write_intent(
@@ -656,7 +688,9 @@ def create_app(
             "/v1/private/schedule/write/preflight",
             dependencies=private_dependencies,
         )
-        async def private_schedule_write_preflight(request: Request) -> dict[str, object]:
+        async def private_schedule_write_preflight(
+            request: Request,
+        ) -> dict[str, object]:
             await _require_empty_write_body(request)
             chat_id = _schedule_scope_header(request)
             operation = request.headers.get("X-Write-Operation", "")
@@ -679,7 +713,9 @@ def create_app(
                     detail="Private schedule write store is unavailable",
                 ) from exc
 
-        async def _schedule_transition(request: Request, action: str) -> dict[str, object]:
+        async def _schedule_transition(
+            request: Request, action: str
+        ) -> dict[str, object]:
             await _require_empty_write_body(request)
             chat_id = _schedule_scope_header(request)
             approval_id = _uuid_header(request, "X-Approval-ID")
@@ -723,6 +759,7 @@ def create_app(
             return await _schedule_transition(request, "apply")
 
     if paper_trade_writes_active:
+
         @app.post(
             "/v1/private/paper/write/intents",
             dependencies=private_dependencies,
@@ -730,7 +767,9 @@ def create_app(
         async def private_paper_write_intent(request: Request):
             body = await _write_json(request)
             if set(body) != {"operation", "expected_version", "payload"}:
-                raise HTTPException(status_code=400, detail="Invalid private write envelope")
+                raise HTTPException(
+                    status_code=400, detail="Invalid private write envelope"
+                )
             slot_id = _paper_scope_header(request)
             try:
                 intent = validate_paper_trade_write_intent(
@@ -743,7 +782,8 @@ def create_app(
                 )
                 if intent.slot_id != slot_id:
                     raise WriteContractError(
-                        "scope_conflict", "Paper payload slot differs from request scope"
+                        "scope_conflict",
+                        "Paper payload slot differs from request scope",
                     )
                 record = paper_trade_writer.submit(intent)
             except WriteContractError as exc:
@@ -828,6 +868,28 @@ def create_app(
     return app
 
 
+def _create_runtime_app(token: str, runtime_bundle):
+    if runtime_bundle is None:
+        return create_app(token)
+    app_kwargs = {
+        "watchlist_writer": runtime_bundle.build_api_writer(),
+        "enable_watchlist_writes": True,
+        "write_activation_permit": runtime_bundle.activation_permit,
+    }
+    if runtime_bundle.schedule_writes_enabled:
+        app_kwargs.update(
+            schedule_writer=runtime_bundle.build_schedule_api_writer(),
+            enable_schedule_writes=True,
+        )
+    if runtime_bundle.paper_writes_enabled:
+        app_kwargs.update(
+            paper_trade_writer=runtime_bundle.build_paper_api_writer(),
+            enable_paper_trade_writes=True,
+            paper_write_activation_permit=runtime_bundle.paper_activation_permit,
+        )
+    return create_app(token, **app_kwargs)
+
+
 def main() -> int:
     try:
         from dotenv import load_dotenv
@@ -851,24 +913,7 @@ def main() -> int:
         parser.error(str(exc))
     except RuntimeError as exc:
         parser.error(str(exc))
-    if runtime_bundle is None:
-        app = create_app(token)
-    else:
-        writer = runtime_bundle.build_api_writer()
-        app_kwargs = {
-            "watchlist_writer": writer,
-            "enable_watchlist_writes": True,
-            "write_activation_permit": runtime_bundle.activation_permit,
-        }
-        if runtime_bundle.schedule_writes_enabled:
-            app_kwargs.update(
-                schedule_writer=runtime_bundle.build_schedule_api_writer(),
-                enable_schedule_writes=True,
-            )
-        app = create_app(
-            token,
-            **app_kwargs,
-        )
+    app = _create_runtime_app(token, runtime_bundle)
     # 인증 헤더는 기본 access log에 나오지 않지만 query string은 그대로 기록된다.
     # 잘못된 query-token 요청도 비밀값을 남기지 않도록 access log를 끈다.
     uvicorn.run(app, host=host, port=port, access_log=False)

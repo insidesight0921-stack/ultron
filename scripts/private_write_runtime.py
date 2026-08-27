@@ -5,6 +5,7 @@ Activation requires one private JSON file referenced by one environment key.
 No individual component flag or database path is accepted from the runtime
 environment.  With the key absent this module reads no file and returns None.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,6 +19,19 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from private_data_api_client import PrivateDataClient
+from private_paper_write_consumer import PaperTradeWriteExecutor
+from private_paper_write_cutover import (
+    PAPER_LEGACY_RUNTIME_WRITERS,
+    PaperWriteCutoverConfig,
+    build_paper_write_cutover_dry_run,
+)
+from private_paper_write_readiness import (
+    PAPER_API_OWNER,
+    PAPER_TARGET_CALLER_POLICIES,
+    PaperCallerPolicy,
+    PaperWriteReadinessEvidence,
+)
+from private_paper_write_store import PaperTradeWriteStore
 from private_schedule_write_consumer import ScheduleWriteExecutor
 from private_schedule_write_cutover import (
     LEGACY_SCHEDULE_USER_WRITER,
@@ -46,11 +60,11 @@ from private_write_readiness import (
 )
 from storage_paths import PATHS
 
-
 BUNDLE_PATH_ENV = "AI_AGENT_PRIVATE_WRITE_BUNDLE_PATH"
 BUNDLE_FILENAME = "private-write-activation.json"
 LEGACY_BUNDLE_VERSION = 1
 BUNDLE_VERSION = 2
+PAPER_BUNDLE_VERSION = 3
 MAX_BUNDLE_BYTES = 16_384
 _BUNDLE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _V1_CONFIG_KEYS = frozenset(
@@ -71,6 +85,7 @@ _V1_CONFIG_KEYS = frozenset(
     }
 )
 _V2_CONFIG_KEYS = _V1_CONFIG_KEYS | {"schedule"}
+_V3_CONFIG_KEYS = _V2_CONFIG_KEYS | {"paper"}
 _SCHEDULE_ENABLED_KEYS = frozenset(
     {
         "enabled",
@@ -85,6 +100,23 @@ _SCHEDULE_ENABLED_KEYS = frozenset(
         "notifier_uses_same_database",
         "telegram_direct_user_mutations_disabled",
         "notifier_user_mutations_disabled",
+    }
+)
+_PAPER_ENABLED_KEYS = frozenset(
+    {
+        "enabled",
+        "api_writer_enabled",
+        "client_writes_enabled",
+        "consumer_executor_enabled",
+        "writer_owner",
+        "current_runtime_writer_owners",
+        "current_operator_cli_rollback_only",
+        "caller_policies",
+        "consumers_use_private_api",
+        "consumers_use_same_database",
+        "paper_ui_direct_writes_disabled",
+        "telegram_direct_writes_disabled",
+        "operator_cli_rollback_only",
     }
 )
 
@@ -102,6 +134,12 @@ class PrivateWriteRuntimeBundle:
     _database_path: Path = field(repr=False)
     _permit: PrivateWriteActivationPermit = field(repr=False)
     schedule_writes_enabled: bool = False
+    paper_writes_enabled: bool = False
+    _paper_database_path: Path | None = field(repr=False, default=None)
+    _paper_permit: PrivateWriteActivationPermit | None = field(
+        repr=False,
+        default=None,
+    )
 
     def build_api_writer(self) -> WatchlistWriteStore:
         return WatchlistWriteStore(self._database_path, writes_enabled=True)
@@ -147,9 +185,55 @@ class PrivateWriteRuntimeBundle:
             write_activation_permit=self._permit,
         )
 
+    def _require_paper_enabled(self) -> None:
+        if (
+            not self.paper_writes_enabled
+            or self._paper_database_path is None
+            or self._paper_permit is None
+        ):
+            raise PrivateWriteRuntimeError("paper_capability_disabled")
+
+    def build_paper_api_writer(self) -> PaperTradeWriteStore:
+        self._require_paper_enabled()
+        return PaperTradeWriteStore(self._paper_database_path, writes_enabled=True)
+
+    def build_paper_client(
+        self,
+        *,
+        token: str | None = None,
+        opener: Any = None,
+    ) -> PrivateDataClient:
+        self._require_paper_enabled()
+        kwargs: dict[str, Any] = {
+            "token": token,
+            "paper_writes_enabled": True,
+            "paper_write_activation_permit": self._paper_permit,
+            "paper_write_database_path": self._paper_database_path,
+        }
+        if opener is not None:
+            kwargs["opener"] = opener
+        return PrivateDataClient(**kwargs)
+
+    def build_paper_executor(
+        self,
+        client: PrivateDataClient,
+    ) -> PaperTradeWriteExecutor:
+        self._require_paper_enabled()
+        return PaperTradeWriteExecutor(
+            client,
+            enabled=True,
+            paper_write_activation_permit=self._paper_permit,
+        )
+
     @property
     def activation_permit(self) -> PrivateWriteActivationPermit:
         return self._permit
+
+    @property
+    def paper_activation_permit(self) -> PrivateWriteActivationPermit:
+        self._require_paper_enabled()
+        assert self._paper_permit is not None
+        return self._paper_permit
 
 
 def _canonical_path_text(path: Path) -> str:
@@ -201,11 +285,18 @@ def _load_config(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise PrivateWriteRuntimeError("invalid_bundle_schema")
     version = payload.get("version")
-    if version not in {LEGACY_BUNDLE_VERSION, BUNDLE_VERSION}:
+    if version not in {
+        LEGACY_BUNDLE_VERSION,
+        BUNDLE_VERSION,
+        PAPER_BUNDLE_VERSION,
+    }:
         raise PrivateWriteRuntimeError("unsupported_bundle_version")
-    expected_keys = (
-        _V1_CONFIG_KEYS if version == LEGACY_BUNDLE_VERSION else _V2_CONFIG_KEYS
-    )
+    if version == LEGACY_BUNDLE_VERSION:
+        expected_keys = _V1_CONFIG_KEYS
+    elif version == BUNDLE_VERSION:
+        expected_keys = _V2_CONFIG_KEYS
+    else:
+        expected_keys = _V3_CONFIG_KEYS
     if set(payload) != expected_keys:
         raise PrivateWriteRuntimeError("invalid_bundle_schema")
     boolean_keys = (
@@ -220,18 +311,21 @@ def _load_config(path: Path) -> dict[str, object]:
     )
     if any(type(payload[key]) is not bool for key in boolean_keys):
         raise PrivateWriteRuntimeError("invalid_bundle_flags")
-    if not all(
-        payload[key]
-        for key in (
-            "enabled",
-            "api_writer_enabled",
-            "client_writes_enabled",
-            "consumer_executor_enabled",
-            "user_approval_required",
-            "direct_db_fallback_disabled",
-            "rollback_verified",
+    if (
+        not all(
+            payload[key]
+            for key in (
+                "enabled",
+                "api_writer_enabled",
+                "client_writes_enabled",
+                "consumer_executor_enabled",
+                "user_approval_required",
+                "direct_db_fallback_disabled",
+                "rollback_verified",
+            )
         )
-    ) or payload["automatic_backup_restore"] is not False:
+        or payload["automatic_backup_restore"] is not False
+    ):
         raise PrivateWriteRuntimeError("incomplete_atomic_activation")
     bundle_id = payload["bundle_id"]
     if not isinstance(bundle_id, str) or _BUNDLE_ID_RE.fullmatch(bundle_id) is None:
@@ -244,6 +338,10 @@ def _load_config(path: Path) -> dict[str, object]:
         payload["schedule"] = {"enabled": False}
     else:
         _validate_schedule_config(payload["schedule"])
+    if version == PAPER_BUNDLE_VERSION:
+        _validate_paper_config(payload["paper"])
+    else:
+        payload["paper"] = {"enabled": False}
     return payload
 
 
@@ -276,8 +374,55 @@ def _validate_schedule_config(value: object) -> None:
     if value["notifier_writer_owner"] != SCHEDULE_NOTIFIER_OWNER:
         raise PrivateWriteRuntimeError("invalid_schedule_notifier_owner")
     operations = value["notifier_operations"]
-    if not isinstance(operations, list) or tuple(operations) != SCHEDULE_NOTIFIER_OPERATIONS:
+    if (
+        not isinstance(operations, list)
+        or tuple(operations) != SCHEDULE_NOTIFIER_OPERATIONS
+    ):
         raise PrivateWriteRuntimeError("invalid_schedule_notifier_operations")
+
+
+def _paper_policy_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "caller": policy.caller,
+            "operations": list(policy.operations),
+            "approval_mode": policy.approval_mode,
+        }
+        for policy in PAPER_TARGET_CALLER_POLICIES
+    ]
+
+
+def _validate_paper_config(value: object) -> None:
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        raise PrivateWriteRuntimeError("invalid_paper_bundle_schema")
+    if value["enabled"] is False:
+        if set(value) != {"enabled"}:
+            raise PrivateWriteRuntimeError("incomplete_paper_activation")
+        return
+    if set(value) != _PAPER_ENABLED_KEYS:
+        raise PrivateWriteRuntimeError("invalid_paper_bundle_schema")
+    boolean_keys = (
+        "api_writer_enabled",
+        "client_writes_enabled",
+        "consumer_executor_enabled",
+        "current_operator_cli_rollback_only",
+        "consumers_use_private_api",
+        "consumers_use_same_database",
+        "paper_ui_direct_writes_disabled",
+        "telegram_direct_writes_disabled",
+        "operator_cli_rollback_only",
+    )
+    if any(type(value.get(key)) is not bool for key in boolean_keys):
+        raise PrivateWriteRuntimeError("invalid_paper_bundle_flags")
+    if not all(value[key] for key in boolean_keys):
+        raise PrivateWriteRuntimeError("incomplete_paper_activation")
+    if value["writer_owner"] != PAPER_API_OWNER:
+        raise PrivateWriteRuntimeError("invalid_paper_writer_owner")
+    owners = value["current_runtime_writer_owners"]
+    if not isinstance(owners, list) or tuple(owners) != PAPER_LEGACY_RUNTIME_WRITERS:
+        raise PrivateWriteRuntimeError("invalid_paper_current_writer_owners")
+    if value["caller_policies"] != _paper_policy_payload():
+        raise PrivateWriteRuntimeError("invalid_paper_caller_policies")
 
 
 def _combined_bundle_id(watchlist_bundle_id: str, schedule_bundle_id: str) -> str:
@@ -285,10 +430,19 @@ def _combined_bundle_id(watchlist_bundle_id: str, schedule_bundle_id: str) -> st
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _paper_combined_bundle_id(
+    assistant_bundle_id: str,
+    paper_bundle_id: str,
+) -> str:
+    payload = f"private-write-runtime-v3\0{assistant_bundle_id}\0{paper_bundle_id}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def load_private_write_runtime_bundle(
     environ: Mapping[str, str] | None = None,
     *,
     database_path: Path = PATHS.watchlist_db,
+    paper_database_path: Path = PATHS.paper_db,
     private_root: Path = PATHS.private_root,
     backup_root: Path | None = None,
     now: datetime | None = None,
@@ -365,17 +519,13 @@ def load_private_write_runtime_bundle(
             database_path=evidence.database_path,
             backup_manifest_path=backup_manifest,
             user_approval_required=bool(payload["user_approval_required"]),
-            direct_db_fallback_disabled=bool(
-                payload["direct_db_fallback_disabled"]
-            ),
+            direct_db_fallback_disabled=bool(payload["direct_db_fallback_disabled"]),
             rollback_verified=bool(payload["rollback_verified"]),
         )
         schedule_evidence = ScheduleWriteReadinessEvidence(
             private_write_evidence=schedule_private_evidence,
             notifier_enabled=bool(schedule_config["notifier_enabled"]),
-            notifier_writer_owners=(
-                str(schedule_config["notifier_writer_owner"]),
-            ),
+            notifier_writer_owners=(str(schedule_config["notifier_writer_owner"]),),
             notifier_operations=tuple(schedule_config["notifier_operations"]),
             notifier_uses_same_database=bool(
                 schedule_config["notifier_uses_same_database"]
@@ -403,9 +553,7 @@ def load_private_write_runtime_bundle(
                 current_notifier_operations=tuple(
                     schedule_config["notifier_operations"]
                 ),
-                automatic_backup_restore=bool(
-                    payload["automatic_backup_restore"]
-                ),
+                automatic_backup_restore=bool(payload["automatic_backup_restore"]),
             ),
             now=now,
             max_backup_age=max_backup_age,
@@ -415,6 +563,67 @@ def load_private_write_runtime_bundle(
             schedule_cutover.bundle_id,
         )
         schedule_activation_fingerprint = schedule_cutover.activation_fingerprint
+    paper_config = payload["paper"]
+    paper_enabled = bool(paper_config["enabled"])
+    paper_database: Path | None = None
+    paper_permit: PrivateWriteActivationPermit | None = None
+    if paper_enabled:
+        paper_database = Path(paper_database_path).resolve()
+        paper_private_evidence = PrivateWriteReadinessEvidence(
+            api_writer_enabled=bool(paper_config["api_writer_enabled"]),
+            client_writes_enabled=bool(paper_config["client_writes_enabled"]),
+            consumer_executor_enabled=bool(paper_config["consumer_executor_enabled"]),
+            writer_owners=(str(paper_config["writer_owner"]),),
+            database_path=paper_database,
+            backup_manifest_path=backup_manifest,
+            user_approval_required=bool(payload["user_approval_required"]),
+            direct_db_fallback_disabled=bool(payload["direct_db_fallback_disabled"]),
+            rollback_verified=bool(payload["rollback_verified"]),
+        )
+        paper_policies = tuple(
+            PaperCallerPolicy(
+                caller=str(policy["caller"]),
+                operations=tuple(policy["operations"]),
+                approval_mode=str(policy["approval_mode"]),
+            )
+            for policy in paper_config["caller_policies"]
+        )
+        paper_evidence = PaperWriteReadinessEvidence(
+            private_write_evidence=paper_private_evidence,
+            caller_policies=paper_policies,
+            consumers_use_private_api=bool(paper_config["consumers_use_private_api"]),
+            consumers_use_same_database=bool(
+                paper_config["consumers_use_same_database"]
+            ),
+            paper_ui_direct_writes_disabled=bool(
+                paper_config["paper_ui_direct_writes_disabled"]
+            ),
+            telegram_direct_writes_disabled=bool(
+                paper_config["telegram_direct_writes_disabled"]
+            ),
+            operator_cli_rollback_only=bool(paper_config["operator_cli_rollback_only"]),
+        )
+        paper_cutover = build_paper_write_cutover_dry_run(
+            PaperWriteCutoverConfig(
+                readiness_evidence=paper_evidence,
+                current_api_paper_writer_enabled=False,
+                current_paper_client_enabled=False,
+                current_paper_executor_enabled=False,
+                current_runtime_writer_owners=tuple(
+                    paper_config["current_runtime_writer_owners"]
+                ),
+                current_operator_cli_rollback_only=bool(
+                    paper_config["current_operator_cli_rollback_only"]
+                ),
+                automatic_backup_restore=bool(payload["automatic_backup_restore"]),
+            ),
+            now=now,
+            max_backup_age=max_backup_age,
+        )
+        expected_bundle_id = _paper_combined_bundle_id(
+            expected_bundle_id,
+            paper_cutover.bundle_id,
+        )
     if expected_bundle_id != payload["bundle_id"]:
         raise PrivateWriteRuntimeError("bundle_fingerprint_mismatch")
     permit = issue_private_write_activation_permit(
@@ -426,10 +635,24 @@ def load_private_write_runtime_bundle(
         raise PrivateWriteRuntimeError("permit_fingerprint_mismatch")
     if permit.fingerprint != schedule_activation_fingerprint:
         raise PrivateWriteRuntimeError("schedule_permit_fingerprint_mismatch")
+    if paper_enabled:
+        assert paper_database is not None
+        paper_permit = issue_private_write_activation_permit(
+            paper_private_evidence,
+            now=now,
+            max_backup_age=max_backup_age,
+        )
+        if paper_permit.fingerprint != paper_cutover.activation_fingerprint:
+            raise PrivateWriteRuntimeError("paper_permit_fingerprint_mismatch")
+        if paper_permit.fingerprint == permit.fingerprint:
+            raise PrivateWriteRuntimeError("paper_permit_not_separate")
     return PrivateWriteRuntimeBundle(
         bundle_id=expected_bundle_id,
         activation_fingerprint=cutover.activation_fingerprint,
         _database_path=evidence.database_path,
         _permit=permit,
         schedule_writes_enabled=schedule_enabled,
+        paper_writes_enabled=paper_enabled,
+        _paper_database_path=paper_database,
+        _paper_permit=paper_permit,
     )

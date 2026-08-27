@@ -97,6 +97,16 @@ PAPER_DIRECT_WRITER_INVENTORY = (
         approval_mode="operator-manual",
         target_mode="retire-direct-rollback-only",
     ),
+    PaperDirectWriterPolicy(
+        key="verified-backup-clone-rehearsal",
+        module="private_paper_write_rollback.py",
+        function="rehearse_paper_write_rollback",
+        operations=PAPER_TRADE_OPERATIONS,
+        current_owner="verified-backup-clone-rehearsal",
+        target_owner="none",
+        approval_mode="isolated-rehearsal",
+        target_mode="verified-backup-clone-only",
+    ),
 )
 
 

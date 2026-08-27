@@ -4,6 +4,7 @@ paper_ui v3.19 단위 테스트 — /api/paper/kium-scan 엔드포인트 + HTML 
 paper_ui는 FastAPI라 TestClient 사용 가능. LanceDB 의존 없음.
 kium_bot의 외부 호출(pykrx)만 monkeypatch.
 """
+
 from __future__ import annotations
 
 import sys
@@ -23,21 +24,25 @@ def client(tmp_path, monkeypatch):
     """매 테스트마다 fresh paper.db + TestClient."""
     # paper_db의 디폴트 경로를 tmp로 override
     import paper_db
+
     fresh_db = tmp_path / "paper.db"
     monkeypatch.setattr(paper_db, "DEFAULT_DB_PATH", fresh_db)
     # paper_db 함수들은 db_path 기본인자를 def 시점에 캡처하므로
     # 모듈 속성 패치만으론 부족 → _conn을 fresh_db로 리다이렉트해
     # 모든 DB 접근을 격리 (실제 data/paper.db 오염 방지)
     _orig_conn = paper_db._conn
-    monkeypatch.setattr(paper_db, "_conn",
-                        lambda db_path=fresh_db: _orig_conn(fresh_db))
+    monkeypatch.setattr(
+        paper_db, "_conn", lambda db_path=fresh_db: _orig_conn(fresh_db)
+    )
 
     # paper_ui import 후 ensure_seed() 호출됨
     import importlib
     import paper_ui
+
     importlib.reload(paper_ui)
 
     from fastapi.testclient import TestClient
+
     return TestClient(paper_ui.app)
 
 
@@ -46,25 +51,30 @@ def _stub_kium(monkeypatch, results=None, kospi_close=None, vkospi_value=None):
     import kium_bot
 
     monkeypatch.setattr(
-        kium_bot, "fetch_universe",
+        kium_bot,
+        "fetch_universe",
         lambda market="KOSPI200", force_refresh=False: [
-            ("005930", "삼성전자"), ("000660", "SK하이닉스"),
+            ("005930", "삼성전자"),
+            ("000660", "SK하이닉스"),
         ],
     )
 
     def fake_ohlcv(ticker, start, end):
         # 280일 단조 증가 — momentum 양수
         n = 280
-        prices = [100.0 * (1.001 ** i) for i in range(n)]
+        prices = [100.0 * (1.001**i) for i in range(n)]
         return pd.DataFrame({"종가": prices})
+
     monkeypatch.setattr(kium_bot, "_fetch_ohlcv_raw", fake_ohlcv)
 
     if kospi_close is None:
         kospi_close = pd.Series([2500.0] * 250)
-    monkeypatch.setattr(kium_bot, "fetch_kospi_close",
-                        lambda days=280: kospi_close)
-    monkeypatch.setattr(kium_bot, "fetch_vkospi_latest",
-                        lambda: vkospi_value if vkospi_value is not None else 18.0)
+    monkeypatch.setattr(kium_bot, "fetch_kospi_close", lambda days=280: kospi_close)
+    monkeypatch.setattr(
+        kium_bot,
+        "fetch_vkospi_latest",
+        lambda: vkospi_value if vkospi_value is not None else 18.0,
+    )
 
 
 # ─── 헬스 + slots ────────────────────────────────────
@@ -107,8 +117,14 @@ def test_kium_scan_results_structure(client, monkeypatch):
     assert len(d["results"]) <= 2
     if d["results"]:
         first = d["results"][0]
-        for key in ("ticker", "name", "score", "current_price",
-                    "return_1m", "return_12m"):
+        for key in (
+            "ticker",
+            "name",
+            "score",
+            "current_price",
+            "return_1m",
+            "return_12m",
+        ):
             assert key in first
 
 
@@ -197,29 +213,47 @@ def test_index_html_seed_warning(client):
     assert "실주문 안 함" in html or "가상" in html
 
 
+def test_index_html_guards_duplicate_paper_orders(client):
+    """처리 중 재클릭과 직전 동일 주문 재제출을 UI에서 차단한다."""
+    html = client.get("/").text
+
+    assert "PAPER_DUPLICATE_GUARD_MS = 60_000" in html
+    assert "window._paperOrderPending" in html
+    assert "window._paperLastAppliedSignature === signature" in html
+    assert '$("btn-buy").disabled = true' in html
+    assert '$("btn-sell").disabled = true' in html
+    assert "같은 주문이 방금 처리됐습니다" in html
+
+
 # ─── /api/paper/chart-data (v3.20) ──────────────────
 
 
 def _stub_pykrx_ohlcv(monkeypatch, n_days=200, fail=False):
     """paper_ui.api_chart_data 안의 'from pykrx import stock'을 monkeypatch."""
     import types
+
     fake_stock = types.SimpleNamespace()
 
     def get_ohlcv(start, end, ticker):
         if fail:
             raise RuntimeError("KRX down")
         idx = pd.date_range("2025-11-01", periods=n_days, freq="B")
-        return pd.DataFrame({
-            "시가":   [80000.0 + i * 10 for i in range(n_days)],
-            "고가":   [80500.0 + i * 10 for i in range(n_days)],
-            "저가":   [79500.0 + i * 10 for i in range(n_days)],
-            "종가":   [80200.0 + i * 10 for i in range(n_days)],
-            "거래량": [1_000_000 + i * 100 for i in range(n_days)],
-        }, index=idx)
+        return pd.DataFrame(
+            {
+                "시가": [80000.0 + i * 10 for i in range(n_days)],
+                "고가": [80500.0 + i * 10 for i in range(n_days)],
+                "저가": [79500.0 + i * 10 for i in range(n_days)],
+                "종가": [80200.0 + i * 10 for i in range(n_days)],
+                "거래량": [1_000_000 + i * 100 for i in range(n_days)],
+            },
+            index=idx,
+        )
+
     fake_stock.get_market_ohlcv = get_ohlcv
     fake_stock.get_market_ticker_name = lambda t: "삼성전자"
 
     import sys
+
     sys.modules["pykrx"] = types.SimpleNamespace(stock=fake_stock)
     sys.modules["pykrx.stock"] = fake_stock
     return fake_stock
@@ -285,26 +319,40 @@ def test_paper_private_reads_are_api_first(client, monkeypatch):
 
     class FakePrivateClient:
         def list_paper_portfolios(self):
-            return [{
-                "id": 9, "name": "API", "seed_capital": 1.0,
-                "created_at": "2026-08-24",
-            }]
+            return [
+                {
+                    "id": 9,
+                    "name": "API",
+                    "seed_capital": 1.0,
+                    "created_at": "2026-08-24",
+                }
+            ]
 
         def list_paper_positions(self, slot=None):
-            return [{
-                "id": 8, "slot_id": 7, "ticker": "005930", "name": "삼성전자",
-                "quantity": 1, "avg_price": 1.0, "opened_at": "2026-08-24",
-                "updated_at": "2026-08-24", "slot_name": slot or "콴텍",
-            }]
+            return [
+                {
+                    "id": 8,
+                    "slot_id": 7,
+                    "ticker": "005930",
+                    "name": "삼성전자",
+                    "quantity": 1,
+                    "avg_price": 1.0,
+                    "opened_at": "2026-08-24",
+                    "updated_at": "2026-08-24",
+                    "slot_name": slot or "콴텍",
+                }
+            ]
 
     monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
     monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
     monkeypatch.setattr(
-        paper_ui.pdb, "list_portfolios",
+        paper_ui.pdb,
+        "list_portfolios",
         lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
     monkeypatch.setattr(
-        paper_ui.pdb, "list_positions",
+        paper_ui.pdb,
+        "list_positions",
         lambda slot=None: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
 
@@ -334,32 +382,56 @@ def test_paper_slots_and_trades_are_api_first(client, monkeypatch):
 
     class FakePrivateClient:
         def list_paper_slots(self):
-            return [{
-                "id": 2, "portfolio_id": 1, "name": "API 슬롯",
-                "allocation_pct": 0.4, "current_capital": 1.0,
-                "created_at": "2026-08-24", "n_positions": 3, "n_trades": 4,
-            }]
+            return [
+                {
+                    "id": 2,
+                    "portfolio_id": 1,
+                    "name": "API 슬롯",
+                    "allocation_pct": 0.4,
+                    "current_capital": 1.0,
+                    "created_at": "2026-08-24",
+                    "n_positions": 3,
+                    "n_trades": 4,
+                }
+            ]
 
         def list_paper_trades(self, slot=None, limit=100):
-            return [{
-                "id": 4, "slot_id": 2, "ticker": "005930", "name": "삼성전자",
-                "side": "buy", "quantity": 1, "price": 1.0, "fees": 0.0,
-                "notes": None, "executed_at": "2026-08-24", "slot_name": slot or "API 슬롯",
-            }][:limit]
+            return [
+                {
+                    "id": 4,
+                    "slot_id": 2,
+                    "ticker": "005930",
+                    "name": "삼성전자",
+                    "side": "buy",
+                    "quantity": 1,
+                    "price": 1.0,
+                    "fees": 0.0,
+                    "notes": None,
+                    "executed_at": "2026-08-24",
+                    "slot_name": slot or "API 슬롯",
+                }
+            ][:limit]
 
     monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
     monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
     monkeypatch.setattr(
-        paper_ui.pdb, "list_slots",
+        paper_ui.pdb,
+        "list_slots",
         lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
     monkeypatch.setattr(
-        paper_ui.pdb, "list_trades",
-        lambda slot=None, limit=100: (_ for _ in ()).throw(AssertionError("direct DB read")),
+        paper_ui.pdb,
+        "list_trades",
+        lambda slot=None, limit=100: (_ for _ in ()).throw(
+            AssertionError("direct DB read")
+        ),
     )
 
     assert client.get("/api/paper/slots").json()[0]["n_trades"] == 4
-    assert client.get("/api/paper/trades?slot=콴텍&limit=1").json()[0]["slot_name"] == "콴텍"
+    assert (
+        client.get("/api/paper/trades?slot=콴텍&limit=1").json()[0]["slot_name"]
+        == "콴텍"
+    )
 
 
 def test_paper_slot_and_trade_failure_falls_back_to_local_db(client, monkeypatch):
@@ -384,28 +456,48 @@ def test_paper_ipo_reads_are_api_first(client, monkeypatch):
 
     class FakePrivateClient:
         def list_paper_ipo_records(self):
-            return [{
-                "id": 5, "name": "API 공모주", "sub_start": None, "sub_end": None,
-                "listing_date": None, "grade": None, "score": None, "factors": None,
-                "subscribed": 0, "alloc_amount": None, "listing_price": None,
-                "return_pct": None, "notes": None, "created_at": "2026-08-24",
-                "updated_at": "2026-08-24",
-            }]
+            return [
+                {
+                    "id": 5,
+                    "name": "API 공모주",
+                    "sub_start": None,
+                    "sub_end": None,
+                    "listing_date": None,
+                    "grade": None,
+                    "score": None,
+                    "factors": None,
+                    "subscribed": 0,
+                    "alloc_amount": None,
+                    "listing_price": None,
+                    "return_pct": None,
+                    "notes": None,
+                    "created_at": "2026-08-24",
+                    "updated_at": "2026-08-24",
+                }
+            ]
 
         def list_paper_ipo_stats(self):
-            return [{
-                "grade": "A", "n": 1, "avg_return": 10.0,
-                "min_return": 10.0, "max_return": 10.0, "n_pos": 1,
-            }]
+            return [
+                {
+                    "grade": "A",
+                    "n": 1,
+                    "avg_return": 10.0,
+                    "min_return": 10.0,
+                    "max_return": 10.0,
+                    "n_pos": 1,
+                }
+            ]
 
     monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
     monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
     monkeypatch.setattr(
-        paper_ui.pdb, "ipo_list",
+        paper_ui.pdb,
+        "ipo_list",
         lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
     monkeypatch.setattr(
-        paper_ui.pdb, "ipo_stats",
+        paper_ui.pdb,
+        "ipo_stats",
         lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
 
@@ -435,12 +527,20 @@ def test_paper_calculated_reads_are_api_first(client, monkeypatch):
 
     class FakePrivateClient:
         def list_paper_performance(self):
-            return [{
-                "slot_id": 2, "slot_name": "API", "n_closed": 1,
-                "win_rate": 100.0, "total_pnl": 10_000,
-                "total_return_pct": 1.0, "max_drawdown_pct": 0.0,
-                "sharpe": None, "n_open_positions": 0, "open_cost": 0,
-            }]
+            return [
+                {
+                    "slot_id": 2,
+                    "slot_name": "API",
+                    "n_closed": 1,
+                    "win_rate": 100.0,
+                    "total_pnl": 10_000,
+                    "total_return_pct": 1.0,
+                    "max_drawdown_pct": 0.0,
+                    "sharpe": None,
+                    "n_open_positions": 0,
+                    "open_cost": 0,
+                }
+            ]
 
         def get_paper_myquant_tags(self):
             return {
@@ -451,11 +551,13 @@ def test_paper_calculated_reads_are_api_first(client, monkeypatch):
     monkeypatch.setattr(paper_ui, "private_api_enabled", lambda: True)
     monkeypatch.setattr(paper_ui, "_private_client", lambda: FakePrivateClient())
     monkeypatch.setattr(
-        paper_ui.pdb, "performance_stats",
+        paper_ui.pdb,
+        "performance_stats",
         lambda: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
     monkeypatch.setattr(
-        paper_ui.pdb, "list_trades",
+        paper_ui.pdb,
+        "list_trades",
         lambda limit=100: (_ for _ in ()).throw(AssertionError("direct DB read")),
     )
 
@@ -483,13 +585,105 @@ def test_paper_calculated_read_failure_falls_back_to_local_db(client, monkeypatc
 def test_buy_flow_still_works(client):
     """v3.18 BC — kium-scan 추가에도 매수 정상."""
     body = {
-        "slot": "콴텍", "ticker": "005930", "name": "삼성전자",
-        "quantity": 1, "price": 80_000,
+        "slot": "콴텍",
+        "ticker": "005930",
+        "name": "삼성전자",
+        "quantity": 1,
+        "price": 80_000,
     }
     r = client.post("/api/paper/buy", json=body)
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
+
+def test_v3_buy_uses_private_executor_with_explicit_approval_and_no_direct_write(
+    client, monkeypatch
+):
+    import paper_ui
+
+    called = {}
+
+    class PaperClient:
+        def list_paper_slots(self):
+            return [{"id": 1, "name": "콴텍"}]
+
+    class PaperExecutor:
+        def execute(self, **kwargs):
+            called.update(kwargs)
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                result={"side": "buy", "trade_id": 7},
+                replayed=False,
+            )
+
+    monkeypatch.setattr(paper_ui, "_PAPER_WRITE_CLIENT", PaperClient())
+    monkeypatch.setattr(paper_ui, "_PAPER_WRITE_EXECUTOR", PaperExecutor())
+    monkeypatch.setattr(
+        paper_ui.pdb,
+        "record_buy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("v3 Paper UI must not use direct DB writes")
+        ),
+    )
+    response = client.post(
+        "/api/paper/buy",
+        json={
+            "slot": "콴텍",
+            "ticker": "005930",
+            "name": "삼성전자",
+            "quantity": 1,
+            "price": 80_000,
+            "source_event_id": "12345678-1234-4234-9234-123456789012",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "side": "buy",
+        "trade_id": 7,
+        "replayed": False,
+    }
+    assert called["caller"] == "paper-ui"
+    assert called["slot_id"] == 1
+    assert called["user_approved"] is True
+    assert called["policy_approved"] is False
+
+
+def test_v3_paper_ui_failure_does_not_fallback_to_direct_db(client, monkeypatch):
+    import paper_ui
+
+    class PaperClient:
+        def list_paper_slots(self):
+            return [{"id": 1, "name": "콴텍"}]
+
+    class DownExecutor:
+        def execute(self, **kwargs):
+            raise RuntimeError("Private API unavailable")
+
+    monkeypatch.setattr(paper_ui, "_PAPER_WRITE_CLIENT", PaperClient())
+    monkeypatch.setattr(paper_ui, "_PAPER_WRITE_EXECUTOR", DownExecutor())
+    monkeypatch.setattr(
+        paper_ui.pdb,
+        "record_sell",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("v3 Paper UI must fail closed")
+        ),
+    )
+    response = client.post(
+        "/api/paper/sell",
+        json={
+            "slot": "콴텍",
+            "ticker": "005930",
+            "quantity": 1,
+            "price": 80_000,
+            "source_event_id": "12345678-1234-4234-9234-123456789012",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["ok"] is False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -500,12 +694,17 @@ def test_buy_flow_still_works(client):
 def _stub_quant_snapshot(monkeypatch, consensus="Expansion"):
     """quant_bot.snapshot을 가짜 PhaseSnapshot으로 monkeypatch."""
     import quant_bot
+
     snap = quant_bot.PhaseSnapshot(
-        phase_kr="Expansion", phase_us="Expansion",
-        cli_kr_level=101.5, cli_kr_momentum=0.42,
-        cli_us_level=102.0, cli_us_momentum=0.31,
+        phase_kr="Expansion",
+        phase_us="Expansion",
+        cli_kr_level=101.5,
+        cli_kr_momentum=0.42,
+        cli_us_level=102.0,
+        cli_us_momentum=0.31,
         bsi_trend=0.15,
-        consensus_phase=consensus, confidence=0.85,
+        consensus_phase=consensus,
+        confidence=0.85,
         needs_recheck=False,
     )
     monkeypatch.setattr(quant_bot, "snapshot", lambda months=24: snap)
@@ -515,28 +714,42 @@ def _stub_quant_snapshot(monkeypatch, consensus="Expansion"):
 def _stub_quant_recommend_data(monkeypatch):
     """recommend_top_n + 데이터 fetch 일괄 monkeypatch."""
     import quant_bot
-    monkeypatch.setattr(quant_bot, "fetch_fundamentals",
-                        lambda market="KOSPI": {})
-    monkeypatch.setattr(quant_bot, "fetch_market_caps",
-                        lambda market="KOSPI": {})
+
+    monkeypatch.setattr(quant_bot, "fetch_fundamentals", lambda market="KOSPI": {})
+    monkeypatch.setattr(quant_bot, "fetch_market_caps", lambda market="KOSPI": {})
     fake_recs = [
         quant_bot.StockRecommendation(
-            ticker="005930", name="삼성전자", composite_score=1.2,
+            ticker="005930",
+            name="삼성전자",
+            composite_score=1.2,
             raw_factors={"Momentum": 0.3},
-            z_factors={"Momentum": 1.5, "Value": 0.5, "Quality": 0.8,
-                       "LowVol": 0.2, "Size": -0.3},
+            z_factors={
+                "Momentum": 1.5,
+                "Value": 0.5,
+                "Quality": 0.8,
+                "LowVol": 0.2,
+                "Size": -0.3,
+            },
             current_price=80000.0,
         ),
         quant_bot.StockRecommendation(
-            ticker="000660", name="SK하이닉스", composite_score=0.8,
+            ticker="000660",
+            name="SK하이닉스",
+            composite_score=0.8,
             raw_factors={"Momentum": 0.2},
-            z_factors={"Momentum": 1.0, "Value": -0.3, "Quality": 1.2,
-                       "LowVol": -0.1, "Size": -0.2},
+            z_factors={
+                "Momentum": 1.0,
+                "Value": -0.3,
+                "Quality": 1.2,
+                "LowVol": -0.1,
+                "Size": -0.2,
+            },
             current_price=120000.0,
         ),
     ]
-    monkeypatch.setattr(quant_bot, "recommend_top_n",
-                        lambda **kw: fake_recs[:int(kw.get("top_n", 8))])
+    monkeypatch.setattr(
+        quant_bot, "recommend_top_n", lambda **kw: fake_recs[: int(kw.get("top_n", 8))]
+    )
     return fake_recs
 
 
@@ -585,6 +798,7 @@ def test_quant_recommend_no_consensus_returns_error_field(client, monkeypatch):
     """consensus_phase=None → error 필드."""
     _stub_quant_snapshot(monkeypatch, consensus=None)
     import quant_bot
+
     monkeypatch.setattr(quant_bot, "fetch_fundamentals", lambda market="KOSPI": {})
     monkeypatch.setattr(quant_bot, "fetch_market_caps", lambda market="KOSPI": {})
     r = client.get("/api/paper/quant-recommend")
@@ -608,10 +822,10 @@ def test_index_html_has_quant_tab_content(client):
     r = client.get("/")
     html = r.text
     assert 'id="tab-quant"' in html
-    assert 'btn-quant-recommend' in html
-    assert 'quant-phase-override' in html
-    assert 'loadQuantPhase' in html  # JS 함수
-    assert 'runQuantRecommend' in html
+    assert "btn-quant-recommend" in html
+    assert "quant-phase-override" in html
+    assert "loadQuantPhase" in html  # JS 함수
+    assert "runQuantRecommend" in html
 
 
 def test_index_html_quant_endpoints_referenced(client):
@@ -647,10 +861,15 @@ def test_ipo_stats_empty_initially(client):
 
 def test_ipo_subscribe_creates_record(client):
     body = {
-        "name": "테스트공모주", "sub_start": "20260601", "sub_end": "20260602",
-        "listing_date": "20260610", "grade": "A+", "score": 78.5,
+        "name": "테스트공모주",
+        "sub_start": "20260601",
+        "sub_end": "20260602",
+        "listing_date": "20260610",
+        "grade": "A+",
+        "score": 78.5,
         "factors": {"final_price": 15000, "offer_price": 15000},
-        "subscribed": True, "alloc_amount": 1_000_000,
+        "subscribed": True,
+        "alloc_amount": 1_000_000,
     }
     r = client.post("/api/ipo/subscribe", json=body)
     assert r.status_code == 200
@@ -664,36 +883,56 @@ def test_ipo_subscribe_creates_record(client):
 
 
 def test_ipo_close_computes_return_pct(client):
-    client.post("/api/ipo/subscribe", json={
-        "name": "상장테스트", "grade": "A",
-        "factors": {"final_price": 10000, "offer_price": 10000},
-        "subscribed": True,
-    })
-    r = client.post("/api/ipo/close", json={
-        "name": "상장테스트", "listing_price": 13000,
-    })
+    client.post(
+        "/api/ipo/subscribe",
+        json={
+            "name": "상장테스트",
+            "grade": "A",
+            "factors": {"final_price": 10000, "offer_price": 10000},
+            "subscribed": True,
+        },
+    )
+    r = client.post(
+        "/api/ipo/close",
+        json={
+            "name": "상장테스트",
+            "listing_price": 13000,
+        },
+    )
     assert r.status_code == 200
     rec = r.json()
     assert rec["listing_price"] == 13000
-    assert rec["return_pct"] == 30.0   # (13000-10000)/10000*100
+    assert rec["return_pct"] == 30.0  # (13000-10000)/10000*100
 
 
 def test_ipo_close_unknown_name_returns_404(client):
-    r = client.post("/api/ipo/close", json={
-        "name": "존재하지않는종목", "listing_price": 10000,
-    })
+    r = client.post(
+        "/api/ipo/close",
+        json={
+            "name": "존재하지않는종목",
+            "listing_price": 10000,
+        },
+    )
     assert r.status_code == 404
 
 
 def test_ipo_stats_aggregates_by_grade(client):
-    client.post("/api/ipo/subscribe", json={
-        "name": "통계종목", "grade": "A",
-        "factors": {"final_price": 10000, "offer_price": 10000},
-        "subscribed": True,
-    })
-    client.post("/api/ipo/close", json={
-        "name": "통계종목", "listing_price": 12000,
-    })
+    client.post(
+        "/api/ipo/subscribe",
+        json={
+            "name": "통계종목",
+            "grade": "A",
+            "factors": {"final_price": 10000, "offer_price": 10000},
+            "subscribed": True,
+        },
+    )
+    client.post(
+        "/api/ipo/close",
+        json={
+            "name": "통계종목",
+            "listing_price": 12000,
+        },
+    )
     stats = client.get("/api/ipo/stats").json()
     assert len(stats) == 1
     assert stats[0]["grade"] == "A"
@@ -706,13 +945,24 @@ def test_ipo_scan_endpoint_mocked(client, monkeypatch):
     """/api/ipo/scan — ipo_bot.py subprocess 호출을 가짜 JSON으로 대체."""
     import subprocess
     import json as _json
-    fake_items = [{
-        "name": "스캔공모주", "corp_name": "스캔공모주", "grade": "A+",
-        "total_score": 78.0, "sub_start": "20260601", "sub_end": "20260602",
-        "listing_date": "20260610", "final_price": None,
-        "band_low": 12000, "band_high": 15000, "offer_band_high": 15000,
-        "competition_rate": 900, "underwriter": "미래에셋증권",
-    }]
+
+    fake_items = [
+        {
+            "name": "스캔공모주",
+            "corp_name": "스캔공모주",
+            "grade": "A+",
+            "total_score": 78.0,
+            "sub_start": "20260601",
+            "sub_end": "20260602",
+            "listing_date": "20260610",
+            "final_price": None,
+            "band_low": 12000,
+            "band_high": 15000,
+            "offer_band_high": 15000,
+            "competition_rate": 900,
+            "underwriter": "미래에셋증권",
+        }
+    ]
 
     class _FakeProc:
         returncode = 0

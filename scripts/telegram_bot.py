@@ -24,6 +24,7 @@
   TELEGRAM_BOT_TOKEN          BotFather에서 받은 토큰
   ALLOWED_TELEGRAM_USER_ID    본인 user_id (콤마 구분으로 여러 명 가능)
 """
+
 from __future__ import annotations
 import asyncio
 import logging
@@ -34,8 +35,10 @@ import tempfile
 import time
 import unicodedata
 from datetime import time as dtime
+
 try:
     from zoneinfo import ZoneInfo
+
     _KST = ZoneInfo("Asia/Seoul")
 except Exception:
     _KST = None
@@ -50,7 +53,12 @@ load_dotenv(PROJECT / ".env")
 sys.path.insert(0, str(PROJECT / "scripts"))
 from storage_paths import PATHS  # noqa: E402
 from ask import LLM_MODEL  # noqa: E402  (지식봇 내부에서도 사용)
-from inbox import save_to_inbox, extract_url_content, extract_pdf_text, VAULT  # noqa: E402
+from inbox import (
+    save_to_inbox,
+    extract_url_content,
+    extract_pdf_text,
+    VAULT,
+)  # noqa: E402
 from memory import ChatMemory  # noqa: E402
 from router import route, MASTER_MODEL  # noqa: E402
 from knowledge_bot import run as knowledge_run  # noqa: E402
@@ -62,10 +70,18 @@ from telegram_write_identity import (  # noqa: E402
     build_schedule_write_identity,
     build_watchlist_write_identity,
 )
+from paper_trade_identity import build_paper_trade_write_identity  # noqa: E402
 from private_write_runtime import load_private_write_runtime_bundle  # noqa: E402
 from kium_bot import run as kium_run, scan_universe as kium_scan  # noqa: E402
-from quant_bot import run as quant_run, recommend_top_n as quant_recommend, snapshot as quant_snapshot  # noqa: E402  # v3.22 콴텍봇
-from ipo_bot import run as ipo_run, scan_upcoming as ipo_scan  # noqa: E402  # v3.26 IPO봇
+from quant_bot import (
+    run as quant_run,
+    recommend_top_n as quant_recommend,
+    snapshot as quant_snapshot,
+)  # noqa: E402  # v3.22 콴텍봇
+from ipo_bot import (
+    run as ipo_run,
+    scan_upcoming as ipo_scan,
+)  # noqa: E402  # v3.26 IPO봇
 import signal_bot  # noqa: E402  # v3.40 기술적 신호 봇
 from news_bot import run as news_run  # noqa: E402  # v3.41 뉴스봇
 import agent_bot  # noqa: E402  # v3.42 범용 에이전트
@@ -87,7 +103,6 @@ from telegram.ext import (  # noqa: E402
     MessageHandler,
     filters,
 )
-
 
 # ─── 설정 ────────────────────────────────────────────
 
@@ -120,12 +135,39 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 TEXT_FILE_EXTS = {".md", ".txt"}
 # 코드 첨부 (B-3, v3.13) — UTF-8 텍스트로 읽음. 추후 coding_bot 입력으로도 활용 가능
 CODE_FILE_EXTS = {
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
-    ".go", ".rs", ".rb", ".java", ".kt", ".swift",
-    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp",
-    ".sh", ".bash", ".zsh",
-    ".sql", ".html", ".css", ".scss",
-    ".yaml", ".yml", ".toml", ".json", ".xml", ".ini", ".cfg",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".go",
+    ".rs",
+    ".rb",
+    ".java",
+    ".kt",
+    ".swift",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".sql",
+    ".html",
+    ".css",
+    ".scss",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".json",
+    ".xml",
+    ".ini",
+    ".cfg",
     ".dockerfile",
 }
 # PDF — pdfminer로 텍스트 추출
@@ -155,9 +197,103 @@ log = logging.getLogger("telegram_bot")
 _PRIVATE_WRITE_CLIENT = None
 _PRIVATE_WRITE_EXECUTOR = None
 _PRIVATE_SCHEDULE_WRITE_EXECUTOR = None
+_PRIVATE_PAPER_WRITE_CLIENT = None
+_PRIVATE_PAPER_WRITE_EXECUTOR = None
+
+
+def _list_runtime_paper_slots() -> list[dict]:
+    if _PRIVATE_PAPER_WRITE_CLIENT is not None:
+        return _PRIVATE_PAPER_WRITE_CLIENT.list_paper_slots()
+    return _pdb.list_slots()
+
+
+def _list_runtime_paper_positions(slot=None) -> list[dict]:
+    if _PRIVATE_PAPER_WRITE_CLIENT is not None:
+        return _PRIVATE_PAPER_WRITE_CLIENT.list_paper_positions(slot=slot)
+    return _pdb.list_positions(slot=slot)
+
+
+def _runtime_paper_slot_summary(slot_id: int) -> dict | None:
+    if _PRIVATE_PAPER_WRITE_CLIENT is not None:
+        return next(
+            (
+                slot
+                for slot in _PRIVATE_PAPER_WRITE_CLIENT.list_paper_slots()
+                if int(slot["id"]) == int(slot_id)
+            ),
+            None,
+        )
+    return _pdb.slot_summary(slot_id)
+
+
+async def _execute_private_paper_write(
+    *,
+    caller: str,
+    action: str,
+    slot_id: int,
+    actor_id: object,
+    source_event_id: object,
+    item_key: object,
+    ticker: str,
+    quantity: int,
+    price: float,
+    name: str | None = None,
+    notes: str | None = None,
+    user_approved: bool,
+    policy_approved: bool,
+):
+    if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+        raise RuntimeError("Private Paper write executor is unavailable")
+    identity = build_paper_trade_write_identity(
+        caller=caller,
+        operation=f"paper.{action}",
+        slot_id=slot_id,
+        actor_id=actor_id,
+        source_event_id=source_event_id,
+        item_key=item_key,
+    )
+    return await asyncio.to_thread(
+        _PRIVATE_PAPER_WRITE_EXECUTOR.execute,
+        caller=caller,
+        action=action,
+        slot_id=slot_id,
+        identity=identity,
+        user_approved=user_approved,
+        policy_approved=policy_approved,
+        ticker=ticker,
+        name=name,
+        quantity=quantity,
+        price=price,
+        notes=notes,
+    )
+
+
+def _configure_private_write_runtime(runtime_bundle) -> None:
+    global _PRIVATE_WRITE_CLIENT, _PRIVATE_WRITE_EXECUTOR
+    global _PRIVATE_SCHEDULE_WRITE_EXECUTOR
+    global _PRIVATE_PAPER_WRITE_CLIENT, _PRIVATE_PAPER_WRITE_EXECUTOR
+    _PRIVATE_WRITE_CLIENT = None
+    _PRIVATE_WRITE_EXECUTOR = None
+    _PRIVATE_SCHEDULE_WRITE_EXECUTOR = None
+    _PRIVATE_PAPER_WRITE_CLIENT = None
+    _PRIVATE_PAPER_WRITE_EXECUTOR = None
+    if runtime_bundle is None:
+        return
+    _PRIVATE_WRITE_CLIENT = runtime_bundle.build_client()
+    _PRIVATE_WRITE_EXECUTOR = runtime_bundle.build_executor(_PRIVATE_WRITE_CLIENT)
+    if runtime_bundle.schedule_writes_enabled:
+        _PRIVATE_SCHEDULE_WRITE_EXECUTOR = runtime_bundle.build_schedule_executor(
+            _PRIVATE_WRITE_CLIENT
+        )
+    if runtime_bundle.paper_writes_enabled:
+        _PRIVATE_PAPER_WRITE_CLIENT = runtime_bundle.build_paper_client()
+        _PRIVATE_PAPER_WRITE_EXECUTOR = runtime_bundle.build_paper_executor(
+            _PRIVATE_PAPER_WRITE_CLIENT
+        )
 
 
 # ─── 유틸 ────────────────────────────────────────────
+
 
 def is_authorized(update: Update) -> bool:
     user = update.effective_user
@@ -233,17 +369,17 @@ WELCOME = (
     "🤖 현준의 RAG 비서 (4단계 — 지식봇 + 일정봇 + 금융봇 + 투자봇)\n"
     "\n"
     "마스터 에이전트가 질문을 분석해서 적절한 도구로 위임합니다.\n"
-    "직전 대화도 기억해 — \"그거 더 자세히\" 같은 후속 질문 가능.\n"
+    '직전 대화도 기억해 — "그거 더 자세히" 같은 후속 질문 가능.\n'
     "\n"
     "예시:\n"
-    "  • \"내 매매 청산 규칙은?\" → 지식봇 (wiki RAG)\n"
-    "  • \"내일 오후 3시 콴텍봇 리뷰 잡아줘\" → 일정봇 (등록 + 자동 알림)\n"
-    "  • \"VIX 지금 몇이야?\" → 금융봇 (FRED)\n"
-    "  • \"지금 시장이 내 매매 원칙에 맞아?\" → 금융봇 (지표 + Wiki 대조)\n"
-    "  • \"삼성전자 차트 봐줘\" → 투자봇 (지표만, 빠름)\n"
-    "  • \"삼성전자 매수 조건 충족해?\" → 투자봇 (원칙 대조 + 31B 평가)\n"
-    "  • \"...라고 메모해줘\" / \"기록해\" → 메모봇 (raw/inbox/ 자동 저장)\n"
-    "  • \"이 함수 디버깅\" / \"파이썬 클래스 설계\" → 코딩봇 (Qwen/Claude)\n"
+    '  • "내 매매 청산 규칙은?" → 지식봇 (wiki RAG)\n'
+    '  • "내일 오후 3시 콴텍봇 리뷰 잡아줘" → 일정봇 (등록 + 자동 알림)\n'
+    '  • "VIX 지금 몇이야?" → 금융봇 (FRED)\n'
+    '  • "지금 시장이 내 매매 원칙에 맞아?" → 금융봇 (지표 + Wiki 대조)\n'
+    '  • "삼성전자 차트 봐줘" → 투자봇 (지표만, 빠름)\n'
+    '  • "삼성전자 매수 조건 충족해?" → 투자봇 (원칙 대조 + 31B 평가)\n'
+    '  • "...라고 메모해줘" / "기록해" → 메모봇 (raw/inbox/ 자동 저장)\n'
+    '  • "이 함수 디버깅" / "파이썬 클래스 설계" → 코딩봇 (Qwen/Claude)\n'
     "\n"
     "🚀 fast 모드 / 🔍 accurate 모드 — 라우터가 입력 보고 자동 결정\n"
     "\n"
@@ -256,7 +392,7 @@ HELP = (
     "\n"
     "📥 정보 입력\n"
     "/note <내용>      명시적 메모 저장 (라우팅 우회, 즉시)\n"
-    "자연어 메모        \"...라고 메모해줘\" → 라우터가 inbox_bot으로 분기\n"
+    '자연어 메모        "...라고 메모해줘" → 라우터가 inbox_bot으로 분기\n'
     "URL 그대로 전송   본문 추출 후 raw/inbox/ 저장\n"
     "파일 업로드        .md/.txt/.pdf + 코드(.py/.js/.ts 등) → raw/inbox/\n"
     "\n"
@@ -265,27 +401,27 @@ HELP = (
     "/search <키워드>  wiki 제목 빠른 검색\n"
     "\n"
     "📅 일정\n"
-    "자연어로 말해 — \"다음주 화요일 오후 3시 콴텍봇 리뷰\"\n"
-    "반복: \"매일 오전 7시 운동\" / \"매주 월수금 9시 리뷰\"\n"
-    "사전 알림: \"내일 3시 회의 5분 전 알려줘\"\n"
-    "조회: \"내 일정\" / \"다가오는 일정\"\n"
-    "삭제: \"#3 삭제\" / \"3번 일정 지워줘\"\n"
+    '자연어로 말해 — "다음주 화요일 오후 3시 콴텍봇 리뷰"\n'
+    '반복: "매일 오전 7시 운동" / "매주 월수금 9시 리뷰"\n'
+    '사전 알림: "내일 3시 회의 5분 전 알려줘"\n'
+    '조회: "내 일정" / "다가오는 일정"\n'
+    '삭제: "#3 삭제" / "3번 일정 지워줘"\n'
     "🔔 시각 도달 시 자동 푸시 (60초 주기 스캔, 12시간 grace)\n"
     "\n"
     "📊 경제 지표 / 시장 점검\n"
-    "단일: \"VIX 지금?\", \"환율 얼마야?\", \"기준금리\"\n"
-    "묶음: \"경제 지표 보여줘\" / \"대시보드\"\n"
-    "원칙 대조: \"지금 시장이 내 매매 원칙이랑 맞아?\"\n"
+    '단일: "VIX 지금?", "환율 얼마야?", "기준금리"\n'
+    '묶음: "경제 지표 보여줘" / "대시보드"\n'
+    '원칙 대조: "지금 시장이 내 매매 원칙이랑 맞아?"\n'
     "\n"
     "📈 종목 분석 (단일 종목, 실주문 X)\n"
-    "지표만: \"삼성전자 차트\" / \"005930 분석\"\n"
-    "원칙 대조: \"삼성전자 매수 조건 충족해?\" / \"내 원칙 기준 평가\"\n"
+    '지표만: "삼성전자 차트" / "005930 분석"\n'
+    '원칙 대조: "삼성전자 매수 조건 충족해?" / "내 원칙 기준 평가"\n'
     "\n"
     "💻 코딩 (Qwen2.5-Coder 로컬 + Claude API 하이브리드)\n"
-    "설계: \"파이썬 장바구니 클래스 설계\"\n"
-    "구현: \"피보나치 N번째 함수 구현\"\n"
-    "디버깅: \"이 에러 왜 나? TypeError ...\"\n"
-    "리뷰: \"이 코드 리뷰해줘\" + 파일 첨부\n"
+    '설계: "파이썬 장바구니 클래스 설계"\n'
+    '구현: "피보나치 N번째 함수 구현"\n'
+    '디버깅: "이 에러 왜 나? TypeError ..."\n'
+    '리뷰: "이 코드 리뷰해줘" + 파일 첨부\n'
     "\n"
     "🛠 시스템\n"
     "/start            시작 인사\n"
@@ -294,7 +430,7 @@ HELP = (
     "/status           인덱스/모델/일정 상태\n"
     "/clear            이 채팅의 대화 메모리 초기화\n"
     "/agent <명령>     도구를 조합해 다단계 수행(범용 에이전트)\n"
-    "자연어 예약: \"매일 8시 뉴스 보내\", \"자동작업 목록\", \"자동작업 2 삭제\"\n"
+    '자연어 예약: "매일 8시 뉴스 보내", "자동작업 목록", "자동작업 2 삭제"\n'
     "\n"
     "그 외 모든 메시지는 마스터 라우터 → 적절한 도구로 처리\n"
 )
@@ -332,16 +468,27 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         import lancedb
         from ask import DB_PATH, TABLE_NAME
+
         db = lancedb.connect(str(DB_PATH))
-        n = db.open_table(TABLE_NAME).count_rows() if TABLE_NAME in db.table_names() else 0
+        n = (
+            db.open_table(TABLE_NAME).count_rows()
+            if TABLE_NAME in db.table_names()
+            else 0
+        )
         inbox_count = len(list(RAW_INBOX.glob("*.md"))) if RAW_INBOX.exists() else 0
         chat_id = str(update.effective_chat.id)
         my_turns = len(memory.history(chat_id))
         all_chats = len(memory.stats())
         # 일정봇 통계
         try:
-            from schedule_bot import list_events as _list_events, due_for_notification as _due
-            all_events = _list_events(upcoming_only=False, limit=500, include_completed=True)
+            from schedule_bot import (
+                list_events as _list_events,
+                due_for_notification as _due,
+            )
+
+            all_events = _list_events(
+                upcoming_only=False, limit=500, include_completed=True
+            )
             upcoming_n = len(_list_events(upcoming_only=True, limit=100))
             recurring_n = sum(1 for e in all_events if e.get("rrule_freq"))
             pre_enabled_n = sum(1 for e in all_events if e.get("pre_notify_minutes"))
@@ -378,7 +525,9 @@ async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     cleared = memory.clear(chat_id)
     if cleared:
-        await update.message.reply_text(f"🧹 대화 메모리 초기화 완료 ({cleared}턴 삭제)")
+        await update.message.reply_text(
+            f"🧹 대화 메모리 초기화 완료 ({cleared}턴 삭제)"
+        )
     else:
         await update.message.reply_text("이 채팅에 저장된 대화가 없습니다.")
     log.info(f"🧹 /clear chat_id={chat_id} cleared={cleared}")
@@ -386,12 +535,14 @@ async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _agent_tool_safe(fn):
     """에이전트 도구 래퍼 — 예외를 문자열로 변환(루프 graceful)."""
+
     def _w(args):
         try:
             r = fn(args)
             return r if isinstance(r, str) else str(r)
         except Exception as e:
             return f"오류: {e}"
+
     return _w
 
 
@@ -399,24 +550,50 @@ def _setup_agent_tools() -> None:
     """agent_bot에 안전 도구 + 기존 봇을 등록(봇 시작 시 1회)."""
     agent_bot.clear_tools()
     agent_bot.register_builtin_tools()  # read_file / list_files (샌드박스, 읽기)
-    agent_bot.register_inbox_tool()     # write_inbox (raw/inbox 한정 쓰기)
-    agent_bot.register_tool(agent_bot.Tool(
-        "news", "IT/AI 뉴스 헤드라인+요약",
-        _agent_tool_safe(lambda a: news_run()[0] or "신규 기사 없음")))
-    agent_bot.register_tool(agent_bot.Tool(
-        "signal_scan", "핵심 자산배분 기술적 매매 신호(1시간봉)",
-        _agent_tool_safe(lambda a: signal_bot.run()[0] or "현재 actionable 신호 없음")))
-    agent_bot.register_tool(agent_bot.Tool(
-        "ipo_scan", "향후 공모주 일정·매력지수 스캔",
-        _agent_tool_safe(lambda a: ipo_run(action="scan", days_ahead=int(a.get("days", 30)))[0]),
-        args_hint='{"days": 30}'))
-    agent_bot.register_tool(agent_bot.Tool(
-        "quant_phase", "거시 경기국면 진단(콴텍봇)",
-        _agent_tool_safe(lambda a: quant_run(action="phase")[0])))
-    agent_bot.register_tool(agent_bot.Tool(
-        "rag_search", "내 위키(투자 원칙·노트)에서 검색·답변",
-        _agent_tool_safe(lambda a: knowledge_run(a.get("query", ""), None, None, "fast")[0]),
-        args_hint='{"query": "리스크 관리 원칙"}'))
+    agent_bot.register_inbox_tool()  # write_inbox (raw/inbox 한정 쓰기)
+    agent_bot.register_tool(
+        agent_bot.Tool(
+            "news",
+            "IT/AI 뉴스 헤드라인+요약",
+            _agent_tool_safe(lambda a: news_run()[0] or "신규 기사 없음"),
+        )
+    )
+    agent_bot.register_tool(
+        agent_bot.Tool(
+            "signal_scan",
+            "핵심 자산배분 기술적 매매 신호(1시간봉)",
+            _agent_tool_safe(
+                lambda a: signal_bot.run()[0] or "현재 actionable 신호 없음"
+            ),
+        )
+    )
+    agent_bot.register_tool(
+        agent_bot.Tool(
+            "ipo_scan",
+            "향후 공모주 일정·매력지수 스캔",
+            _agent_tool_safe(
+                lambda a: ipo_run(action="scan", days_ahead=int(a.get("days", 30)))[0]
+            ),
+            args_hint='{"days": 30}',
+        )
+    )
+    agent_bot.register_tool(
+        agent_bot.Tool(
+            "quant_phase",
+            "거시 경기국면 진단(콴텍봇)",
+            _agent_tool_safe(lambda a: quant_run(action="phase")[0]),
+        )
+    )
+    agent_bot.register_tool(
+        agent_bot.Tool(
+            "rag_search",
+            "내 위키(투자 원칙·노트)에서 검색·답변",
+            _agent_tool_safe(
+                lambda a: knowledge_run(a.get("query", ""), None, None, "fast")[0]
+            ),
+            args_hint='{"query": "리스크 관리 원칙"}',
+        )
+    )
     log.info(f"🤖 에이전트 도구 {len(agent_bot.list_tools())}개 등록")
 
 
@@ -429,9 +606,12 @@ async def cmd_agent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     task = " ".join(ctx.args).strip() if ctx.args else ""
     if not task:
         await update.message.reply_text(
-            "사용법: /agent <명령>\n예: /agent 오늘 신호랑 IT 뉴스 같이 정리해줘")
+            "사용법: /agent <명령>\n예: /agent 오늘 신호랑 IT 뉴스 같이 정리해줘"
+        )
         return
-    notice = await update.message.reply_text("🤖 에이전트 작업 중... (다단계, 최대 1~2분)")
+    notice = await update.message.reply_text(
+        "🤖 에이전트 작업 중... (다단계, 최대 1~2분)"
+    )
     try:
         ans = await asyncio.to_thread(agent_bot.run, task)
     except Exception as e:
@@ -460,7 +640,9 @@ async def cmd_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        target = await asyncio.to_thread(save_to_inbox, content, "메모", "telegram /note")
+        target = await asyncio.to_thread(
+            save_to_inbox, content, "메모", "telegram /note"
+        )
     except Exception as e:
         log.exception("inbox 저장 실패")
         await update.message.reply_text(f"❌ 저장 실패: {e}")
@@ -549,6 +731,7 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ─── URL 처리 ────────────────────────────────────────
 
+
 async def handle_url(update: Update, url: str) -> None:
     notice = await update.message.reply_text("🌐 본문 추출 중...")
     try:
@@ -585,25 +768,51 @@ async def handle_url(update: Update, url: str) -> None:
         f"\n"
         f"자동 정제되어 wiki/에 인덱싱됩니다."
     )
-    log.info(f"🌐 URL 저장 user_id={update.effective_user.id} url={url[:80]} len={len(body)}")
+    log.info(
+        f"🌐 URL 저장 user_id={update.effective_user.id} url={url[:80]} len={len(body)}"
+    )
 
 
 # ─── 파일 업로드 ─────────────────────────────────────
+
 
 def _ext_to_lang(ext: str) -> str:
     """확장자를 코드블록 언어 힌트로. 알 수 없으면 빈 문자열."""
     ext = ext.lower().lstrip(".")
     return {
-        "py": "python", "js": "javascript", "ts": "typescript",
-        "tsx": "tsx", "jsx": "jsx", "mjs": "javascript", "cjs": "javascript",
-        "go": "go", "rs": "rust", "rb": "ruby",
-        "java": "java", "kt": "kotlin", "swift": "swift",
-        "c": "c", "cc": "cpp", "cpp": "cpp", "cxx": "cpp",
-        "h": "c", "hpp": "cpp",
-        "sh": "bash", "bash": "bash", "zsh": "bash",
-        "sql": "sql", "html": "html", "css": "css", "scss": "scss",
-        "yaml": "yaml", "yml": "yaml", "toml": "toml", "json": "json",
-        "xml": "xml", "ini": "ini", "cfg": "ini",
+        "py": "python",
+        "js": "javascript",
+        "ts": "typescript",
+        "tsx": "tsx",
+        "jsx": "jsx",
+        "mjs": "javascript",
+        "cjs": "javascript",
+        "go": "go",
+        "rs": "rust",
+        "rb": "ruby",
+        "java": "java",
+        "kt": "kotlin",
+        "swift": "swift",
+        "c": "c",
+        "cc": "cpp",
+        "cpp": "cpp",
+        "cxx": "cpp",
+        "h": "c",
+        "hpp": "cpp",
+        "sh": "bash",
+        "bash": "bash",
+        "zsh": "bash",
+        "sql": "sql",
+        "html": "html",
+        "css": "css",
+        "scss": "scss",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "toml": "toml",
+        "json": "json",
+        "xml": "xml",
+        "ini": "ini",
+        "cfg": "ini",
         "dockerfile": "dockerfile",
     }.get(ext, "")
 
@@ -704,10 +913,13 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         f"\n"
         f"자동 정제되어 wiki/에 인덱싱됩니다."
     )
-    log.info(f"📎 파일 저장 user_id={update.effective_user.id} name={fname} len={len(content)}")
+    log.info(
+        f"📎 파일 저장 user_id={update.effective_user.id} name={fname} len={len(content)}"
+    )
 
 
 # ─── 일반 텍스트 → 라우터 ────────────────────────────
+
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
@@ -770,7 +982,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     elif tool == "knowledge_bot":
         rewritten = args.get("query", text).strip() or text
-        await notice.edit_text(f"{mode_emoji} wiki 검색 + 답변 생성 중... (q: {rewritten[:60]})")
+        await notice.edit_text(
+            f"{mode_emoji} wiki 검색 + 답변 생성 중... (q: {rewritten[:60]})"
+        )
         try:
             kb_history = memory.history(chat_id, n=KNOWLEDGE_HISTORY_TURNS)
             answer, chunks = await asyncio.to_thread(
@@ -778,11 +992,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             # v3.44 — 위키에 충분한 근거가 없으면 웹 검색→정리→wiki 저장→답변
             # v3.45 — 단, 자기참조/개인 질문이면 웹으로 새지 않음(위키 답변 유지)
-            if _research.rag_is_weak(chunks) and not _research.is_self_referential(rewritten):
-                await notice.edit_text(f"{mode_emoji}🔎 위키에 없어 웹에서 검색·정리 중...")
+            if _research.rag_is_weak(chunks) and not _research.is_self_referential(
+                rewritten
+            ):
+                await notice.edit_text(
+                    f"{mode_emoji}🔎 위키에 없어 웹에서 검색·정리 중..."
+                )
                 answer = await asyncio.to_thread(
-                    _research.research, rewritten,
-                    lambda prefix, content: save_to_inbox(content, prefix=prefix, source="web_research")
+                    _research.research,
+                    rewritten,
+                    lambda prefix, content: save_to_inbox(
+                        content, prefix=prefix, source="web_research"
+                    ),
                 )
                 chunks = []
         except Exception as e:
@@ -907,7 +1128,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     elif tool == "quant_bot":
         months = args.get("months", 24)
         action_q = args.get("action", "phase")
-        timeout_q = 360 if action_q == "recommend" else 60  # recommend는 OHLCV fetch로 최대 6분
+        timeout_q = (
+            360 if action_q == "recommend" else 60
+        )  # recommend는 OHLCV fetch로 최대 6분
         await notice.edit_text(
             f"{mode_emoji}🌐 콴텍봇 거시 국면 분석 중... ({months}M)"
         )
@@ -990,9 +1213,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"{mode_emoji}💻 [{cd_action}] {model_hint}로 처리 중..."
         )
         try:
-            answer, chunks = await asyncio.to_thread(
-                coding_run, mode=mode, **args
-            )
+            answer, chunks = await asyncio.to_thread(coding_run, mode=mode, **args)
         except Exception as e:
             log.exception("coding_bot 실패")
             await notice.edit_text(f"❌ 코딩봇 오류: {e}")
@@ -1040,8 +1261,8 @@ async def handle_other(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ─── 일정 알림 스케줄러 (v3.6) ───────────────────────
 
 
-NOTIFY_INTERVAL_SEC = 60   # 60초마다 schedule.db 스캔
-NOTIFY_HORIZON_SEC = 70    # 발화 임박 윈도우 (interval + 약간)
+NOTIFY_INTERVAL_SEC = 60  # 60초마다 schedule.db 스캔
+NOTIFY_HORIZON_SEC = 70  # 발화 임박 윈도우 (interval + 약간)
 
 # v3.23 — 콴텍봇 월간 리밸런싱 자동 푸시 (매월 첫 영업일 09:30 KST)
 REBALANCE_HOUR = 9
@@ -1053,18 +1274,18 @@ _PENDING_REBALANCE: dict[int, list] = {}
 _PENDING_REBALANCE_MONTH: dict[int, str] = {}  # user_id → month_key
 # 키움봇 주간 스캔 승인 대기 (v3.29)
 KIUM_FLAG_FILE = REBALANCE_FLAG_DIR / "kium_weekly_last.json"
-_PENDING_KIUM: dict[int, list] = {}   # user_id → list[dict]
-_PENDING_KIUM_WEEK: dict[int, str] = {}   # user_id → week_key
+_PENDING_KIUM: dict[int, list] = {}  # user_id → list[dict]
+_PENDING_KIUM_WEEK: dict[int, str] = {}  # user_id → week_key
 KIUM_SCAN_HOUR = 9
 KIUM_SCAN_MINUTE = 5  # 09:05 (launchd 09:00 기동 후)
 KIUM_CHECK_INTERVAL_SEC = 6 * 60 * 60  # 6h 주기 검사 (하루 4번)
 # v3.30 — IPO봇 주간 스캔 (매주 월요일 09:10 조회, A등급 이상만 알림)
 IPO_FLAG_FILE = REBALANCE_FLAG_DIR / "ipo_weekly_last.json"
-_PENDING_IPO: dict[int, list] = {}   # user_id → list[dict]
+_PENDING_IPO: dict[int, list] = {}  # user_id → list[dict]
 IPO_SCAN_HOUR = 9
 IPO_SCAN_MINUTE = 10
 IPO_CHECK_INTERVAL_SEC = 6 * 60 * 60  # 6h 주기
-IPO_MIN_GRADE = {"A++", "A+", "A"}    # 이 등급 이상만 paper 알림
+IPO_MIN_GRADE = {"A++", "A+", "A"}  # 이 등급 이상만 paper 알림
 
 # 매일 09:30에 한 번 실행 — 첫 영업일이면 푸시. 멱등 플래그로 같은 달 중복 차단.
 REBALANCE_CHECK_INTERVAL_SEC = 24 * 60 * 60  # 24h
@@ -1073,32 +1294,34 @@ REBALANCE_CHECK_INTERVAL_SEC = 24 * 60 * 60  # 24h
 # v3.44 — 실행 지연 수정: 30분→5분 폴링, 네이버 실시간 시세(pykrx 폴백),
 #         판정은 exit_rules.should_exit(급락 하드스톱·트레일링 포함)로 위임.
 import exit_rules  # noqa: E402  # 순수 판정 모듈(hermetic 테스트는 test_exit_rules.py)
+
 INTRADAY_MONITOR_INTERVAL_SEC = int(os.getenv("INTRADAY_MONITOR_INTERVAL_SEC", 5 * 60))
-INTRADAY_STOP_LOSS_PCT = exit_rules.STOP_PCT      # -7% 손절선 (EXIT_STOP_PCT로 조정)
-INTRADAY_TAKE_PROFIT_PCT = exit_rules.TAKE_PCT    # +20% 익절선 (EXIT_TAKE_PCT로 조정)
+INTRADAY_STOP_LOSS_PCT = exit_rules.STOP_PCT  # -7% 손절선 (EXIT_STOP_PCT로 조정)
+INTRADAY_TAKE_PROFIT_PCT = exit_rules.TAKE_PCT  # +20% 익절선 (EXIT_TAKE_PCT로 조정)
 _INTRADAY_PEAKS_PATH = PATHS.private_state_file("intraday_peaks.json")
 
 # v3.40 — 기술적 신호 봇 (1시간봉, 장중)
-SIGNAL_CHECK_INTERVAL_SEC = 60 * 60       # 1시간 간격
+SIGNAL_CHECK_INTERVAL_SEC = 60 * 60  # 1시간 간격
 SIGNAL_OPEN_HOUR, SIGNAL_OPEN_MIN = 9, 0
 SIGNAL_CLOSE_HOUR, SIGNAL_CLOSE_MIN = 15, 30
 _SIGNAL_DEDUP_PATH = PATHS.private_state_file("signal_last.json")
 
 # v3.41 — 뉴스 다이제스트 (매일 정시)
-NEWS_CHECK_INTERVAL_SEC = 10 * 60   # 검사 주기(발송 아님). 실제 발송은 하루 1회(멱등)
+NEWS_CHECK_INTERVAL_SEC = 10 * 60  # 검사 주기(발송 아님). 실제 발송은 하루 1회(멱등)
 NEWS_DIGEST_HOUR, NEWS_DIGEST_MIN = 8, 0
-NEWS_DIGEST_UNTIL = "2026-06-11"    # 이 날짜까지만 발송(포함). None이면 무기한
+NEWS_DIGEST_UNTIL = "2026-06-11"  # 이 날짜까지만 발송(포함). None이면 무기한
 _NEWS_DIGEST_FLAG = PATHS.private_state_file("news_digest_last.json")
 
 
-
 # ─── pykrx 현재가 헬퍼 (v3.30) ────────────────────────────────────────────────
+
 
 def _get_pykrx_price(ticker: str) -> float | None:
     """pykrx OHLCV 최신 종가 반환. 실패 시 None."""
     try:
         from pykrx import stock as _stk
         from datetime import datetime as _dt, timedelta as _td
+
         today = _dt.now().strftime("%Y%m%d")
         start = (_dt.now() - _td(days=5)).strftime("%Y%m%d")
         df = _stk.get_market_ohlcv(start, today, ticker)
@@ -1123,13 +1346,16 @@ def _get_naver_price(ticker: str) -> float | None:
     """네이버 금융 polling API 현재가(장중 실시간). 실패 시 None."""
     import json as _json
     from urllib.request import Request, urlopen
+
     for url in _NAVER_POLL_URLS:
         try:
-            req = Request(url.format(ticker=ticker),
-                          headers={"User-Agent": "Mozilla/5.0"})
+            req = Request(
+                url.format(ticker=ticker), headers={"User-Agent": "Mozilla/5.0"}
+            )
             with urlopen(req, timeout=3) as r:
                 price = exit_rules.parse_naver_price(
-                    _json.loads(r.read().decode("utf-8")))
+                    _json.loads(r.read().decode("utf-8"))
+                )
             if price:
                 return price
         except Exception as e:
@@ -1145,17 +1371,22 @@ def _get_realtime_price(ticker: str) -> float | None:
 def _now_kst():
     """장중 게이트용 현재 시각 — 서버 타임존과 무관하게 KST(가능하면 aware)."""
     from datetime import datetime as _dt
+
     return _dt.now(_KST) if _KST else _dt.now()
 
 
 def _load_intraday_state() -> dict:
     """{"peaks": {포지션키: 피크수익률}, "px": {티커: 직전 폴링가}}. 구형(피크만) 마이그레이션."""
     import json as _json
+
     try:
         d = _json.loads(_INTRADAY_PEAKS_PATH.read_text(encoding="utf-8"))
         if "peaks" in d or "px" in d:
-            return {"peaks": d.get("peaks") or {}, "px": d.get("px") or {},
-                    "naver_streak": int(d.get("naver_streak") or 0)}
+            return {
+                "peaks": d.get("peaks") or {},
+                "px": d.get("px") or {},
+                "naver_streak": int(d.get("naver_streak") or 0),
+            }
         return {"peaks": d, "px": {}, "naver_streak": 0}  # v3.44 초기 형식
     except Exception:
         return {"peaks": {}, "px": {}, "naver_streak": 0}
@@ -1163,6 +1394,7 @@ def _load_intraday_state() -> dict:
 
 def _save_intraday_state(state: dict) -> None:
     import json as _json
+
     try:
         _INTRADAY_PEAKS_PATH.parent.mkdir(parents=True, exist_ok=True)
         _INTRADAY_PEAKS_PATH.write_text(_json.dumps(state), encoding="utf-8")
@@ -1171,6 +1403,7 @@ def _save_intraday_state(state: dict) -> None:
 
 
 # ─── 장 중 실시간 손절·익절 모니터 (v3.31, 판정 v3.44=exit_rules) ─────────────
+
 
 async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """평일 09:05~15:30 사이 5분 간격으로 실행.
@@ -1191,11 +1424,13 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not (market_open <= now <= market_close):
         return
 
-    positions = await asyncio.to_thread(_pdb.list_positions)
+    positions = await asyncio.to_thread(_list_runtime_paper_positions)
     if not positions:
         return
 
-    log.info(f"🔍 장 중 모니터 — {len(positions)}개 포지션 체크 ({now.strftime('%H:%M')})")
+    log.info(
+        f"🔍 장 중 모니터 — {len(positions)}개 포지션 체크 ({now.strftime('%H:%M')})"
+    )
 
     state = _load_intraday_state()
     peaks, last_px = state["peaks"], state["px"]
@@ -1203,10 +1438,12 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     alerts: list[str] = []
 
     # v3.45 — 유효 포지션 시세 병렬 조회(네이버 1차) / v3.46 — 시세원 건강 감시
-    valid = [p for p in positions
-             if int(p["quantity"]) > 0 and float(p["avg_price"]) > 0]
+    valid = [
+        p for p in positions if int(p["quantity"]) > 0 and float(p["avg_price"]) > 0
+    ]
     naver_prices = await asyncio.gather(
-        *(asyncio.to_thread(_get_naver_price, p["ticker"]) for p in valid))
+        *(asyncio.to_thread(_get_naver_price, p["ticker"]) for p in valid)
+    )
     n_naver_ok = sum(1 for x in naver_prices if x)
     raw_prices = list(naver_prices)
     for i, (p, nv) in enumerate(zip(valid, naver_prices)):
@@ -1214,20 +1451,25 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             raw_prices[i] = await asyncio.to_thread(_get_pykrx_price, p["ticker"])
 
     streak, warn = exit_rules.naver_health(
-        n_naver_ok, len(valid), int(state.get("naver_streak") or 0))
+        n_naver_ok, len(valid), int(state.get("naver_streak") or 0)
+    )
     if warn:
         alerts_health = (
             f"⚠️ *실시간 시세원 이상* — 네이버 시세가 {streak}사이클 연속 전멸, "
             f"pykrx 종가 폴백으로 동작 중입니다(손절 실행 지연 재발 위험). "
-            f"네트워크/API 응답 형식을 확인하세요.")
+            f"네트워크/API 응답 형식을 확인하세요."
+        )
     else:
         alerts_health = None
     if n_naver_ok < len(valid):
-        log.info(f"  시세원: 네이버 {n_naver_ok}/{len(valid)} 성공 "
-                 f"(전멸 연속 {streak}회)")
+        log.info(
+            f"  시세원: 네이버 {n_naver_ok}/{len(valid)} 성공 "
+            f"(전멸 연속 {streak}회)"
+        )
 
     new_px: dict[str, float] = {}
-    for pos, raw_price in zip(valid, raw_prices):
+    cycle_id = now.strftime("%Y%m%dT%H%M")
+    for position_index, (pos, raw_price) in enumerate(zip(valid, raw_prices)):
         ticker = pos["ticker"]
         qty = int(pos["quantity"])
         avg_price = float(pos["avg_price"])
@@ -1237,12 +1479,14 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         # v3.45 — 오호가 방어: 직전 폴링가 대비 급변 시 pykrx 교차확인
         cur_price = exit_rules.confirm_price(
-            raw_price, last_px.get(ticker),
-            lambda t=ticker: _get_pykrx_price(t))
+            raw_price, last_px.get(ticker), lambda t=ticker: _get_pykrx_price(t)
+        )
         if cur_price is None:
             if raw_price:
-                log.warning(f"  {ticker}: 의심 틱 {raw_price:,.0f}원 "
-                            f"(직전 {last_px.get(ticker)}) — 이번 사이클 스킵")
+                log.warning(
+                    f"  {ticker}: 의심 틱 {raw_price:,.0f}원 "
+                    f"(직전 {last_px.get(ticker)}) — 이번 사이클 스킵"
+                )
             else:
                 log.debug(f"  {ticker}: 가격 조회 실패 — 스킵")
             key = exit_rules.peak_key(slot_id, ticker, avg_price)
@@ -1263,10 +1507,30 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         action, reason = verdict
         emoji = "🚨" if action == "손절" else "🎯"
         try:
-            _pdb.record_sell(
-                slot_id, ticker, qty, cur_price,
-                notes=f"{action} 자동청산[{reason}] ({pnl_pct*100:.1f}%)"
-            )
+            notes = f"{action} 자동청산[{reason}] ({pnl_pct*100:.1f}%)"
+            if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                _pdb.record_sell(
+                    slot_id,
+                    ticker,
+                    qty,
+                    cur_price,
+                    notes=notes,
+                )
+            else:
+                await _execute_private_paper_write(
+                    caller="telegram-intraday",
+                    action="sell",
+                    slot_id=slot_id,
+                    actor_id="intraday-policy",
+                    source_event_id=cycle_id,
+                    item_key=f"position-{position_index}",
+                    ticker=ticker,
+                    quantity=qty,
+                    price=cur_price,
+                    notes=notes,
+                    user_approved=False,
+                    policy_approved=True,
+                )
             log.info(
                 f"{emoji} {action}청산[{reason}] {ticker} [{slot_name}] "
                 f"{pnl_pct*100:.1f}% @ {cur_price:,.0f}원"
@@ -1282,8 +1546,13 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if alerts_health:
         alerts.append(alerts_health)
-    _save_intraday_state({"peaks": exit_rules.prune_peaks(peaks, live_keys),
-                          "px": new_px, "naver_streak": streak})
+    _save_intraday_state(
+        {
+            "peaks": exit_rules.prune_peaks(peaks, live_keys),
+            "px": new_px,
+            "naver_streak": streak,
+        }
+    )
 
     if alerts:
         msg = "\n\n".join(alerts)
@@ -1297,6 +1566,7 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 log.warning(f"모니터 알림 실패 (uid={uid}): {e}")
 
+
 async def technical_signal_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """평일 09:00~15:30, 1시간 간격. 핵심 자산배분 워치리스트 기술적 신호 푸시.
 
@@ -1307,8 +1577,12 @@ async def technical_signal_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     now = _now_kst()  # v3.46 — 서버 타임존 무관 KST 게이트
     if now.weekday() >= 5:
         return
-    open_t = now.replace(hour=SIGNAL_OPEN_HOUR, minute=SIGNAL_OPEN_MIN, second=0, microsecond=0)
-    close_t = now.replace(hour=SIGNAL_CLOSE_HOUR, minute=SIGNAL_CLOSE_MIN, second=0, microsecond=0)
+    open_t = now.replace(
+        hour=SIGNAL_OPEN_HOUR, minute=SIGNAL_OPEN_MIN, second=0, microsecond=0
+    )
+    close_t = now.replace(
+        hour=SIGNAL_CLOSE_HOUR, minute=SIGNAL_CLOSE_MIN, second=0, microsecond=0
+    )
     if not (open_t <= now <= close_t):
         return
 
@@ -1341,6 +1615,7 @@ async def technical_signal_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ─── v3.43 봇작업 예약(action_schedule) 실행 인프라 ────
 
+
 def _run_action(action: str) -> str:
     """예약 액션 키 → 실제 봇 실행 결과 메시지."""
     if action == "news":
@@ -1355,6 +1630,7 @@ def _run_action(action: str) -> str:
         # v3.46 — 리포트 생성 시 성과 스냅샷도 적재(EWMA 평활·추세 입력 누적)
         try:
             import paper_db as _pdb_perf
+
             _stats = _pdb_perf.performance_stats()
             try:
                 _panalytics.record_snapshot(_stats)
@@ -1392,17 +1668,32 @@ def _handle_action_schedule(args: dict) -> str:
         return _full_automation_list()
     if op == "delete":
         ok = _asch.delete_schedule(int(args["id"]))
-        return f"🗑 자동작업 #{args['id']} 삭제됨" if ok else f"#{args['id']} 작업을 못 찾았습니다."
+        return (
+            f"🗑 자동작업 #{args['id']} 삭제됨"
+            if ok
+            else f"#{args['id']} 작업을 못 찾았습니다."
+        )
     if op in ("disable", "enable"):
         ok = _asch.set_enabled(int(args["id"]), op == "enable")
         state = "중지" if op == "disable" else "재개"
-        return f"⏸ 자동작업 #{args['id']} {state}됨" if ok else f"#{args['id']} 작업을 못 찾았습니다."
+        return (
+            f"⏸ 자동작업 #{args['id']} {state}됨"
+            if ok
+            else f"#{args['id']} 작업을 못 찾았습니다."
+        )
     if op == "add":
         sched = _asch.add_schedule(
-            args["action"], args.get("freq", "daily"), args["time"],
-            weekday=args.get("weekday"), until=args.get("until"))
-        return ("✅ 자동작업 등록\n" + sched.describe()
-                + "\n(이 시각에 제가 직접 실행해 보냅니다)")
+            args["action"],
+            args.get("freq", "daily"),
+            args["time"],
+            weekday=args.get("weekday"),
+            until=args.get("until"),
+        )
+        return (
+            "✅ 자동작업 등록\n"
+            + sched.describe()
+            + "\n(이 시각에 제가 직접 실행해 보냅니다)"
+        )
     return "예약 명령을 이해하지 못했습니다."
 
 
@@ -1419,6 +1710,7 @@ def _seed_default_schedules() -> None:
 async def action_dispatch_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """60초마다 호출 — 지금 시각에 발화할 예약작업을 실행·전송(멱등)."""
     from datetime import datetime as _dt
+
     now = _dt.now()
     try:
         due = _asch.due_now(now)
@@ -1438,8 +1730,12 @@ async def action_dispatch_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info(f"⏰ 예약작업 #{sched.id} {sched.action} 발송")
         for uid in ALLOWED_IDS:
             try:
-                await ctx.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown",
-                                           disable_web_page_preview=True)
+                await ctx.bot.send_message(
+                    chat_id=uid,
+                    text=msg,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
             except Exception as e:
                 log.warning(f"예약 발송 실패 (uid={uid}): {e}")
 
@@ -1447,6 +1743,7 @@ async def action_dispatch_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def news_digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """run_daily가 매일 08:00(KST) 정확히 1회 호출 → IT/AI 뉴스 다이제스트 푸시."""
     from datetime import datetime as _dt
+
     today = _dt.now().strftime("%Y-%m-%d")
     if NEWS_DIGEST_UNTIL and today > NEWS_DIGEST_UNTIL:
         return  # 종료일 경과 — 발송 중단
@@ -1461,8 +1758,12 @@ async def news_digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info(f"📰 뉴스 다이제스트 푸시 ({len(arts)}건)")
     for uid in ALLOWED_IDS:
         try:
-            await ctx.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown",
-                                       disable_web_page_preview=True)
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=msg,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
         except Exception as e:
             log.warning(f"뉴스 알림 실패 (uid={uid}): {e}")
 
@@ -1476,9 +1777,12 @@ async def notify_due_events(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     try:
         from schedule_bot import (
-            due_for_notification, mark_notified, mark_pre_notified,
+            due_for_notification,
+            mark_notified,
+            mark_pre_notified,
             advance_recurring,
         )
+
         events = await asyncio.to_thread(
             due_for_notification, horizon_seconds=NOTIFY_HORIZON_SEC
         )
@@ -1551,9 +1855,11 @@ def _first_business_day_passed(today: "datetime") -> bool:
     """이번 달 첫 영업일이 (오늘 이전에) 이미 지났는지 — catch-up 판정용."""
     try:
         from pykrx import stock
+
         first = today.replace(day=1)
         biz = stock.get_previous_business_days(
-            fromdate=first.strftime("%Y%m%d"), todate=today.strftime("%Y%m%d"))
+            fromdate=first.strftime("%Y%m%d"), todate=today.strftime("%Y%m%d")
+        )
         if not biz:
             return False
         fb = biz[0]
@@ -1569,6 +1875,7 @@ def is_first_business_day(today: "datetime") -> bool:
     """오늘이 KRX 첫 영업일인지 — pykrx 영업일 캘린더 기반 (없으면 weekday fallback)."""
     try:
         from pykrx import stock
+
         # 같은 달 1일~오늘 사이 영업일 list
         first = today.replace(day=1)
         biz_days = stock.get_previous_business_days(
@@ -1581,7 +1888,8 @@ def is_first_business_day(today: "datetime") -> bool:
         first_biz = biz_days[0]
         # pandas Timestamp / str 둘 다 핸들
         first_str = (
-            first_biz.strftime("%Y%m%d") if hasattr(first_biz, "strftime")
+            first_biz.strftime("%Y%m%d")
+            if hasattr(first_biz, "strftime")
             else str(first_biz)
         )
         return first_str == today.strftime("%Y%m%d")
@@ -1596,6 +1904,7 @@ def _load_rebalance_flag() -> dict:
     try:
         if REBALANCE_FLAG_FILE.exists():
             import json as _json
+
             return _json.loads(REBALANCE_FLAG_FILE.read_text(encoding="utf-8"))
     except Exception as e:
         log.warning(f"리밸런싱 플래그 읽기 실패 — fresh start: {e}")
@@ -1606,6 +1915,7 @@ def _save_rebalance_flag(data: dict) -> None:
     try:
         REBALANCE_FLAG_DIR.mkdir(parents=True, exist_ok=True)
         import json as _json
+
         REBALANCE_FLAG_FILE.write_text(
             _json.dumps(data, ensure_ascii=False), encoding="utf-8"
         )
@@ -1620,6 +1930,7 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     같은 달 같은 user는 중복 발송 안 함.
     """
     from datetime import datetime as _dt
+
     now = _dt.now()
 
     month_key = now.strftime("%Y-%m")
@@ -1633,10 +1944,13 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # v3.46 — catch-up: 첫 영업일 당일이면 09:30 이후, 그 이후 날짜면 켜진 즉시 발화.
     # (기존엔 첫 영업일 정시 tick에만 발화 → 재시작 시 영영 안 떠 콴텍 슬롯이 멈췄음)
     if not _asch.monthly_rebalance_due(
-            now, already_pushed=False,
-            is_first_biz=is_first_business_day(now),
-            first_biz_passed=_first_business_day_passed(now),
-            hour=REBALANCE_HOUR, minute=REBALANCE_MINUTE):
+        now,
+        already_pushed=False,
+        is_first_biz=is_first_business_day(now),
+        first_biz_passed=_first_business_day_passed(now),
+        hour=REBALANCE_HOUR,
+        minute=REBALANCE_MINUTE,
+    ):
         return
 
     log.info(f"💼 콴텍봇 월간 리밸런싱 푸시 — {month_key}, pending {len(pending)}명")
@@ -1668,6 +1982,7 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if phase:  # v3.45 — 월별 국면 실측 캐시 축적(상관 분석용)
             try:
                 import trade_analytics as _ta
+
                 _ta.record_phase_month(phase)
             except Exception:
                 pass
@@ -1685,10 +2000,14 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # v3.46 fix: StockRecommendation(객체)/dict 모두 안전 처리. 기존 getattr 기본값이
     # r.get을 항상 평가해 객체일 때 AttributeError로 catch-up 잡이 크래시했음.
-    _rec_tickers = {(r.ticker if hasattr(r, "ticker") else r.get("ticker", "")) for r in recs} if recs else set()
+    _rec_tickers = (
+        {(r.ticker if hasattr(r, "ticker") else r.get("ticker", "")) for r in recs}
+        if recs
+        else set()
+    )
     _held_tickers = {p["ticker"] for p in _qpos if p.get("quantity", 0) > 0}
-    _q_keep  = _held_tickers & _rec_tickers
-    _q_exit  = _held_tickers - _rec_tickers
+    _q_keep = _held_tickers & _rec_tickers
+    _q_exit = _held_tickers - _rec_tickers
     _q_enter = _rec_tickers - _held_tickers
     diff_line = (
         f"\n\n📋 포트폴리오 변경 ({month_key})\n"
@@ -1709,20 +2028,25 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parts = split_for_telegram(full)
             for part in parts[:-1]:
                 await ctx.bot.send_message(
-                    chat_id=int(uid), text=part,
+                    chat_id=int(uid),
+                    text=part,
                     disable_web_page_preview=True,
                 )
             # 마지막 파트에 승인 버튼 부착
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    f"✅ 실행 (청산 {len(_q_exit)} / 신규 {len(_q_enter)})",
-                    callback_data=f"quant_paper:approve:{uid}:{month_key}"
-                ),
-                InlineKeyboardButton(
-                    "❌ 이번 달 건너뜀",
-                    callback_data=f"quant_paper:skip:{uid}:{month_key}"
-                ),
-            ]])
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"✅ 실행 (청산 {len(_q_exit)} / 신규 {len(_q_enter)})",
+                            callback_data=f"quant_paper:approve:{uid}:{month_key}",
+                        ),
+                        InlineKeyboardButton(
+                            "❌ 이번 달 건너뜀",
+                            callback_data=f"quant_paper:skip:{uid}:{month_key}",
+                        ),
+                    ]
+                ]
+            )
             await ctx.bot.send_message(
                 chat_id=int(uid),
                 text=parts[-1] + "\n\n📌 콴텍봇 슬롯 paper 실행하시겠습니까?",
@@ -1732,7 +2056,9 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             _PENDING_REBALANCE[uid] = recs
             _PENDING_REBALANCE_MONTH[uid] = month_key
             pushed.add(uid)
-            log.info(f"  → user_id={uid} 발송 완료 (청산 {len(_q_exit)} / 신규 {len(_q_enter)})")
+            log.info(
+                f"  → user_id={uid} 발송 완료 (청산 {len(_q_exit)} / 신규 {len(_q_enter)})"
+            )
         except Exception as e:
             log.error(f"리밸런싱 발송 실패 user_id={uid}: {e}")
 
@@ -1745,6 +2071,7 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─── 키움봇 주간 스캔 잡 + paper 승인 콜백 (v3.29) ──────────────────────────
+
 
 def _load_kium_flag() -> dict:
     try:
@@ -1762,6 +2089,7 @@ def _save_kium_flag(data: dict) -> None:
 async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """6h 주기 호출. 매주 월요일(weekday=0) 09:05 이후만 스캔 + 텔레그램 푸시."""
     from datetime import datetime as _dt
+
     now = _dt.now()
     if now.weekday() != 0:
         return
@@ -1780,9 +2108,7 @@ async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info(f"📊 키움봇 주간 스캔 푸시 — {week_key}, pending {len(pending)}명")
 
     try:
-        results = await asyncio.to_thread(
-            kium_scan, market="KOSPI200", top_n=8
-        )
+        results = await asyncio.to_thread(kium_scan, market="KOSPI200", top_n=8)
     except Exception as e:
         log.exception("kium_scan 실패")
         for uid in pending:
@@ -1808,10 +2134,10 @@ async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _existing_pos = []
 
     existing_tickers = {p["ticker"] for p in _existing_pos if p.get("quantity", 0) > 0}
-    new_tickers      = {r["ticker"] for r in results}
-    keep_tickers     = existing_tickers & new_tickers
-    exit_tickers     = existing_tickers - new_tickers
-    enter_tickers    = new_tickers - existing_tickers
+    new_tickers = {r["ticker"] for r in results}
+    keep_tickers = existing_tickers & new_tickers
+    exit_tickers = existing_tickers - new_tickers
+    enter_tickers = new_tickers - existing_tickers
     n_keep, n_exit, n_enter = len(keep_tickers), len(exit_tickers), len(enter_tickers)
 
     # 변경 없으면 알림 스킵 (이미 최적 포트폴리오 유지 중)
@@ -1827,12 +2153,19 @@ async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         keep_names = [r["name"] for r in results if r["ticker"] in keep_tickers]
         lines.append(f"♻️ 유지 {n_keep}종목: {', '.join(keep_names)}")
     if exit_tickers:
-        exit_names = [p.get("name", t) for p in _existing_pos for t in [p["ticker"]] if t in exit_tickers]
+        exit_names = [
+            p.get("name", t)
+            for p in _existing_pos
+            for t in [p["ticker"]]
+            if t in exit_tickers
+        ]
         lines.append(f"📤 청산 {n_exit}종목: {', '.join(exit_names)}")
     if enter_tickers:
         lines.append(f"\n🆕 신규 매수 {n_enter}종목:")
         for i, r in enumerate([x for x in results if x["ticker"] in enter_tickers], 1):
-            price_str = f"{r.get('current_price', 0):,.0f}원" if r.get("current_price") else "-"
+            price_str = (
+                f"{r.get('current_price', 0):,.0f}원" if r.get("current_price") else "-"
+            )
             lines.append(
                 f"  {i}. {r['name']}({r['ticker']})"
                 f"  점수:{r.get('score', 0):.2f}  {price_str}"
@@ -1842,16 +2175,20 @@ async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     for uid in pending:
         try:
-            kb_uid = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    f"✅ 실행 (청산 {n_exit} / 신규 {n_enter})",
-                    callback_data=f"kium_paper:approve:{uid}:{week_key}"
-                ),
-                InlineKeyboardButton(
-                    "❌ 이번 주 건너뜀",
-                    callback_data=f"kium_paper:skip:{uid}:{week_key}"
-                ),
-            ]])
+            kb_uid = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"✅ 실행 (청산 {n_exit} / 신규 {n_enter})",
+                            callback_data=f"kium_paper:approve:{uid}:{week_key}",
+                        ),
+                        InlineKeyboardButton(
+                            "❌ 이번 주 건너뜀",
+                            callback_data=f"kium_paper:skip:{uid}:{week_key}",
+                        ),
+                    ]
+                ]
+            )
             await ctx.bot.send_message(
                 chat_id=int(uid),
                 text=scan_text + "\n\n📌 키움봇 슬롯 paper 실행하시겠습니까?",
@@ -1872,7 +2209,9 @@ async def kium_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _save_kium_flag(flag)
 
 
-async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_kium_paper_callback(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
     """키움봇 InlineKeyboard 승인/거부 -> paper_db 매매 실행."""
     query = update.callback_query
     await query.answer()
@@ -1908,7 +2247,7 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         return
 
     try:
-        slots = _pdb.list_slots()
+        slots = _list_runtime_paper_slots()
         kium_slot = next((s for s in slots if "키움" in s.get("name", "")), None)
         if not kium_slot:
             kium_slot = slots[1] if len(slots) > 1 else slots[0]
@@ -1927,29 +2266,52 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     # 기존 손절 기준 초과 포지션 정리 (-7% 하드스탑)
     STOP_LOSS_PCT = -7.0
     try:
-        existing = _pdb.list_positions(slot=int(slot_id))
+        existing = _list_runtime_paper_positions(slot=int(slot_id))
     except Exception:
         existing = []
 
     kium_tickers = {r["ticker"] for r in results}
-    for pos in existing:
+    for position_index, pos in enumerate(existing):
         avg = pos.get("avg_price", 0)
         qty = pos.get("quantity", 0)
         ticker = pos.get("ticker", "")
         if avg <= 0 or qty <= 0:
             continue
         # 현재가 조회
-        cur_price = next(
-            (r.get("current_price", 0) for r in results if r["ticker"] == ticker), 0
-        ) or avg
+        cur_price = (
+            next(
+                (r.get("current_price", 0) for r in results if r["ticker"] == ticker), 0
+            )
+            or avg
+        )
         pnl_pct = (cur_price - avg) / avg * 100 if avg > 0 else 0
         should_sell = (pnl_pct <= STOP_LOSS_PCT) or (ticker not in kium_tickers)
         if should_sell:
             try:
-                _pdb.record_sell(
-                    int(slot_id), ticker, qty, cur_price,
-                    notes=f"[AUTO] {week_key} 키움봇 청산 (pnl {pnl_pct:.1f}%)"
-                )
+                notes = f"[AUTO] {week_key} 키움봇 청산 (pnl {pnl_pct:.1f}%)"
+                if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                    _pdb.record_sell(
+                        int(slot_id),
+                        ticker,
+                        qty,
+                        cur_price,
+                        notes=notes,
+                    )
+                else:
+                    await _execute_private_paper_write(
+                        caller="telegram-kium",
+                        action="sell",
+                        slot_id=int(slot_id),
+                        actor_id=uid,
+                        source_event_id=update.update_id,
+                        item_key=f"sell-{position_index}",
+                        ticker=ticker,
+                        quantity=int(qty),
+                        price=float(cur_price),
+                        notes=notes,
+                        user_approved=True,
+                        policy_approved=False,
+                    )
                 reason = f"손절({pnl_pct:.1f}%)" if pnl_pct <= STOP_LOSS_PCT else "교체"
                 lines_result.append(
                     f"  📤 {pos.get('name', ticker)} {qty}주 @{cur_price:,.0f}원 매도 [{reason}]"
@@ -1962,7 +2324,7 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     new_results = [r for r in results if r["ticker"] not in existing_tickers]
     alloc_per = slot_cap / len(results) if results else 0
 
-    for r in new_results:
+    for result_index, r in enumerate(new_results):
         price = r.get("current_price", 0)
         if not price or price <= 0:
             lines_result.append(f"  ⚠ {r['name']}: 현재가 없음 — 건너뜀")
@@ -1972,10 +2334,32 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
             lines_result.append(f"  ⚠ {r['name']}: 배정금액 부족 — 건너뜀")
             continue
         try:
-            _pdb.record_buy(
-                int(slot_id), r["ticker"], r["name"], qty, price,
-                notes=f"[AUTO] {week_key} 키움봇"
-            )
+            notes = f"[AUTO] {week_key} 키움봇"
+            if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                _pdb.record_buy(
+                    int(slot_id),
+                    r["ticker"],
+                    r["name"],
+                    qty,
+                    price,
+                    notes=notes,
+                )
+            else:
+                await _execute_private_paper_write(
+                    caller="telegram-kium",
+                    action="buy",
+                    slot_id=int(slot_id),
+                    actor_id=uid,
+                    source_event_id=update.update_id,
+                    item_key=f"buy-{result_index}",
+                    ticker=r["ticker"],
+                    name=r["name"],
+                    quantity=qty,
+                    price=float(price),
+                    notes=notes,
+                    user_approved=True,
+                    policy_approved=False,
+                )
             lines_result.append(
                 f"  📥 {r['name']}({r['ticker']}) {qty}주 @{price:,.0f}원 = {qty*price:,.0f}원"
             )
@@ -1994,10 +2378,12 @@ async def handle_kium_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     log.info(f"키움봇 paper 완료 — {len(lines_result)}건, week={week_key}")
 
 
-
 # ─── 콴텍봇 paper 매매 승인 콜백 (v3.29) ────────────────────────────────────
 
-async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_quant_paper_callback(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
     """InlineKeyboard 승인/거부 -> paper_db 매매 실행."""
     query = update.callback_query
     await query.answer()
@@ -2033,7 +2419,7 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
         return
 
     try:
-        slots = _pdb.list_slots()
+        slots = _list_runtime_paper_slots()
         quant_slot = next((s for s in slots if "콴텍" in s.get("name", "")), slots[0])
         slot_id = quant_slot["id"]
         slot_cap = quant_slot.get("current_capital", 0)
@@ -2043,13 +2429,11 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
         return
 
     n_recs = len(recs)
-    await query.message.reply_text(
-        f"⏳ {month_key} 리밸런싱 실행 중... ({n_recs}종목)"
-    )
+    await query.message.reply_text(f"⏳ {month_key} 리밸런싱 실행 중... ({n_recs}종목)")
 
     lines_result = []
     try:
-        existing = _pdb.list_positions(slot=int(slot_id))
+        existing = _list_runtime_paper_positions(slot=int(slot_id))
     except Exception:
         existing = []
 
@@ -2061,19 +2445,39 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
     held = {p["ticker"]: p for p in existing if p.get("quantity", 0) > 0}
 
     # 1) 퇴출 청산: 현재 보유 중이지만 새 추천에 없는 종목
-    for ticker, pos in held.items():
+    for position_index, (ticker, pos) in enumerate(held.items()):
         if ticker in rec_tickers:
-            continue   # 유지 → 손대지 않음
+            continue  # 유지 → 손대지 않음
         try:
             avg = float(pos.get("avg_price", 0))
             qty = int(pos.get("quantity", 0))
             if qty <= 0 or avg <= 0:
                 continue
             cur = await asyncio.to_thread(_get_pykrx_price, ticker) or avg
-            _pdb.record_sell(
-                int(slot_id), ticker, qty, cur,
-                notes=f"[AUTO] {month_key} 콴텍봇 퇴출청산"
-            )
+            notes = f"[AUTO] {month_key} 콴텍봇 퇴출청산"
+            if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                _pdb.record_sell(
+                    int(slot_id),
+                    ticker,
+                    qty,
+                    cur,
+                    notes=notes,
+                )
+            else:
+                await _execute_private_paper_write(
+                    caller="telegram-quant",
+                    action="sell",
+                    slot_id=int(slot_id),
+                    actor_id=uid,
+                    source_event_id=update.update_id,
+                    item_key=f"sell-{position_index}",
+                    ticker=ticker,
+                    quantity=qty,
+                    price=float(cur),
+                    notes=notes,
+                    user_approved=True,
+                    policy_approved=False,
+                )
             pname = pos.get("name", ticker)
             pnl_pct = (cur - avg) / avg * 100 if avg > 0 else 0
             lines_result.append(
@@ -2087,23 +2491,29 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
         pos = held[ticker]
         avg = float(pos.get("avg_price", 0))
         qty = int(pos.get("quantity", 0))
-        lines_result.append(f"  ♻️ {pos.get('name', ticker)} {qty}주 유지 (평균가 {avg:,.0f}원)")
+        lines_result.append(
+            f"  ♻️ {pos.get('name', ticker)} {qty}주 유지 (평균가 {avg:,.0f}원)"
+        )
 
     # 3) 신규 매수: 새 추천에 있지만 보유 안 한 것만
     new_recs = [r for r in recs if _rec_attr(r, "ticker", "") not in held]
     if new_recs:
         # 청산 후 슬롯 자본 재조회
         try:
-            _refreshed = _pdb.slot_summary(int(slot_id))
-            available_cap = float(_refreshed.get("current_capital", slot_cap)) if _refreshed else slot_cap
+            _refreshed = _runtime_paper_slot_summary(int(slot_id))
+            available_cap = (
+                float(_refreshed.get("current_capital", slot_cap))
+                if _refreshed
+                else slot_cap
+            )
         except Exception:
             available_cap = slot_cap
         alloc_per = available_cap / len(new_recs) if new_recs else 0
-        for rec in new_recs:
+        for result_index, rec in enumerate(new_recs):
             try:
                 price = _rec_attr(rec, "current_price", 0) or 0
-                name  = _rec_attr(rec, "name", "?")
-                tkr   = _rec_attr(rec, "ticker", "")
+                name = _rec_attr(rec, "name", "?")
+                tkr = _rec_attr(rec, "ticker", "")
                 if price <= 0:
                     lines_result.append(f"  ⚠ {name}: 현재가 없음 — 건너뜀")
                     continue
@@ -2111,15 +2521,39 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
                 if qty < 1:
                     lines_result.append(f"  ⚠ {name}: 배정금액 부족 — 건너뜀")
                     continue
-                _pdb.record_buy(
-                    int(slot_id), tkr, name, qty, price,
-                    notes=f"[AUTO] {month_key} 콴텍봇 신규"
-                )
+                notes = f"[AUTO] {month_key} 콴텍봇 신규"
+                if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+                    _pdb.record_buy(
+                        int(slot_id),
+                        tkr,
+                        name,
+                        qty,
+                        price,
+                        notes=notes,
+                    )
+                else:
+                    await _execute_private_paper_write(
+                        caller="telegram-quant",
+                        action="buy",
+                        slot_id=int(slot_id),
+                        actor_id=uid,
+                        source_event_id=update.update_id,
+                        item_key=f"buy-{result_index}",
+                        ticker=tkr,
+                        name=name,
+                        quantity=qty,
+                        price=float(price),
+                        notes=notes,
+                        user_approved=True,
+                        policy_approved=False,
+                    )
                 lines_result.append(
                     f"  📥 {name}({tkr}) {qty}주 @{price:,.0f}원 = {qty*price:,.0f}원"
                 )
             except Exception as ex:
-                lines_result.append(f"  ⚠ {_rec_attr(rec, 'name', '?')} 매수 실패: {ex}")
+                lines_result.append(
+                    f"  ⚠ {_rec_attr(rec, 'name', '?')} 매수 실패: {ex}"
+                )
 
     sep = "\n"
     result_msg = (
@@ -2133,12 +2567,13 @@ async def handle_quant_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_
     log.info(f"콴텍봇 paper 리밸런싱 완료 — {len(lines_result)}건, month={month_key}")
 
 
-
 # ─── IPO봇 주간 스캔 잡 + paper 승인 콜백 (v3.30) ───────────────────────────
+
 
 def _load_ipo_flag() -> dict:
     try:
         import json as _json
+
         return _json.loads(IPO_FLAG_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
@@ -2146,6 +2581,7 @@ def _load_ipo_flag() -> dict:
 
 def _save_ipo_flag(data: dict) -> None:
     import json as _json
+
     REBALANCE_FLAG_DIR.mkdir(parents=True, exist_ok=True)
     IPO_FLAG_FILE.write_text(
         _json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2155,10 +2591,13 @@ def _save_ipo_flag(data: dict) -> None:
 async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """6h 주기 호출. 매주 월요일 09:10 이후 IPO 스캔 → A등급↑ 종목만 paper 구독 알림."""
     from datetime import datetime as _dt
+
     now = _dt.now()
     if now.weekday() != 0:
         return
-    if now.hour < IPO_SCAN_HOUR or (now.hour == IPO_SCAN_HOUR and now.minute < IPO_SCAN_MINUTE):
+    if now.hour < IPO_SCAN_HOUR or (
+        now.hour == IPO_SCAN_HOUR and now.minute < IPO_SCAN_MINUTE
+    ):
         return
 
     week_key = now.strftime("%Y-W%W")
@@ -2176,7 +2615,9 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("ipo_scan 실패")
         for uid in pending:
             try:
-                await ctx.bot.send_message(chat_id=int(uid), text=f"⚠️ IPO봇 스캔 실패: {e}")
+                await ctx.bot.send_message(
+                    chat_id=int(uid), text=f"⚠️ IPO봇 스캔 실패: {e}"
+                )
             except Exception:
                 pass
         return
@@ -2209,16 +2650,20 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     for uid in pending:
         try:
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    f"✅ paper 구독 신청 ({len(hot)}종목)",
-                    callback_data=f"ipo_paper:approve:{uid}:{week_key}"
-                ),
-                InlineKeyboardButton(
-                    "❌ 건너뜀",
-                    callback_data=f"ipo_paper:skip:{uid}:{week_key}"
-                ),
-            ]])
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"✅ paper 구독 신청 ({len(hot)}종목)",
+                            callback_data=f"ipo_paper:approve:{uid}:{week_key}",
+                        ),
+                        InlineKeyboardButton(
+                            "❌ 건너뜀",
+                            callback_data=f"ipo_paper:skip:{uid}:{week_key}",
+                        ),
+                    ]
+                ]
+            )
             await ctx.bot.send_message(
                 chat_id=int(uid),
                 text=scan_text + "\n\n📌 IPO 슬롯(20%)에 paper 구독 신청하시겠습니까?",
@@ -2238,7 +2683,9 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _save_ipo_flag(flag)
 
 
-async def handle_ipo_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_ipo_paper_callback(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE
+) -> None:
     """IPO InlineKeyboard 승인/거부 → paper_db ipo_upsert 기록."""
     query = update.callback_query
     await query.answer()
@@ -2266,13 +2713,22 @@ async def handle_ipo_paper_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     await query.edit_message_reply_markup(reply_markup=None)
 
     if not hot:
-        await query.message.reply_text("저장된 IPO 스캔 결과가 없습니다. 봇이 재시작됐거나 이미 처리됐습니다.")
+        await query.message.reply_text(
+            "저장된 IPO 스캔 결과가 없습니다. 봇이 재시작됐거나 이미 처리됐습니다."
+        )
         return
 
     # IPO 슬롯 자본금으로 균등 배분
     try:
         slots = _pdb.list_slots()
-        ipo_slot = next((s for s in slots if "IPO" in s.get("name", "") or "ipo" in s.get("name", "").lower()), None)
+        ipo_slot = next(
+            (
+                s
+                for s in slots
+                if "IPO" in s.get("name", "") or "ipo" in s.get("name", "").lower()
+            ),
+            None,
+        )
         if not ipo_slot and len(slots) >= 3:
             ipo_slot = slots[2]
         elif not ipo_slot:
@@ -2360,24 +2816,35 @@ async def cmd_test_ipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         score = r.get("total_score", 0) or 0
         name = r.get("corp_name", "?")
         listing = r.get("listing_date", "-")
-        lines.append(f"{i}. {_GRADE_EMOJI.get(grade,'❓')} [{grade}] {name}  점수:{score:.0f}  상장:{listing}")
+        lines.append(
+            f"{i}. {_GRADE_EMOJI.get(grade,'❓')} [{grade}] {name}  점수:{score:.0f}  상장:{listing}"
+        )
     scan_text = "\n".join(lines)
 
     if not hot:
-        await update.message.reply_text(scan_text + "\n\n(A등급 이상 없음 — paper 구독 알림 안 함)")
+        await update.message.reply_text(
+            scan_text + "\n\n(A등급 이상 없음 — paper 구독 알림 안 함)"
+        )
         return
 
     from datetime import datetime as _dt
+
     week_key = _dt.now().strftime("%Y-W%W") + "-test"
     _PENDING_IPO[uid] = hot
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"✅ paper 구독 ({len(hot)}종목)",
-            callback_data=f"ipo_paper:approve:{uid}:{week_key}"
-        ),
-        InlineKeyboardButton("❌ 건너뜀", callback_data=f"ipo_paper:skip:{uid}:{week_key}"),
-    ]])
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"✅ paper 구독 ({len(hot)}종목)",
+                    callback_data=f"ipo_paper:approve:{uid}:{week_key}",
+                ),
+                InlineKeyboardButton(
+                    "❌ 건너뜀", callback_data=f"ipo_paper:skip:{uid}:{week_key}"
+                ),
+            ]
+        ]
+    )
     await update.message.reply_text(
         scan_text + f"\n\n📌 A등급↑ {len(hot)}종목 paper 구독?",
         reply_markup=kb,
@@ -2386,8 +2853,8 @@ async def cmd_test_ipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info(f"/test_ipo — user={uid}, hot={len(hot)}")
 
 
-
 # ─── 강제 실행 커맨드 (v3.30 개발용) ─────────────────────────────────────────
+
 
 async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/test_quant — 월간 리밸런싱 즉시 강제 실행 (요일·날짜 체크 없이)."""
@@ -2402,6 +2869,7 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if phase:  # v3.45 — 월별 국면 실측 캐시 축적(상관 분석용)
             try:
                 import trade_analytics as _ta
+
                 _ta.record_phase_month(phase)
             except Exception:
                 pass
@@ -2414,19 +2882,23 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     header = "🧪 [테스트] 콴텍봇 추천\n\n"
     _PENDING_REBALANCE[uid] = recs
     from datetime import datetime as _dt
+
     month_key = _dt.now().strftime("%Y-%m")
     _PENDING_REBALANCE_MONTH[uid] = month_key
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"✅ paper 실행 ({len(recs)}종목 균등 매수)",
-            callback_data=f"quant_paper:approve:{uid}:{month_key}"
-        ),
-        InlineKeyboardButton(
-            "❌ 건너뜀",
-            callback_data=f"quant_paper:skip:{uid}:{month_key}"
-        ),
-    ]])
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"✅ paper 실행 ({len(recs)}종목 균등 매수)",
+                    callback_data=f"quant_paper:approve:{uid}:{month_key}",
+                ),
+                InlineKeyboardButton(
+                    "❌ 건너뜀", callback_data=f"quant_paper:skip:{uid}:{month_key}"
+                ),
+            ]
+        ]
+    )
     full = header + text
     parts = split_for_telegram(full)
     for part in parts[:-1]:
@@ -2457,13 +2929,16 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     from datetime import datetime as _dt
+
     week_key = _dt.now().strftime("%Y-W%W") + "-test"
     _PENDING_KIUM[uid] = results
     _PENDING_KIUM_WEEK[uid] = week_key
 
     lines = [f"🧪 [테스트] 키움봇 스캔\n"]
     for i, r in enumerate(results, 1):
-        price_str = f"{r.get('current_price', 0):,.0f}원" if r.get("current_price") else "-"
+        price_str = (
+            f"{r.get('current_price', 0):,.0f}원" if r.get("current_price") else "-"
+        )
         lines.append(
             f"{i}. {r['name']}({r['ticker']})"
             f"  점수:{r.get('score', 0):.2f}"
@@ -2471,16 +2946,19 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
     scan_text = "\n".join(lines)
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"✅ paper 실행 ({len(results)}종목 균등 매수)",
-            callback_data=f"kium_paper:approve:{uid}:{week_key}"
-        ),
-        InlineKeyboardButton(
-            "❌ 건너뜀",
-            callback_data=f"kium_paper:skip:{uid}:{week_key}"
-        ),
-    ]])
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"✅ paper 실행 ({len(results)}종목 균등 매수)",
+                    callback_data=f"kium_paper:approve:{uid}:{week_key}",
+                ),
+                InlineKeyboardButton(
+                    "❌ 건너뜀", callback_data=f"kium_paper:skip:{uid}:{week_key}"
+                ),
+            ]
+        ]
+    )
     await update.message.reply_text(
         scan_text + "\n\n📌 paper 매매 실행?",
         reply_markup=kb,
@@ -2489,20 +2967,11 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info(f"/test_kium — user={uid}, {len(results)}종목 대기")
 
 
-
 # ─── main ────────────────────────────────────────────
 
+
 def main() -> None:
-    global _PRIVATE_WRITE_CLIENT, _PRIVATE_WRITE_EXECUTOR
-    global _PRIVATE_SCHEDULE_WRITE_EXECUTOR
-    runtime_bundle = load_private_write_runtime_bundle()
-    if runtime_bundle is not None:
-        _PRIVATE_WRITE_CLIENT = runtime_bundle.build_client()
-        _PRIVATE_WRITE_EXECUTOR = runtime_bundle.build_executor(_PRIVATE_WRITE_CLIENT)
-        if runtime_bundle.schedule_writes_enabled:
-            _PRIVATE_SCHEDULE_WRITE_EXECUTOR = runtime_bundle.build_schedule_executor(
-                _PRIVATE_WRITE_CLIENT
-            )
+    _configure_private_write_runtime(load_private_write_runtime_bundle())
     log.info(f"🤖 텔레그램 봇 시작 (허용 사용자: {len(ALLOWED_IDS)}명)")
     log.info(f"   마스터: {MASTER_MODEL} (라우팅)")
     log.info(f"   하위:   {LLM_MODEL} (지식봇)")
@@ -2521,27 +2990,29 @@ def main() -> None:
     app.add_handler(CommandHandler("note", cmd_note))
     app.add_handler(CommandHandler("notes", cmd_notes))
     app.add_handler(CommandHandler("search", cmd_search))
-    app.add_handler(CommandHandler("agent", cmd_agent))   # v3.42 범용 에이전트
+    app.add_handler(CommandHandler("agent", cmd_agent))  # v3.42 범용 에이전트
     _setup_agent_tools()
-    app.add_handler(CommandHandler("test_quant", cmd_test_quant))   # v3.30 강제 스캔
-    app.add_handler(CommandHandler("test_kium", cmd_test_kium))     # v3.30 강제 스캔
-    app.add_handler(CommandHandler("test_ipo", cmd_test_ipo))       # v3.30 강제 스캔
+    app.add_handler(CommandHandler("test_quant", cmd_test_quant))  # v3.30 강제 스캔
+    app.add_handler(CommandHandler("test_kium", cmd_test_kium))  # v3.30 강제 스캔
+    app.add_handler(CommandHandler("test_ipo", cmd_test_ipo))  # v3.30 강제 스캔
     # v3.30 IPO paper 승인 버튼
-    app.add_handler(CallbackQueryHandler(
-        handle_ipo_paper_callback, pattern=r"^ipo_paper:"
-    ))
+    app.add_handler(
+        CallbackQueryHandler(handle_ipo_paper_callback, pattern=r"^ipo_paper:")
+    )
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # v3.29 콴텍봇 paper 매매 승인 버튼
-    app.add_handler(CallbackQueryHandler(
-        handle_quant_paper_callback, pattern=r"^quant_paper:"
-    ))
+    app.add_handler(
+        CallbackQueryHandler(handle_quant_paper_callback, pattern=r"^quant_paper:")
+    )
     # v3.29 키움봇 paper 매매 승인 버튼
-    app.add_handler(CallbackQueryHandler(
-        handle_kium_paper_callback, pattern=r"^kium_paper:"
-    ))
+    app.add_handler(
+        CallbackQueryHandler(handle_kium_paper_callback, pattern=r"^kium_paper:")
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(
-        MessageHandler(~filters.TEXT & ~filters.COMMAND & ~filters.Document.ALL, handle_other)
+        MessageHandler(
+            ~filters.TEXT & ~filters.COMMAND & ~filters.Document.ALL, handle_other
+        )
     )
 
     # 일정 알림 스케줄러 (v3.6) — JobQueue가 없으면 안전 스킵
@@ -2587,7 +3058,9 @@ def main() -> None:
             first=120,
             name="ipo_weekly_scan",
         )
-        log.info("📋 IPO봇 주간 스캔 스케줄러 등록 (6h 주기 → 매주 월 09:10 A등급↑ 푸시)")
+        log.info(
+            "📋 IPO봇 주간 스캔 스케줄러 등록 (6h 주기 → 매주 월 09:10 A등급↑ 푸시)"
+        )
         # v3.31/v3.44 — 장 중 실시간 손절·익절 모니터 (5분 간격, 장외 시간 자동 스킵)
         app.job_queue.run_repeating(
             intraday_monitor_job,
@@ -2598,7 +3071,8 @@ def main() -> None:
         )
         log.info(
             f"🔍 장 중 손절·익절 모니터 등록 ({INTRADAY_MONITOR_INTERVAL_SEC//60}분 간격 "
-            "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)")
+            "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)"
+        )
         # v3.40 — 기술적 신호 봇 (1시간 간격 · 평일 09:00~15:30 · 워치리스트 1시간봉)
         app.job_queue.run_repeating(
             technical_signal_job,
@@ -2620,7 +3094,9 @@ def main() -> None:
         log.info("⏰ 봇작업 예약 디스패처 등록 (60초 검사 → 자연어로 등록한 작업 실행)")
 
     else:
-        log.warning("⚠️ JobQueue 없음 — 일정 알림 비활성. PTB[job-queue] extra 설치 필요")
+        log.warning(
+            "⚠️ JobQueue 없음 — 일정 알림 비활성. PTB[job-queue] extra 설치 필요"
+        )
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
