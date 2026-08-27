@@ -234,6 +234,28 @@ class ShareableDataClient:
         payload["market_caps"] = market_caps
         return payload
 
+    def latest_fundamentals(
+        self,
+        market: str,
+        ticker: str,
+    ) -> dict[str, Any] | None:
+        """Return one public instrument slice from the latest factor snapshot."""
+        ticker_n = normalize_ticker(ticker)
+        payload = self.latest_factors(market)
+        if payload is None:
+            return None
+        fundamentals = payload["fundamentals"].get(ticker_n, {})
+        market_cap = payload["market_caps"].get(ticker_n)
+        if not fundamentals and market_cap is None:
+            return None
+        return {
+            "market": payload["market"],
+            "ticker": ticker_n,
+            "as_of": payload["as_of"],
+            "fundamentals": dict(fundamentals),
+            "market_cap": market_cap,
+        }
+
     def latest_universe(self, market: str) -> dict[str, Any] | None:
         market_n = normalize_market(market)
         payload = self._get_json(

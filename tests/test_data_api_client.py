@@ -161,3 +161,30 @@ def test_latest_factors_validates_and_normalizes_payload():
     payload = client.latest_factors("kospi")
     assert payload["fundamentals"]["005930"] == {"BPS": 50000.0, "PBR": 1.2}
     assert payload["market_caps"]["005930"] == 4e15
+
+
+def test_latest_fundamentals_returns_only_one_normalized_instrument():
+    client = ShareableDataClient(
+        opener=lambda request, timeout: _Response(
+            {
+                "market": "KOSPI",
+                "as_of": "20260821",
+                "fundamentals": {
+                    "005930": {"BPS": "50000", "PBR": 1.2, "secret": 7},
+                    "000660": {"BPS": 60000},
+                },
+                "market_caps": {
+                    "005930": "4000000000000000",
+                    "000660": 200000000000000,
+                },
+            }
+        )
+    )
+    assert client.latest_fundamentals("kospi", "005930") == {
+        "market": "KOSPI",
+        "ticker": "005930",
+        "as_of": "20260821",
+        "fundamentals": {"BPS": 50000.0, "PBR": 1.2},
+        "market_cap": 4e15,
+    }
+    assert client.latest_fundamentals("kospi", "035420") is None
