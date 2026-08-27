@@ -793,7 +793,8 @@ async def api_strategy_compare():
     """
     try:
         import strategy_compare as sc
-        return JSONResponse(sc.overview(sc.load_roundtrips()))
+        kept, excluded = sc.load_roundtrips_with_exclusions()
+        return JSONResponse(sc.overview(kept, excluded=excluded))
     except Exception as e:
         log.exception("전략 비교 조회 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1321,6 +1322,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <button type="button" class="btn-scan" id="btn-perf-refresh">새로고침</button>
         <span id="perf-status" class="muted"></span>
       </div>
+      <p class="muted" style="margin-top:10px;">
+        <b>거래당 샤프</b>는 완결 거래 1건을 한 관측치로 본 값입니다. 실전 전환 기준의
+        「샤프 1.0」은 <b>일간</b> 수익률 기준이라 서로 다른 수치이며, 일간 마크투마켓
+        곡선이 없어 아직 산출하지 않습니다. MDD도 거래 순서 기준이라 보유 중 평가손실은
+        반영되지 않아 실제보다 얕게 나옵니다. 두 값 모두 전환 판단에 쓰지 마세요.
+      </p>
     </div>
     <div id="perf-grid" class="grid grid-auto" style="margin-bottom:20px;"></div>
     <div class="card">
@@ -1329,7 +1336,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <thead><tr>
           <th>슬롯</th><th class="num">완결 거래</th><th class="num">승률</th>
           <th class="num">실현 손익</th><th class="num">수익률</th>
-          <th class="num">MDD</th><th class="num">샤프</th>
+          <th class="num">MDD</th><th class="num">거래당 샤프</th>
           <th class="num">보유 종목</th><th class="num">미실현 매입액</th>
         </tr></thead>
         <tbody id="perf-tbody">
@@ -2130,6 +2137,33 @@ function renderStratAttribution() {
   const a = stratData.attribution;
   const box = document.getElementById("strat-attr");
   const cards = [];
+  const exc = stratData.excluded || {n: 0};
+  const flg = stratData.flagged || {n: 0};
+  if (exc.n) {
+    cards.push(`<div class="card">
+      <div class="slot-name">데이터 품질 제외 ${exc.n}건 · ${exc.pnl.toLocaleString()}원</div>
+      <p class="muted" style="margin-top:8px;">
+        진입가가 며칠 전 종가와 원 단위까지 일치한 자동 매수 배치입니다. 시장이 낸 손익이
+        아니라 <b>가격 오류가 만든 손익</b>이라 아래 표에서 뺐습니다.
+        <b>기록은 DB에 그대로 남아 있습니다.</b> 손실 배치와 수익 배치를 같은 기준으로
+        함께 뺐습니다 — 유리한 쪽만 고르면 그게 더 큰 왜곡입니다.
+      </p>
+      <div class="stat-rows" style="margin-top:10px;">
+        ${(exc.rows || []).slice(0, 12).map(r => `<span>${r.name || r.ticker} · ${(r.buy_at||"").slice(0,16)}</span>` +
+          `<span>${r.ret > 0 ? "+" : ""}${r.ret}% · ${r.pnl.toLocaleString()}원</span>`).join("")}
+      </div>
+    </div>`);
+  }
+  if (flg.n) {
+    cards.push(`<div class="card" style="margin-top:20px;">
+      <div class="slot-name">체결 가정 편향 표시 ${flg.n}건 · ${flg.pnl.toLocaleString()}원</div>
+      <p class="muted" style="margin-top:8px;">
+        장외 시각이나 개장 직후에 기록돼 <b>전 거래일 종가</b>가 진입가로 남은 건입니다.
+        판단은 실제였으므로 <b>집계에는 포함</b>했고 표시만 합니다. 앞으로는 대기 큐가
+        개장 시 실제 가격으로 다시 판단합니다.
+      </p>
+    </div>`);
+  }
   const odd = stratData.outliers || [];
   if (odd.length) {
     cards.push(`<div class="card">
@@ -2261,7 +2295,8 @@ async function loadPerformance() {
       const cls = s.total_pnl > 0 ? "up" : (s.total_pnl < 0 ? "down" : "");
       const retCls = s.total_return_pct > 0 ? "up" : (s.total_return_pct < 0 ? "down" : "");
       const wrText = s.win_rate !== null ? s.win_rate + "%" : "—";
-      const sharpeText = s.sharpe !== null ? parseFloat(s.sharpe).toFixed(2) : "—";
+      const sharpeText = (s.trade_sharpe !== null && s.trade_sharpe !== undefined)
+        ? parseFloat(s.trade_sharpe).toFixed(2) : "—";
       const color = (window.SLOT_COLOR || {})[s.slot_name] || "var(--accent)";
       return `<div class="slot" style="--slot-color:${color}">
         <div class="slot-name">${s.slot_name}</div>
@@ -2271,7 +2306,7 @@ async function loadPerformance() {
           <span>승률</span><span>${wrText}</span>
           <span>수익률</span><span class="delta ${retCls}">${s.total_return_pct > 0 ? "+" : ""}${s.total_return_pct}%</span>
           <span>MDD</span><span>${s.max_drawdown_pct}%</span>
-          <span>샤프</span><span>${sharpeText}</span>
+          <span>거래당 샤프</span><span>${sharpeText}</span>
           <span>보유</span><span>${s.n_open_positions}종목</span>
           <span>완결</span><span>${s.n_closed}건</span>
         </div>
@@ -2290,7 +2325,7 @@ async function loadPerformance() {
         <td class="num delta ${retCls}">
           ${s.total_return_pct > 0 ? "+" : ""}${s.total_return_pct}%</td>
         <td class="num">${s.max_drawdown_pct}%</td>
-        <td class="num">${s.sharpe !== null ? s.sharpe : "—"}</td>
+        <td class="num">${(s.trade_sharpe !== null && s.trade_sharpe !== undefined) ? s.trade_sharpe : "—"}</td>
         <td class="num">${s.n_open_positions}</td>
         <td class="num">${s.open_cost.toLocaleString()}원</td>
       </tr>`;

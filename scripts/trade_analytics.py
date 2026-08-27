@@ -106,6 +106,22 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
     return out
 
 
+def roundtrips_for_analysis(trades: list[dict], rules_path=None) -> tuple[list[dict], list[dict]]:
+    """분석용 라운드트립 — 데이터 품질 규칙을 적용한 (집계 대상, 제외분).
+
+    `compute_roundtrips`는 기록 그대로를 돌려주는 순수 함수로 남긴다. 품질 판단이
+    섞이면 "원본이 무엇이었나"를 볼 수 없게 된다. 성과·전략 분석은 이쪽을 쓴다.
+    슬롯 일일 한도처럼 **오늘의 실제 위험**을 보는 곳은 원본을 그대로 쓴다.
+    """
+    rts = compute_roundtrips(trades)
+    try:
+        import data_quality
+        return data_quality.apply(rts, rules_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("데이터 품질 규칙 적용 실패 — 원본으로 진행: %s", exc)
+        return rts, []
+
+
 # ─── 1) 매매 습관 (순수) ─────────────────────────────
 
 

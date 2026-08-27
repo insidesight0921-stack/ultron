@@ -2454,6 +2454,27 @@ async def handle_kium_paper_callback(
     # v3.49: 진입 근거 태그 — 스캔 순위는 필터 전 원본 목록 기준이라야 의미가 있다
     _rank_of = {r.get("ticker"): i + 1 for i, r in enumerate(results)}
 
+
+    # v3.51: 진입가 스테일 관문. 한 배치의 여러 종목이 같은 과거 날짜 종가와 원 단위까지
+    # 일치하면 오래된 가격이다(2026-06-08 사고: 8종목이 4거래일 전 종가와 일치 → −678만원).
+    # 틀린 진입가로 사면 손절·성과·회고가 전부 오염되므로 매수만 막는다. 매도는 막지 않는다.
+    if new_results:
+        try:
+            import price_sanity as _ps
+
+            _v = await asyncio.to_thread(
+                _ps.check_batch,
+                [{"ticker": r["ticker"], "name": r["name"],
+                  "price": r.get("current_price", 0)} for r in new_results],
+                _now_kst().strftime("%Y%m%d"))
+            if _v["stale"]:
+                lines_result.append(_ps.format_block(_v))
+                new_results = []
+            elif _v.get("warnings"):
+                lines_result.append(_ps.format_warnings(_v))
+        except Exception:
+            log.warning("진입가 점검 실패 — 통과시킴", exc_info=True)
+
     # v3.50: 장외 신호는 체결하지 않고 큐에 넣는다.
     # 21시의 "현재가"는 당일 종가라 실전에서는 그 가격에 살 수 없다.
     import pending_orders as _po
@@ -2686,6 +2707,24 @@ async def handle_quant_paper_callback(
         except Exception:
             available_cap = slot_cap
         alloc_per = available_cap / len(new_recs) if new_recs else 0
+
+        # v3.51: 진입가 스테일 관문 (키움 경로와 같은 이유)
+        if new_recs:
+            try:
+                import price_sanity as _ps
+
+                _v = await asyncio.to_thread(
+                    _ps.check_batch,
+                    [{"ticker": _rec_attr(r, "ticker", ""), "name": _rec_attr(r, "name", "?"),
+                      "price": _rec_attr(r, "current_price", 0) or 0} for r in new_recs],
+                    _now_kst().strftime("%Y%m%d"))
+                if _v["stale"]:
+                    lines_result.append(_ps.format_block(_v))
+                    new_recs = []
+                elif _v.get("warnings"):
+                    lines_result.append(_ps.format_warnings(_v))
+            except Exception:
+                log.warning("진입가 점검 실패 — 통과시킴", exc_info=True)
 
         # v3.50: 장외 신호는 체결하지 않고 큐에 넣는다(키움 경로와 같은 이유)
         import pending_orders as _po

@@ -444,7 +444,8 @@ def load_roundtrips(db_path=None) -> list[dict]:
 
     trades = (paper_db.list_trades(limit=100000) if db_path is None
               else paper_db.list_trades(limit=100000, db_path=db_path))
-    return ta.compute_roundtrips(trades)
+    kept, _ = ta.roundtrips_for_analysis(trades)   # 가격 오류 건은 성과에서 뺀다
+    return kept
 
 
 def note_path(vault_root: Path, week: str) -> Path:

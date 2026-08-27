@@ -227,10 +227,21 @@ def outliers(rts: list[dict], threshold: float = OUTLIER_RET) -> list[dict]:
     return sorted(out, key=lambda r: -abs(r["ret"]))
 
 
-def overview(rts: list[dict], *, rules_since: date = RULES_SINCE) -> dict:
+def overview(rts: list[dict], *, rules_since: date = RULES_SINCE,
+             excluded: Optional[list] = None) -> dict:
     """모든 축 + 귀속 커버리지 + 데이터 품질 경고(순수). 탭 A가 한 번에 받는 형태."""
     odd = outliers(rts)
+    try:
+        import data_quality
+        exc_summary = data_quality.summary(list(excluded or []))
+        flagged = data_quality.summary(
+            [dict(r, excluded_kind=r.get("flag_kind"),
+                  excluded_reason=r.get("flag_reason")) for r in data_quality.flagged(rts)])
+    except Exception:  # noqa: BLE001
+        exc_summary = flagged = {"n": 0, "pnl": 0, "kinds": [], "rows": []}
     return {
+        "excluded": exc_summary,
+        "flagged": flagged,
         "axes": {a: compare(rts, a, rules_since=rules_since) for a in AXES},
         "attribution": attribution(rts),
         "outliers": odd,
@@ -245,6 +256,12 @@ def format_overview(ov: dict) -> str:
     if not ov["n"]:
         return "📊 전략 비교: 완결된 거래가 아직 없습니다."
     lines = [f"📊 전략별 성과 비교 (완결 {ov['n']}건)"]
+    exc = ov.get("excluded") or {}
+    if exc.get("n"):
+        lines.append(f"🧹 데이터 품질 제외 {exc['n']}건({exc['pnl']:,}원) — 기록은 DB에 남아 있습니다.")
+    flg = ov.get("flagged") or {}
+    if flg.get("n"):
+        lines.append(f"🏷 체결 가정 편향 표시 {flg['n']}건 — 집계에는 포함되어 있습니다.")
     if ov.get("outliers"):
         lines.append(
             f"⚠️ 수익률 이상치 {len(ov['outliers'])}건({ov['outlier_pnl']:,}원)이 "
@@ -277,7 +294,17 @@ def load_roundtrips(db_path=None) -> list[dict]:
     import trade_analytics as ta
 
     kwargs = {"db_path": db_path} if db_path else {}
-    return ta.compute_roundtrips(paper_db.list_trades(limit=100000, **kwargs))
+    kept, _ = ta.roundtrips_for_analysis(paper_db.list_trades(limit=100000, **kwargs))
+    return kept
+
+
+def load_roundtrips_with_exclusions(db_path=None) -> tuple[list[dict], list[dict]]:
+    """(집계 대상, 제외분). 화면이 '무엇을 뺐는지'를 말할 수 있어야 한다."""
+    import paper_db
+    import trade_analytics as ta
+
+    kwargs = {"db_path": db_path} if db_path else {}
+    return ta.roundtrips_for_analysis(paper_db.list_trades(limit=100000, **kwargs))
 
 
 def _cli() -> int:
@@ -286,7 +313,7 @@ def _cli() -> int:
     ap.add_argument("--axis", choices=sorted(AXES), help="한 축만 자세히 보기")
     args = ap.parse_args()
 
-    rts = load_roundtrips(args.db)
+    rts, excluded = load_roundtrips_with_exclusions(args.db)
     if args.axis:
         c = compare(rts, args.axis)
         print(f"■ {c['title']} (전체 {c['total']['n']}건)")
@@ -296,7 +323,7 @@ def _cli() -> int:
                   f"승률 {r['win_rate']}% · 평균 {r['avg_ret']}% · "
                   f"PF {r['profit_factor']} · 전체 대비 {r['edge_ret']}%p")
         return 0
-    print(format_overview(overview(rts)))
+    print(format_overview(overview(rts, excluded=excluded)))
     return 0
 
 

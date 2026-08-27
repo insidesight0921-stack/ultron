@@ -393,24 +393,40 @@ class TestPerformanceStats:
         assert q["n_open_positions"] == 2
         assert q["open_cost"] == 5 * 80_000 + 3 * 200_000
 
-    def test_sharpe_requires_at_least_two_trades(self, seeded):
-        # 완결 거래 1건 → sharpe = None
+    def test_trade_sharpe_requires_at_least_two_trades(self, seeded):
+        # 완결 거래 1건 → trade_sharpe = None
         pdb.record_buy("콴텍", "005930", "삼성전자",
                        quantity=10, price=80_000, fees=0, db_path=seeded)
         pdb.record_sell("콴텍", "005930", quantity=10, price=90_000, fees=0,
                         db_path=seeded)
         stats = pdb.performance_stats(db_path=seeded)
         q = next(s for s in stats if s["slot_name"] == "콴텍")
-        assert q["sharpe"] is None, "거래 1건으로는 표준편차 계산 불가 → None이어야 함"
+        assert q["trade_sharpe"] is None, "거래 1건으로는 표준편차 계산 불가 → None이어야 함"
 
-        # 완결 거래 2건 → sharpe 숫자
+        # 완결 거래 2건 → trade_sharpe 숫자
         pdb.record_buy("콴텍", "000660", "SK하이닉스",
                        quantity=5, price=200_000, fees=0, db_path=seeded)
         pdb.record_sell("콴텍", "000660", quantity=5, price=210_000, fees=0,
                         db_path=seeded)
         stats2 = pdb.performance_stats(db_path=seeded)
         q2 = next(s for s in stats2 if s["slot_name"] == "콴텍")
-        assert q2["sharpe"] is not None
+        assert q2["trade_sharpe"] is not None
+
+    def test_annualized_sharpe_is_not_reported(self, seeded):
+        """거래 1건을 거래일 1일로 보고 √252를 곱하던 값은 실제의 몇 배였다.
+
+        실전 전환 기준의 「샤프 1.0」은 일간 수익률 기준이다. 일간 마크투마켓 곡선이
+        생기기 전까지는 비워 둔다 — 틀린 값이 채워져 있으면 기준을 통과한 것처럼 보인다.
+        """
+        for ticker, buy, sell in (("005930", 80_000, 90_000), ("000660", 200_000, 210_000)):
+            pdb.record_buy("콴텍", ticker, ticker, quantity=5, price=buy, fees=0,
+                           db_path=seeded)
+            pdb.record_sell("콴텍", ticker, quantity=5, price=sell, fees=0,
+                            db_path=seeded)
+        q = next(s for s in pdb.performance_stats(db_path=seeded)
+                 if s["slot_name"] == "콴텍")
+        assert q["sharpe"] is None
+        assert abs(q["trade_sharpe"]) < 3, "연환산 배수가 남아 있으면 값이 부풀어 있다"
 
     def test_other_slots_unaffected(self, seeded):
         pdb.record_buy("콴텍", "005930", "삼성전자",
