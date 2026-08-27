@@ -44,10 +44,12 @@ ai-agent/
 목표 아키텍처 진행 상태:
 
 - [x] Phase 1: Private/Shareable 분류·보호·물리 분리 (`private-v1`)
-- [ ] Phase 2: 데이터 API 서버화 (Private 조회 + watchlist 쓰기 운영 전환 완료, 일정 비설치 activation candidate까지 검증)
-- [ ] Phase 3: Shareable 도구만 MCP 서버로 노출
+- [x] Phase 2: 데이터 API 서버화 (Private 읽기·watchlist·일정·Paper write 운영 전환 완료)
+- [x] Phase 3: Shareable 도구만 MCP 서버로 노출 (로컬 STDIO MVP 6-tool·Codex 실제 호출·완료 감사 통과)
 
 목표 아키텍처의 Phase 1 데이터 경계는 [`docs/DATA_CLASSIFICATION.md`](docs/DATA_CLASSIFICATION.md)에서 관리합니다. 실제 전환 결과와 보존·롤백 절차는 [`docs/STORAGE_MIGRATION.md`](docs/STORAGE_MIGRATION.md), Phase 2 API 경계와 점진 전환 순서는 [`docs/API_SERVERIZATION.md`](docs/API_SERVERIZATION.md), 분리된 Private 인증 계약은 [`docs/PRIVATE_API_CONTRACT.md`](docs/PRIVATE_API_CONTRACT.md)를 따릅니다. 일정 사용자 mutation과 알림 스케줄러의 분리 소유권은 [`docs/SCHEDULE_WRITE_CUTOVER_DRY_RUN.md`](docs/SCHEDULE_WRITE_CUTOVER_DRY_RUN.md), 실제 전환·롤백 순서는 [`docs/SCHEDULE_WRITE_CUTOVER_RUNBOOK.md`](docs/SCHEDULE_WRITE_CUTOVER_RUNBOOK.md)에 고정합니다.
+
+Phase 3의 MCP tool allowlist·비노출 경계·stdio 실측은 [`docs/MCP_SERVERIZATION.md`](docs/MCP_SERVERIZATION.md)에서 관리합니다.
 
 관심종목은 `storage_paths.py`가 선택한 Private DB에만 저장되며 Git/MCP에 노출하지 않습니다.
 

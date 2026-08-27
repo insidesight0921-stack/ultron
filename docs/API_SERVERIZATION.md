@@ -369,14 +369,78 @@ Private 경로 404, 서버 종료 후 디스크 폴백 280행, `server_stopped=t
   `paper.db`는 1/4/4/169, scoped table 0, integrity ok를 유지한다. 검증 중 외부 서비스 재시작과
   함께 raw SHA-256이 `7a94a9ddd021…→adcb98c80723…`로 바뀌어 논리 불변만 확인했고
   byte-for-byte 불변은 주장하지 않는다.
+- Paper readiness/cutover dry-run: 현재 `paper-ui-direct`, Telegram intraday·kium·quant direct
+  네 runtime writer와 operator CLI rollback-only 경계를 고정했다. 목표 DB writer는
+  `private-data-api` 하나이고 paper-ui/kium/quant는 명시 승인, intraday는 sell-only 정책 승인인
+  정확한 caller matrix를 요구한다. fresh `paper.db` backup·필수 schema·permit·동일 DB·무폴백,
+  consumer 먼저 direct를 끄고 API writer를 나중에 올리는 fail-closed cutover와 역순 rollback을
+  신규 29개 테스트로 검증했다. dry-run에는 execute/apply/service 제어가 없다.
+- Paper fresh clone rollback rehearsal: 검증된 영구 backup `20260826T193342+0900`의
+  `paper.db`만 `/private/tmp/ultron-paper-rollback-G33xRZ`로 복제했다. active clone에서 API
+  buy/sell과 legacy direct buy/sell을 각각 1회 적용해 trades 169→173, positions 4, 원래 자본
+  복원을 확인했고 API 거래가 rollback 뒤에도 남았다. 별도 emergency restore는 backup
+  signature와 완전히 일치했다. 운영 source와 backup의 byte·논리 signature는 전후 동일하고
+  산출물은 보존했다. rehearsal direct 호출은 일곱 번째 인벤토리 항목이지만 target mode가
+  `verified-backup-clone-only`이고 운영 writer/caller에는 포함되지 않는다.
 - Private API는 query string이 기본 접근 로그에 기록되는 경로를 차단하기 위해 Uvicorn
   access log를 끈다. 발견 당시 token은 즉시 교체·무효화했고 현재 token은 plist·로그에 없다.
-- 전체 회귀 테스트: 1,606개 통과. (Paper consumer 신규 11개와 병행 변경 테스트 포함)
+- Paper v3 atomic runtime/candidate: 기존 v1/v2 schema는 그대로 수용하고 v3에서만 Paper
+  capability를 추가한다. `assistant.db`와 `paper.db`는 같은 검증 manifest를 사용하지만 서로
+  다른 permit fingerprint를 가지며, caller policy 4개와 legacy runtime writer 4개가 정확히
+  일치해야 한다. API·Paper UI·Telegram 세 loader가 같은 combined bundle을 재검증했다.
+  미설치 후보는 `/private/tmp/ultron-paper-candidate-jiBwT8/`의 700 staging/600 파일에
+  `installed=false`로 보존했다. 운영 고정 파일은 v2 `f0c651775aa4…` 그대로이고 Paper block이
+  없어 서비스·환경·route를 활성화하지 않았다. 운영 Paper DB는 1/4/4/169·scoped table 0·
+  integrity ok, raw SHA `dfee7901dffd…`다.
+- Paper production pre-cutover wiring: Private API는 v3 bundle에서만 Paper writer·permit·5개
+  route를 함께 구성한다. Paper UI는 브라우저 주문 event UUID와 explicit-user 승인을, Telegram
+  intraday는 5분 cycle·position ordinal과 sell-only policy 승인을, kium/quant callback은 update·
+  batch ordinal과 explicit-user 승인을 executor에 결합한다. v3에서 Paper 읽기·쓰기는 Private
+  client만 사용하며 API 오류 시 direct SQLite fallback이 없다. v1/v2는 기존 경로를 유지한다.
+  운영 bundle은 계속 v2라 새 경로는 미활성이고 서비스 재시작도 하지 않았다.
+- Paper 운영 v3 cutover: 2026-08-27 09:37:47 KST 영구 backup
+  `20260827T093747+0900`과 fresh clone rollback rehearsal을 검증한 뒤 bundle
+  `1298bf8648a…`를 고정 경로에 원자적으로 설치했다. Paper UI→Telegram consumer를 먼저,
+  Private API writer를 마지막에 재시작했다. 중간 요청은 HTTP 500으로 fail-closed됐고 direct
+  DB fallback은 없었다. 전환 후 Paper write capability와 5개 route, 같은 identity의 무데이터
+  preflight 200×2 동일 응답을 확인했다. 운영 DB는 portfolio/slots/positions/trades 1/4/4/169,
+  scoped resource-version/intent/audit 1/0/0, integrity ok다. 실제 사용자 승인 매매 E2E만 남았다.
+- Paper 실사용 mutation E2E: 콴텍 대우건설(047040) 1주 매수가 09:54:26과 09:54:45에
+  서로 다른 source identity로 각각 pending→approved→applied됐다. 최신 요청을 같은 ID로
+  apply replay한 결과 `replayed=true`, resource version 2였고 거래 행은 추가되지 않았다.
+  현재 positions/trades 5/171, scoped intent/audit 2/7, 대우건설 2주·평균원가 20,630.9원,
+  integrity ok다. API 멱등성은 정상이나 두 제출이 별도 사용자 event이므로 단일/복수 주문
+  의도 확인 전에는 자동 보정하지 않는다.
+- Paper UI 연속 제출 방지: 요청 처리 중에는 매수·매도 버튼을 모두 잠그고, 성공한 주문과
+  side/slot/ticker/name/quantity/price/notes가 같은 주문은 60초 동안 새 identity 생성을 막는다.
+  오류·성공 모두 finally에서 버튼을 복구한다. Paper UI 51 tests와 shared worktree 전체
+  1,721 tests가 통과했고 PID 27567 재시작 뒤 운영 HTML의 두 guard 로드를 확인했다. DB는
+  positions/trades 5/171·intent/audit 2/7로 불변이다.
+- Paper direct 접근 최종 판정: inventory 7개를 AST로 다시 대조하고, 운영 대상 Paper UI·
+  Telegram intraday/kium/quant의 direct 호출은 모두 executor가 `None`인 legacy 분기 안에서만
+  가능함을 회귀 테스트로 고정했다. 현재 v3 bundle은 `PrivateDataClient`와
+  `PaperTradeWriteExecutor`를 구성하므로 운영 direct 분기는 도달 불가다. operator CLI는
+  rollback-only, rehearsal은 verified-backup-clone-only 경계다.
+- 전체 회귀 테스트: 현재 shared worktree **1,736개 통과**. `signal_bot`의 개인 관심종목은
+  8091 Private API에서만 읽고 실패 시 DB로 폴백하지 않는다. `slot_diversify` CLI도 Paper
+  포지션을 Private API에서만 읽으며, 관심종목 seed 도구는 direct write를 제거해 미리보기
+  전용으로 보존했다.
 
 현재 전환은 코드·설정 변경 상태이며 아직 커밋하지 않았다. Shareable 긴급 롤백은
 Telegram/Paper plist의 `AI_AGENT_DATA_API_ENABLED`, Private 조회 롤백은 Telegram/Paper의
 `AI_AGENT_PRIVATE_API_ENABLED`를 제거하거나 `0`으로 바꾸고 해당 소비 서비스를 재시작하면
 된다. Private watchlist 쓰기는 API 장애 시 direct DB 폴백이 없으며,
 `PRIVATE_WRITE_CUTOVER_RUNBOOK.md`의 writer 소유권 rollback 순서를 따른다. 일정 쓰기는
-`SCHEDULE_WRITE_CUTOVER_RUNBOOK.md`를 따른다. 다음 서버화 쓰기 단위는 Paper UI·Telegram·
-intraday writer 소유권을 비중첩 operation으로 고정하는 readiness/rollback 경계다.
+`SCHEDULE_WRITE_CUTOVER_RUNBOOK.md`를 따른다. Paper는 v3 운영 writer와 API-only consumer로
+전환됐고 실사용 pending→approved→applied 및 동일 ID replay도 확인됐다. 다음 서버화 검증
+단위는 별도 identity로 접수된 대우건설 매수 2건의 사용자 의도를 확인해 필요 시 보정하는
+것이다. 잔여 direct SQLite 접근의 운영/rollback/test 경계 판정은 완료됐다.
+
+사용자는 보정 선택 대신 다음 단계 진행을 지시했다. 파괴적 수정 없이 대우건설 2주를 보존해
+Phase 2를 종료했고, Phase 3 첫 단위로 `shareable_mcp.py` stdio 서버를 구현했다. MCP는
+Shareable API 8090만 호출하며 공개 필드만 재선별한 5개 read-only tool을 명시 등록한다.
+최종 로컬 MVP는 시장 전체 factor snapshot을 노출하지 않고 단일 종목 fundamentals만 추가한
+6개 tool이다. 실제 stdio protocol `2026-07-28`·삼성전자 instrument/fundamentals 조회와 전체
+1,732 tests, 완료 감사 `ready=true`를 확인했다. 이어 소비자 direct DB 드리프트 정리 후
+전체 **1,736 tests**가 통과했다. 상세 경계는
+`MCP_SERVERIZATION.md`를 따른다.
