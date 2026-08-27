@@ -244,7 +244,7 @@ def test_rows_carry_tags_and_are_sorted_by_sell_date():
 def test_frontmatter_is_flat_scalars_for_dataview():
     rep = wr.build_report([_rt("키움", 100, "2026-08-25")], as_of=date(2026, 8, 26))
     fm = wr.frontmatter(rep, data_file="/x/2026-W35.json")
-    assert "schema: 1" in fm and "closed_n: 1" in fm and "pnl: 100" in fm
+    assert f"schema: {wr.SCHEMA_VERSION}" in fm and "closed_n: 1" in fm and "pnl: 100" in fm
     assert 'slots: ["키움"]' in fm
     assert "cum_pnl: 100" in fm
     assert "data_file: /x/2026-W35.json" in fm
@@ -276,3 +276,48 @@ def test_write_report_is_idempotent(tmp_path):
     second = wr.write_report(rep, vault_root=tmp_path / "v", state_root=tmp_path / "s")
     assert first == second
     assert len(list((tmp_path / "s" / "paper_weekly").glob("*"))) == 1
+
+
+def test_dagger_footnote_only_when_marked_rows_exist():
+    small = wr.build_report([_rt("키움", 100, "2026-08-25")], as_of=date(2026, 8, 26))
+    assert "†" in wr.render_note(small)                 # 1건 → †
+
+    enough = [_rt("키움", 10, "2026-08-25") for _ in range(wr.MIN_SAMPLE_N)]
+    text = wr.render_note(wr.build_report(enough, as_of=date(2026, 8, 26)))
+    assert "†" not in text                              # 각주도 함께 사라진다
+
+
+# ─── v2: 규칙 변경 경계 분리 ─────────────────────────
+
+
+def test_cumulative_since_separates_rule_change():
+    """규칙 변경 전 손실이 현재 성적을 덮어쓰지 않아야 한다."""
+    rts = [_rt("키움", -1000, "2026-07-01"),      # 옛 규칙
+           _rt("키움", 300, "2026-08-25")]        # 현 규칙
+    rep = wr.build_report(rts, as_of=date(2026, 8, 26), rules_since=date(2026, 7, 23))
+    assert rep["cumulative"]["pnl"] == -700       # 전체는 여전히 마이너스
+    assert rep["cumulative_since"]["n"] == 1 and rep["cumulative_since"]["pnl"] == 300
+
+
+def test_rules_since_none_disables_split():
+    rep = wr.build_report([_rt("키움", 300, "2026-08-25")], as_of=date(2026, 8, 26),
+                          rules_since=None)
+    assert rep["cumulative_since"] is None
+    assert "cum_since_n" not in wr.frontmatter(rep)
+
+
+def test_render_shows_both_cumulative_lines():
+    rts = [_rt("키움", -1000, "2026-07-01"), _rt("키움", 300, "2026-08-25")]
+    text = wr.render_note(wr.build_report(rts, as_of=date(2026, 8, 26),
+                                          rules_since=date(2026, 7, 23)))
+    assert "**전체**" in text and "**현 규칙 이후**" in text
+    assert "2026-07-23~" in text
+
+
+def test_frontmatter_carries_since_fields():
+    rts = [_rt("키움", -1000, "2026-07-01"), _rt("키움", 300, "2026-08-25")]
+    fm = wr.frontmatter(wr.build_report(rts, as_of=date(2026, 8, 26),
+                                        rules_since=date(2026, 7, 23)))
+    assert "rules_since: 2026-07-23" in fm
+    assert "cum_since_pnl: 300" in fm
+    assert "cum_pnl: -700" in fm

@@ -88,6 +88,15 @@ STOCHRSI_OVERBOUGHT = 0.80
 VOLUME_SPIKE_MULT = 1.2      # 평소 대비 거래량 1.2배 이상
 BAND_WALK_BARS = 2           # 연속 N봉 하단 이탈 시 Band Walk
 
+# 개인 관심종목(assistant.db) 병합 — "종목 추가해줘"로 넣은 종목도 신호 대상이 된다.
+# 자산배분 15종은 비중이 있는 포트폴리오, 관심종목은 비중 없이 관찰만 하므로 weight=0.
+PERSONAL_STRATEGY = "stochrsi"      # 개별 종목 기본 지표(과매도 + 거래량 골든크로스)
+PERSONAL_ASSET_CLASS = "관심종목"
+
+# 신호 발생 기록 — 판정은 나중에 하더라도 기록은 지금부터 남긴다.
+# 가격은 나중에 되살릴 수 있지만 "그때 어떤 신호가 떴고 MTF에 걸렸는지"는 못 되살린다.
+SIGNAL_LOG_NAME = "signal_log.jsonl"
+
 # 멀티 타임프레임(MTF) 필터 — 상위 TF(일봉) 추세를 거스르는 신호 억제
 MTF_ENABLED = True
 TREND_MA = 20                # 일봉 추세 판정 이동평균 기간
@@ -538,26 +547,122 @@ def parse_watchlist_from_wiki(md_text: str) -> list:
     return out
 
 
-def load_watchlist() -> list:
-    """wiki 파싱 우선, 실패 시 코드 내장 fallback. 로깅으로 출처 표시."""
+def personal_watch_items(items: Optional[list] = None, *, private_client=None) -> list:
+    """개인 관심종목 → WatchItem 목록.
+
+    items를 주면 그대로 변환(테스트용), 없으면 Private API에서 읽는다.
+    소비자 경로는 assistant.db를 직접 열거나 API 실패 시 DB로 폴백하지 않는다.
+    조회 실패는 경고만 남기고 빈 목록 — 관심종목 때문에 자산배분 스캔이 멈추면 안 된다.
+    """
+    if items is None:
+        try:
+            if private_client is None:
+                from private_data_api_client import PrivateDataClient
+                private_client = PrivateDataClient()
+            items = private_client.list_watchlist()
+        except Exception as e:
+            log.warning(
+                "Private API 관심종목 조회 실패(%s) — 자산배분만 스캔",
+                type(e).__name__,
+            )
+            return []
+    out = []
+    for it in items:
+        ticker = getattr(it, "ticker", None) or (it.get("ticker") if isinstance(it, dict) else None)
+        if not ticker:
+            continue
+        name = getattr(it, "name", None) or (it.get("name") if isinstance(it, dict) else None)
+        out.append(WatchItem(name=name or ticker, weight=0.0,
+                             strategy=PERSONAL_STRATEGY,
+                             asset_class=PERSONAL_ASSET_CLASS, code=ticker))
+    return out
+
+
+def merge_watchlists(base: list, personal: list) -> list:
+    """자산배분 + 관심종목 병합. 이미 자산배분에 있는 코드는 중복 추가하지 않는다."""
+    if not personal:
+        return base          # 관심종목이 없으면 원본 그대로(불필요한 복사 없음)
+    seen = {item.code for item in base if item.code}
+    seen |= {item.yf_override for item in base if item.yf_override}
+    merged = list(base)
+    for item in personal:
+        if item.code and item.code in seen:
+            continue
+        merged.append(item)
+        if item.code:
+            seen.add(item.code)
+    return merged
+
+
+def load_watchlist(include_personal: bool = True) -> list:
+    """wiki 파싱 우선, 실패 시 코드 내장 fallback. 로깅으로 출처 표시.
+
+    include_personal=True면 개인 관심종목을 뒤에 덧붙인다(중복 코드는 제외).
+    """
+    base = _FALLBACK_WATCHLIST
     try:
         if WIKI_PORTFOLIO_PATH.exists():
             md = WIKI_PORTFOLIO_PATH.read_text(encoding="utf-8")
             wl = parse_watchlist_from_wiki(md)
             if wl:
                 log.debug(f"워치리스트 wiki 파싱 {len(wl)}종목")
-                return wl
-            log.warning("wiki 파싱 0종목 — fallback 사용")
+                base = wl
+            else:
+                log.warning("wiki 파싱 0종목 — fallback 사용")
     except Exception as e:
         log.warning(f"wiki 파싱 실패({e}) — fallback 사용")
-    return _FALLBACK_WATCHLIST
+    if not include_personal:
+        return base
+    return merge_watchlists(base, personal_watch_items())
 
 
 # ─── 실행 ───────────────────────────────────────────
 
 
-def scan() -> list[Signal]:
-    """워치리스트 전체 스캔 → 신호 리스트(actionable만)."""
+def build_log_record(sig: "Signal", *, at: str, trend: str = "neutral",
+                     suppressed: bool = False, asset_class: str = "") -> dict:
+    """신호 1건 → 기록 한 줄(순수).
+
+    **억제된 신호도 남긴다.** MTF 필터가 값을 더하는지 빼는지는 억제분이 있어야 잴 수 있다.
+    """
+    return {
+        "at": at,
+        "ticker": sig.ticker,
+        "name": sig.name,
+        "asset_class": asset_class,
+        "strategy": sig.strategy,
+        "action": sig.action,
+        "price": sig.price,
+        "weight": sig.weight,
+        "trend": trend,
+        "suppressed": bool(suppressed),
+        "reason": sig.reason,
+    }
+
+
+def append_log(path, record: dict) -> None:
+    """JSONL 한 줄 추가. 기록 실패가 스캔을 막지 않도록 예외를 삼킨다."""
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"신호 기록 실패({e}) — 스캔은 계속")
+
+
+def default_log_path() -> Path:
+    return PATHS.private_state_dir / SIGNAL_LOG_NAME
+
+
+def scan(log_path=None, now: Optional[str] = None) -> list[Signal]:
+    """워치리스트 전체 스캔 → 신호 리스트(actionable만).
+
+    평가된 신호는 억제분까지 log_path(JSONL)에 기록한다.
+    """
+    if log_path is None:
+        log_path = default_log_path()
+    stamp = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     signals: list[Signal] = []
     for item in load_watchlist():
         ticker = item.code or (None if item.yf_override else resolve_etf_ticker(item.name))
@@ -570,10 +675,15 @@ def scan() -> list[Signal]:
         candles = _fetch_intraday_raw(sym)
         if not candles:
             continue
-        sig = evaluate(item, candles, ticker or sym)
-        if sig and MTF_ENABLED:
+        raw = evaluate(item, candles, ticker or sym)
+        sig, trend = raw, "neutral"
+        if raw and MTF_ENABLED:
             trend = compute_trend(_fetch_daily_raw(sym) or [])
-            sig = apply_mtf_filter(sig, trend)
+            sig = apply_mtf_filter(raw, trend)
+        if raw:
+            append_log(log_path, build_log_record(
+                raw, at=stamp, trend=trend, suppressed=(sig is None),
+                asset_class=item.asset_class))
         if sig:
             signals.append(sig)
     return signals
@@ -587,13 +697,36 @@ def format_signals(signals: list[Signal]) -> str:
     signals = sorted(signals, key=lambda s: (order.get(s.action, 9), -s.weight))
     lines = ["📡 *기술적 신호* (1시간봉)\n"]
     for s in signals:
+        tag = "관심" if not s.weight else f"{s.weight:.0f}%"
         lines.append(
-            f"{s.emoji} *{s.action}* {s.name} ({s.weight:.0f}%) [{s.strategy}]\n"
+            f"{s.emoji} *{s.action}* {s.name} ({tag}) [{s.strategy}]\n"
             f"  {s.reason}\n"
             f"  현재 {s.price:,.0f}"
         )
     lines.append("\n_보조 신호일 뿐 — 거시 방향성 우선. 실주문 없음._")
     return "\n".join(lines)
+
+
+def format_watchlist(items: Optional[list] = None) -> str:
+    """현재 신호 대상 종목 목록(순수). '어떤 종목 보고 있어?'에 답하는 텍스트."""
+    if items is None:
+        items = load_watchlist()
+    if not items:
+        return "신호 대상 종목이 없습니다."
+    groups: dict[str, list] = {}
+    for it in items:
+        groups.setdefault(it.asset_class, []).append(it)
+    lines = [f"📡 *기술적 신호 대상* ({len(items)}종목)\n"]
+    for cls, rows in groups.items():
+        lines.append(f"*{cls}*")
+        for it in rows:
+            code = it.code or it.yf_override or "-"
+            tag = "관심" if not it.weight else f"{it.weight:.0f}%"
+            lines.append(f"  • {it.name} ({code}) · {tag} · {it.strategy}")
+        lines.append("")
+    lines.append("_자산배분 종목은 `핵심_자산배분_포트폴리오.md`, "
+                 "관심종목은 `종목 추가/삭제`로 관리합니다._")
+    return "\n".join(lines).strip()
 
 
 def run() -> tuple[str, list[Signal]]:

@@ -259,7 +259,7 @@ def test_strategy_from_text_mapping():
 
 def test_load_watchlist_fallback_on_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(sb, "WIKI_PORTFOLIO_PATH", tmp_path / "nope.md")
-    wl = sb.load_watchlist()
+    wl = sb.load_watchlist(include_personal=False)
     assert wl is sb._FALLBACK_WATCHLIST
     assert sum(item.weight for item in wl) == 95.0
 
@@ -268,7 +268,7 @@ def test_load_watchlist_parses_real_file(monkeypatch, tmp_path):
     f = tmp_path / "p.md"
     f.write_text(_SAMPLE_MD, encoding="utf-8")
     monkeypatch.setattr(sb, "WIKI_PORTFOLIO_PATH", f)
-    wl = sb.load_watchlist()
+    wl = sb.load_watchlist(include_personal=False)
     assert len(wl) == 5 and wl is not sb._FALLBACK_WATCHLIST
 
 
@@ -326,3 +326,143 @@ def test_scan_mtf_suppresses(monkeypatch):
     monkeypatch.setattr(sb, "_fetch_daily_raw", lambda *a, **k: [200 - i for i in range(40)])
     sigs = sb.scan()
     assert all(s.action not in sb._BULLISH for s in sigs)
+
+
+# ─── 관심종목 병합 (v2) ─────────────────────────────
+
+
+class _Item:
+    def __init__(self, ticker, name):
+        self.ticker, self.name = ticker, name
+
+
+def test_personal_watch_items_maps_to_watchitem():
+    items = sb.personal_watch_items([_Item("005930", "삼성전자")])
+    assert len(items) == 1
+    it = items[0]
+    assert it.code == "005930" and it.name == "삼성전자"
+    assert it.weight == 0 and it.strategy == sb.PERSONAL_STRATEGY
+    assert it.asset_class == sb.PERSONAL_ASSET_CLASS
+
+
+def test_personal_watch_items_accepts_dict_rows():
+    items = sb.personal_watch_items([{"ticker": "000660", "name": "SK하이닉스"}])
+    assert items[0].code == "000660"
+
+
+def test_personal_watch_items_skips_rows_without_ticker():
+    assert sb.personal_watch_items([{"name": "이름만"}]) == []
+
+
+def test_personal_watch_items_falls_back_to_ticker_as_name():
+    assert sb.personal_watch_items([_Item("005930", None)])[0].name == "005930"
+
+
+def test_personal_watch_items_reads_private_api_without_db_fallback():
+    class Client:
+        def list_watchlist(self):
+            return [{"ticker": "005930", "name": "삼성전자", "created_at": "now"}]
+
+    items = sb.personal_watch_items(private_client=Client())
+    assert [(item.code, item.name) for item in items] == [("005930", "삼성전자")]
+
+
+def test_personal_watch_items_private_api_failure_is_empty():
+    class Client:
+        def list_watchlist(self):
+            raise RuntimeError("private details must not leak")
+
+    assert sb.personal_watch_items(private_client=Client()) == []
+
+
+def test_merge_appends_personal_after_base():
+    base = [sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110")]
+    personal = sb.personal_watch_items([_Item("005930", "삼성전자")])
+    merged = sb.merge_watchlists(base, personal)
+    assert [i.code for i in merged] == ["102110", "005930"]
+
+
+def test_merge_skips_duplicate_code():
+    """자산배분에 이미 있는 종목을 관심종목에 넣어도 두 번 스캔하지 않는다."""
+    base = [sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110")]
+    personal = sb.personal_watch_items([_Item("102110", "TIGER 200")])
+    merged = sb.merge_watchlists(base, personal)
+    assert len(merged) == 1 and merged[0].weight == 20   # 자산배분 비중이 유지된다
+
+
+def test_merge_without_personal_returns_base_identity():
+    base = [sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110")]
+    assert sb.merge_watchlists(base, []) is base
+
+
+def test_load_watchlist_can_skip_personal(monkeypatch):
+    monkeypatch.setattr(sb, "personal_watch_items", lambda *a, **k: 1 / 0)
+    sb.load_watchlist(include_personal=False)   # 호출되지 않아야 한다
+
+
+def test_format_shows_interest_tag_for_zero_weight():
+    sig = sb.Signal("삼성전자", "005930", "StochRSI", "매수", "🟢", "테스트", 70000.0, 0.0)
+    assert "(관심)" in sb.format_signals([sig])
+
+
+# ─── 신호 기록 (v2) ─────────────────────────────────
+
+
+def test_build_log_record_fields():
+    sig = sb.Signal("TIGER 200", "102110", "볼린저", "매수", "🟢", "하단 터치", 41000.0, 20.0)
+    rec = sb.build_log_record(sig, at="2026-08-26 10:00:00", trend="up",
+                              asset_class="국내주식_지수")
+    assert rec["ticker"] == "102110" and rec["action"] == "매수"
+    assert rec["trend"] == "up" and rec["suppressed"] is False
+    assert rec["price"] == 41000.0
+
+
+def test_append_log_writes_jsonl(tmp_path):
+    import json as _json
+    path = tmp_path / "state" / "signal_log.jsonl"
+    sb.append_log(path, {"a": 1})
+    sb.append_log(path, {"a": 2})
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
+    assert [_json.loads(x)["a"] for x in lines] == [1, 2]
+
+
+def test_append_log_swallows_errors(tmp_path):
+    """기록 실패가 스캔을 막으면 안 된다."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir", encoding="utf-8")
+    sb.append_log(blocker / "sub" / "log.jsonl", {"a": 1})   # 예외 없이 통과
+
+
+def test_scan_logs_suppressed_signal(tmp_path, monkeypatch):
+    import json as _json
+    item = sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110")
+    sig = sb.Signal("TIGER 200", "102110", "볼린저", "매수", "🟢", "하단 터치", 41000.0, 20.0)
+    monkeypatch.setattr(sb, "load_watchlist", lambda *a, **k: [item])
+    monkeypatch.setattr(sb, "_fetch_intraday_raw", lambda *a, **k: {"closes": [1] * 40})
+    monkeypatch.setattr(sb, "_fetch_daily_raw", lambda *a, **k: [1] * 40)
+    monkeypatch.setattr(sb, "evaluate", lambda *a, **k: sig)
+    monkeypatch.setattr(sb, "compute_trend", lambda *a, **k: "down")
+    monkeypatch.setattr(sb, "apply_mtf_filter", lambda s, t: None)   # 억제
+    path = tmp_path / "signal_log.jsonl"
+
+    out = sb.scan(log_path=path, now="2026-08-26 10:00:00")
+
+    assert out == []                                   # 발송 대상은 없지만
+    rec = _json.loads(path.read_text(encoding="utf-8").strip())
+    assert rec["suppressed"] is True and rec["trend"] == "down"   # 기록은 남는다
+
+
+def test_format_watchlist_groups_and_marks_interest():
+    items = [
+        sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110"),
+        sb.WatchItem("삼성전자", 0, "stochrsi", sb.PERSONAL_ASSET_CLASS, code="005930"),
+    ]
+    text = sb.format_watchlist(items)
+    assert "2종목" in text
+    assert "TIGER 200 (102110) · 20% · bollinger" in text
+    assert "삼성전자 (005930) · 관심 · stochrsi" in text
+    assert "국내주식_지수" in text and sb.PERSONAL_ASSET_CLASS in text
+
+
+def test_format_watchlist_empty():
+    assert "없습니다" in sb.format_watchlist([])

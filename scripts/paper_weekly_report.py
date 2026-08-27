@@ -32,7 +32,12 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("paper_weekly_report")
 
-SCHEMA_VERSION = 1  # frontmatter·JSON 구조 버전. 필드가 바뀌면 올린다
+SCHEMA_VERSION = 2  # frontmatter·JSON 구조 버전. 필드가 바뀌면 올린다
+
+# 청산 규칙이 바뀐 날. 이 앞뒤 성과를 한 덩어리로 집계하면 "지금 규칙이 통하는지"를
+# 알 수 없다 — 옛 규칙의 손실이 현재 성적을 덮어쓴다. exit_rules(v3.44) 도입 이후
+# 기록에 [손절선]·[트레일링] 같은 태그가 붙기 시작한 시점을 경계로 쓴다.
+RULES_SINCE = date(2026, 7, 23)
 MIN_SAMPLE_N = 5    # 이 미만 라벨은 참고용(†)
 TREND_WEEKS = 4     # 노트에 함께 싣는 최근 주차 수
 MYQUANT_SLOT = "마이퀀트"
@@ -157,6 +162,7 @@ def build_report(
     as_of: date,
     slot_order: Optional[list[str]] = None,
     trend_weeks: int = TREND_WEEKS,
+    rules_since: Optional[date] = RULES_SINCE,
 ) -> dict:
     """라운드트립 → 주간 리포트 데이터(순수). 파일·DB를 모른다.
 
@@ -191,6 +197,10 @@ def build_report(
     # 누적: 이 주 끝까지 청산된 전부. 같은 as_of면 항상 같은 값(결정론).
     cumulative_rts = [r for r in all_rts
                       if (sold := _date_of(r.get("sell_at"))) and sold <= end]
+    # 현 규칙 이후만 따로 — 규칙 변경 전후를 섞으면 전방 검증이 안 된다
+    since_rts = ([r for r in cumulative_rts
+                  if (sold := _date_of(r.get("sell_at"))) and sold >= rules_since]
+                 if rules_since else [])
 
     return {
         "schema": SCHEMA_VERSION,
@@ -203,6 +213,8 @@ def build_report(
         "idle_slots": idle,
         "tags": tags,
         "cumulative": group_stats(cumulative_rts),
+        "rules_since": rules_since,
+        "cumulative_since": group_stats(since_rts) if rules_since else None,
         "trend": _trend(all_rts, as_of, trend_weeks),
         "rows": [_row(r) for r in sorted(period, key=lambda r: (r.get("sell_at") or ""))],
         "principles": _principles_for([s["slot"] for s in slots], bool(tags)),
@@ -285,6 +297,15 @@ def frontmatter(report: dict, data_file: Optional[str] = None) -> str:
         f"slots: {_yaml_list(s['slot'] for s in report['slots'])}",
         f"myquant_tags: {_yaml_list(t['tag'] for t in report['tags'])}",
     ]
+    since = report.get("cumulative_since")
+    if since is not None and report.get("rules_since"):
+        lines += [
+            f"rules_since: {report['rules_since'].isoformat()}",
+            f"cum_since_n: {since['n']}",
+            f"cum_since_pnl: {since['pnl']}",
+            f"cum_since_win_rate: {_num(since['win_rate'])}",
+            f"cum_since_profit_factor: {_num(since['profit_factor'])}",
+        ]
     if data_file:
         lines.append(f"data_file: {data_file}")
     lines.append("---")
@@ -360,11 +381,24 @@ def render_note(report: dict, data_file: Optional[str] = None) -> str:
     lines += [
         "## 누적 (개시 ~ 이번 주)",
         "",
-        f"완결 {cum['n']}건 · 실현손익 {_won(cum['pnl'])} · 승률 {_pct(cum['win_rate'])} "
-        f"· 손익비 {_num(cum['payoff'])} · Profit Factor {_num(cum['profit_factor'])}",
-        "",
-        f"† 표본 {MIN_SAMPLE_N}건 미만, 참고용. 이 수치로 원칙을 고치지 않는다.",
-        "",
+        f"- **전체**: 완결 {cum['n']}건 · 실현손익 {_won(cum['pnl'])} · 승률 {_pct(cum['win_rate'])} "
+        f"· 손익비 {_num(cum['payoff'])} · PF {_num(cum['profit_factor'])}",
+    ]
+    since = report.get("cumulative_since")
+    if since and report.get("rules_since"):
+        lines += [
+            f"- **현 규칙 이후** ({report['rules_since'].isoformat()}~): 완결 {since['n']}건 "
+            f"· 실현손익 {_won(since['pnl'])} · 승률 {_pct(since['win_rate'])} "
+            f"· 손익비 {_num(since['payoff'])} · PF {_num(since['profit_factor'])}",
+            "",
+            "> 청산 규칙이 바뀐 뒤 기록만 따로 본 것이 **전방 검증**이다. 규칙 변경 전후를",
+            "> 한 덩어리로 보면 옛 규칙의 손실이 지금 성적을 덮어쓴다.",
+        ]
+    lines.append("")
+    # † 안내는 실제로 †가 붙은 행이 있을 때만. 없는 각주는 읽는 사람을 헷갈리게 한다.
+    if any(row["n"] < MIN_SAMPLE_N for row in report["slots"] + report["tags"]):
+        lines += [f"† 표본 {MIN_SAMPLE_N}건 미만, 참고용. 이 수치로 원칙을 고치지 않는다.", ""]
+    lines += [
         "## 적용 원칙",
         "",
     ]
@@ -393,6 +427,8 @@ def build_data_payload(report: dict) -> dict:
         "slots": report["slots"],
         "myquant_tags": report["tags"],
         "cumulative": report["cumulative"],
+        "rules_since": report["rules_since"].isoformat() if report.get("rules_since") else None,
+        "cumulative_since": report.get("cumulative_since"),
         "trend": report["trend"],
         "roundtrips": report["rows"],
     }
@@ -461,6 +497,7 @@ def _cli() -> None:
     parser.add_argument("--vault", help="obsidian-vault 경로")
     parser.add_argument("--state", help="분석용 JSON 저장 루트 (기본: data/private/state)")
     parser.add_argument("--db", help="paper.db 경로 (기본: 운영 경로)")
+    parser.add_argument("--since", help=f"현 규칙 시작일 YYYY-MM-DD (기본: {RULES_SINCE})")
     parser.add_argument("--stdout", action="store_true", help="파일로 쓰지 않고 노트만 출력")
     args = parser.parse_args()
 
@@ -469,6 +506,7 @@ def _cli() -> None:
         load_roundtrips(args.db),
         as_of=as_of,
         slot_order=["콴텍", "키움", "IPO", MYQUANT_SLOT],
+        rules_since=_date_of(args.since) or RULES_SINCE,
     )
 
     if args.stdout:
