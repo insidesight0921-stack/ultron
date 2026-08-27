@@ -2357,6 +2357,9 @@ async def handle_kium_paper_callback(
         new_results = []          # 매도·교체는 이미 위에서 끝났고, 신규 진입만 막는다
         lines_result.append(f"  🛑 {hard_stop}")
 
+    # v3.49: 진입 근거 태그 — 스캔 순위는 필터 전 원본 목록 기준이라야 의미가 있다
+    _rank_of = {r.get("ticker"): i + 1 for i, r in enumerate(results)}
+
     for result_index, r in enumerate(new_results):
         price = r.get("current_price", 0)
         if not price or price <= 0:
@@ -2368,6 +2371,14 @@ async def handle_kium_paper_callback(
             continue
         try:
             notes = f"[AUTO] {week_key} 키움봇"
+            try:  # 태그는 부가 정보다 — 실패해도 매수를 막지 않는다
+                import entry_tags
+
+                notes = entry_tags.format_note(
+                    notes, entry_tags.kium_tags(r, _rank_of.get(r["ticker"]))
+                )
+            except Exception:
+                log.warning("키움 진입 태그 생성 실패", exc_info=True)
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
                 _pdb.record_buy(
                     int(slot_id),
@@ -2531,6 +2542,15 @@ async def handle_quant_paper_callback(
     # 3) 신규 매수: 새 추천에 있지만 보유 안 한 것만
     new_recs = [r for r in recs if _rec_attr(r, "ticker", "") not in held]
 
+    # v3.49: 진입 근거 태그 — 국면은 스캔 때 기록해 둔 캐시에서 읽는다(추가 조회 없음)
+    _entry_phase = None
+    try:
+        import trade_analytics as _ta_phase
+
+        _entry_phase = _ta_phase.load_phase_months().get(month_key)
+    except Exception:
+        log.warning("국면 캐시 조회 실패", exc_info=True)
+
     hard_stop = _slot_hard_stop_reason(slot_name)
     if hard_stop:
         new_recs = []             # 퇴출 청산은 이미 끝났고, 신규 진입만 막는다
@@ -2560,6 +2580,14 @@ async def handle_quant_paper_callback(
                     lines_result.append(f"  ⚠ {name}: 배정금액 부족 — 건너뜀")
                     continue
                 notes = f"[AUTO] {month_key} 콴텍봇 신규"
+                try:  # 태그는 부가 정보다 — 실패해도 매수를 막지 않는다
+                    import entry_tags
+
+                    notes = entry_tags.format_note(
+                        notes, entry_tags.quant_tags(rec, _entry_phase)
+                    )
+                except Exception:
+                    log.warning("콴텍 진입 태그 생성 실패", exc_info=True)
                 if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
                     _pdb.record_buy(
                         int(slot_id),
