@@ -49,6 +49,7 @@ LABEL_LOG_ROTATE="com.hyunjun.ai-agent.log-rotation"
 LABEL_PRIVATE_BACKUP="com.hyunjun.ai-agent.private-backup"
 LABEL_PAPER_WEEKLY="com.hyunjun.ai-agent.paper-weekly-report"
 LABEL_SIGNAL_REVIEW="com.hyunjun.ai-agent.signal-review"
+LABEL_PAPER_MONTHLY="com.hyunjun.ai-agent.paper-monthly-report"
 
 PLIST_DATA_API="$LA_DIR/${LABEL_DATA_API}.plist"
 PLIST_PRIVATE_DATA_API="$LA_DIR/${LABEL_PRIVATE_DATA_API}.plist"
@@ -61,6 +62,7 @@ PLIST_LOG_ROTATE="$LA_DIR/${LABEL_LOG_ROTATE}.plist"
 PLIST_PRIVATE_BACKUP="$LA_DIR/${LABEL_PRIVATE_BACKUP}.plist"
 PLIST_PAPER_WEEKLY="$LA_DIR/${LABEL_PAPER_WEEKLY}.plist"
 PLIST_SIGNAL_REVIEW="$LA_DIR/${LABEL_SIGNAL_REVIEW}.plist"
+PLIST_PAPER_MONTHLY="$LA_DIR/${LABEL_PAPER_MONTHLY}.plist"
 
 LOG_DATA_API_OUT="$LOG_DIR/data_api.out.log"
 LOG_DATA_API_ERR="$LOG_DIR/data_api.err.log"
@@ -82,6 +84,8 @@ LOG_PAPER_WEEKLY_OUT="$LOG_DIR/paper_weekly_report.out.log"
 LOG_PAPER_WEEKLY_ERR="$LOG_DIR/paper_weekly_report.err.log"
 LOG_SIGNAL_REVIEW_OUT="$LOG_DIR/signal_review.out.log"
 LOG_SIGNAL_REVIEW_ERR="$LOG_DIR/signal_review.err.log"
+LOG_PAPER_MONTHLY_OUT="$LOG_DIR/paper_monthly_report.out.log"
+LOG_PAPER_MONTHLY_ERR="$LOG_DIR/paper_monthly_report.err.log"
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
 
@@ -578,6 +582,54 @@ write_plist_signal_review() {
 EOF
 }
 
+write_plist_paper_monthly() {
+    # StartCalendarInterval: 매월 1일 17:00 — **직전 달**을 집계한다(--last-month).
+    # 월초에 도는 이유: 말일에 돌리면 그날 장 마감 뒤 청산분이 빠질 수 있고,
+    # 달이 바뀐 뒤라야 그 달의 자산곡선이 확정된다.
+    cat > "$PLIST_PAPER_MONTHLY" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL_PAPER_MONTHLY}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${SCRIPTS}/paper_monthly_report.py</string>
+        <string>--last-month</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>17</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT}</string>
+    <key>StandardOutPath</key>
+    <string>${LOG_PAPER_MONTHLY_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_PAPER_MONTHLY_ERR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>ko_KR.UTF-8</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+</dict>
+</plist>
+EOF
+}
+
 check_telegram_env() {
     if [ ! -f "$PROJECT/.env" ]; then
         echo "⚠️  .env 없음 — 텔레그램 봇 비활성화"
@@ -660,6 +712,11 @@ cmd_install() {
         echo "  ✅ plist 생성: $PLIST_SIGNAL_REVIEW"
     fi
 
+    if [ -f "$SCRIPTS/paper_monthly_report.py" ]; then
+        write_plist_paper_monthly
+        echo "  ✅ plist 생성: $PLIST_PAPER_MONTHLY"
+    fi
+
     write_plist_data_api
     echo "  ✅ plist 생성: $PLIST_DATA_API"
 
@@ -729,6 +786,7 @@ cmd_start() {
     [ -f "$PLIST_PRIVATE_BACKUP" ] && launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
     [ -f "$PLIST_PAPER_WEEKLY" ] && launchctl unload "$PLIST_PAPER_WEEKLY" 2>/dev/null || true
     [ -f "$PLIST_SIGNAL_REVIEW" ] && launchctl unload "$PLIST_SIGNAL_REVIEW" 2>/dev/null || true
+    [ -f "$PLIST_PAPER_MONTHLY" ] && launchctl unload "$PLIST_PAPER_MONTHLY" 2>/dev/null || true
     sleep 1
 
     # 로드
@@ -771,6 +829,10 @@ cmd_start() {
         launchctl load "$PLIST_SIGNAL_REVIEW"
         echo "  ✅ 신호 적중률 갱신 등록 (매일 16:40)"
     fi
+    if [ -f "$PLIST_PAPER_MONTHLY" ]; then
+        launchctl load "$PLIST_PAPER_MONTHLY"
+        echo "  ✅ 페이퍼 월간 성과 리포트 등록 (매월 1일 17:00, 직전 달 집계)"
+    fi
     echo "▶️  서비스 시작됨"
     sleep 2
     cmd_status
@@ -808,6 +870,9 @@ cmd_stop() {
     if [ -f "$PLIST_SIGNAL_REVIEW" ]; then
         launchctl unload "$PLIST_SIGNAL_REVIEW" 2>/dev/null && echo "⏸  신호 적중률 갱신 중지" || echo "(신호 적중률 갱신 이미 중지됨)"
     fi
+    if [ -f "$PLIST_PAPER_MONTHLY" ]; then
+        launchctl unload "$PLIST_PAPER_MONTHLY" 2>/dev/null && echo "⏸  페이퍼 월간 리포트 중지" || echo "(페이퍼 월간 리포트 이미 중지됨)"
+    fi
 }
 
 cmd_restart() {
@@ -833,6 +898,7 @@ cmd_status() {
     [ -f "$PLIST_LOG_ROTATE" ] && LABELS+=("$LABEL_LOG_ROTATE")
     [ -f "$PLIST_PRIVATE_BACKUP" ] && LABELS+=("$LABEL_PRIVATE_BACKUP")
     [ -f "$PLIST_SIGNAL_REVIEW" ] && LABELS+=("$LABEL_SIGNAL_REVIEW")
+    [ -f "$PLIST_PAPER_MONTHLY" ] && LABELS+=("$LABEL_PAPER_MONTHLY")
 
     for label in "${LABELS[@]}"; do
         info=$(launchctl list | grep "$label" || echo "")
