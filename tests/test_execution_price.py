@@ -192,3 +192,32 @@ def _buy_callbacks(src):
     quant_start = src.index("async def handle_quant_paper_callback")
     rest = src[quant_start + 10:]
     return kium, src[quant_start:quant_start + 10 + rest.index("\nasync def ")]
+
+
+# ─── 수동 매수 화면 (2026-08-28) ─────────────────────
+#
+# 자동 매수를 막아도 사람이 UI에서 일봉 종가로 사면 같은 기록이 남는다.
+# 수동은 사람이 정하므로 막지 않되, 무엇을 보고 있는지는 밝힌다.
+
+
+def test_quote_endpoint_prefers_realtime():
+    src = (SCRIPTS / "paper_ui.py").read_text(encoding="utf-8")
+    start = src.index("async def api_quote")
+    fn = src[start:src.index("@app.", start)]
+    assert "_naver_realtime_price" in fn
+    assert fn.index("_naver_realtime_price") < fn.index("from pykrx import stock")
+
+
+def test_quote_endpoint_labels_which_source_it_used():
+    """일봉 종가를 '현재가'라는 이름으로 돌려주면 사람이 구분할 수 없다."""
+    src = (SCRIPTS / "paper_ui.py").read_text(encoding="utf-8")
+    start = src.index("async def api_quote")
+    fn = src[start:src.index("@app.", start)]
+    assert '"source": "realtime"' in fn and '"source": "daily_close"' in fn
+    assert '"stale": True' in fn and '"stale": False' in fn
+
+
+def test_quote_ui_warns_on_a_stale_price():
+    src = (SCRIPTS / "paper_ui.py").read_text(encoding="utf-8")
+    assert "quote-source" in src
+    assert "장중에는 이 가격에 살 수 없습니다" in src

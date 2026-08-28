@@ -331,9 +331,51 @@ async def api_trades(slot: str | None = None, limit: int = 100):
     return JSONResponse(_list_trades(slot=slot, limit=limit))
 
 
+def _naver_realtime_price(ticker: str):
+    """네이버 polling 실시간 현재가. 실패 시 None.
+
+    telegram_bot과 같은 소스를 쓴다 — 매수 화면이 봇과 다른 가격을 보여주면
+    사람이 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    import json as _json
+    from urllib.request import Request, urlopen
+
+    urls = (
+        "https://polling.finance.naver.com/api/realtime/domestic/stock/{t}",
+        "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{t}",
+    )
+    for url in urls:
+        try:
+            import exit_rules
+            req = Request(url.format(t=ticker), headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=3) as r:
+                price = exit_rules.parse_naver_price(_json.loads(r.read().decode("utf-8")))
+            if price:
+                return float(price)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 @app.get("/api/paper/quote/{ticker}")
 async def api_quote(ticker: str):
-    """pykrx 현재가 (최근 영업일 종가). 외부 호출 실패 시 410."""
+    """현재가 조회 — 네이버 실시간 우선, 실패 시 pykrx 최근 영업일 종가.
+
+    v3.54: **어느 쪽인지 함께 돌려준다.** 이전에는 일봉 종가를 "현재가"라는 이름으로
+    돌려주고 있었다. 그 값을 그대로 진입가로 기록하면 장중에 실제로는 살 수 없었던
+    가격에 산 것이 된다 — 자동 매수에서 −678만원짜리 사고를 낸 것과 같은 형태다.
+    수동 매수는 사람이 보고 정하므로 막지 않되, **무엇을 보고 있는지는 밝힌다.**
+    """
+    live = _naver_realtime_price(str(ticker).strip())
+    if live:
+        name = str(ticker)
+        try:
+            from pykrx import stock
+            name = stock.get_market_ticker_name(str(ticker).strip())
+        except Exception:  # noqa: BLE001
+            pass
+        return JSONResponse({"ticker": str(ticker), "name": name, "price": live,
+                             "source": "realtime", "stale": False})
     try:
         from pykrx import stock
         from datetime import datetime, timedelta
@@ -358,6 +400,8 @@ async def api_quote(ticker: str):
                         "ticker": str(ticker),
                         "name": name,
                         "price": price,
+                        "source": "daily_close",
+                        "stale": True,
                     }
                 )
         return JSONResponse({"error": "종가 컬럼 없음"}, status_code=500)
@@ -1052,6 +1096,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <span style="display:flex; gap:8px;">
                 <input type="text" name="ticker" id="ticker" placeholder="005930" required style="flex:1">
                 <button type="button" class="btn-quote" id="btn-quote">현재가</button>
+                <span id="quote-source" class="muted" style="font-size:12px;"></span>
               </span>
             </label>
           </div>
@@ -1606,8 +1651,21 @@ $("btn-quote").addEventListener("click", async () => {
     const d = await r.json();
     $("name").value = d.name || "";
     $("price").value = Math.round(d.price);
-    toast(`${d.name} 현재가 ${fmt(Math.round(d.price))}원`);
-  } catch (e) { toast("현재가 실패: " + e.message, true); }
+    const badge = document.getElementById("quote-source");
+    if (d.stale) {
+      badge.textContent = "⚠ 실시간 시세를 얻지 못해 최근 영업일 종가입니다 — 장중에는 이 가격에 살 수 없습니다";
+      badge.className = "delta down";
+      toast(`${d.name} ${fmt(Math.round(d.price))}원 (전일 종가)`, true);
+    } else {
+      badge.textContent = "실시간";
+      badge.className = "muted";
+      toast(`${d.name} 현재가 ${fmt(Math.round(d.price))}원`);
+    }
+  } catch (e) {
+    const badge = document.getElementById("quote-source");
+    if (badge) { badge.textContent = ""; }
+    toast("현재가 실패: " + e.message, true);
+  }
 });
 
 const PAPER_DUPLICATE_GUARD_MS = 60_000;
