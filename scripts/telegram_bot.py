@@ -82,6 +82,8 @@ from quant_bot import (
 from ipo_bot import (
     run as ipo_run,
     scan_upcoming as ipo_scan,
+    diagnose_scan as ipo_diagnose_scan,       # v3.56 침묵 실패 구분
+    missing_factors as ipo_missing_factors,   # v3.56 무엇이 비었는지
 )  # noqa: E402  # v3.26 IPO봇
 import signal_bot  # noqa: E402  # v3.40 기술적 신호 봇
 from news_bot import run as news_run  # noqa: E402  # v3.41 뉴스봇
@@ -2985,12 +2987,45 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     flag.pop("_zero_weeks", None)       # 수집이 되면 연속 카운트를 끊는다
 
-    # A등급 이상만 필터
-    hot = [r for r in results if r.get("grade", "?") in IPO_MIN_GRADE]
+    # v3.56: **'등급 미달'과 '등급 산출 자체가 불가'를 구분한다.**
+    # 수집 0건 경고를 붙이고 나서 실제로 돌려 보니, 수집은 되고 있었고 후보 10건이
+    # 전부 [?] 산출불가였다(확정 요소 1/5 — 주관사만). 필터는 A등급 이상만
+    # 통과시키므로 이 상태는 영원히 0건이 된다. 판단을 못 한 것을 "매력 없음"으로
+    # 넘기면, 고장이 정상처럼 보인다.
+    diag = ipo_diagnose_scan(results, IPO_MIN_GRADE)
+    hot = diag["hot"]
+
+    if diag["verdict"] == "all_ungraded":
+        ung_weeks = sorted(set(flag.get("_ungraded_weeks", [])) | {week_key})
+        flag["_ungraded_weeks"] = ung_weeks[-12:]
+        streak = len(ung_weeks)
+        gaps = ipo_missing_factors(results)
+        log.warning("IPO봇: 후보 %d건 전원 등급 산출불가 (연속 %d주) — 미확보 요소: %s",
+                    diag["n"], streak, ", ".join(gaps) or "?")
+        if streak >= 2:
+            for uid in pending:
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=int(uid),
+                        text=(f"⚠️ IPO봇: 후보 {diag['n']}건이 {streak}주 연속 "
+                              f"**전원 등급 산출불가**입니다.\n"
+                              f"수집은 되고 있으나 채점 입력이 없어 판단을 못 하는 "
+                              f"상태입니다 (매력 없음이 아닙니다).\n"
+                              f"미확보 요소: {', '.join(gaps) or '확인 필요'}\n"
+                              f"점검: python3 scripts/ipo_bot.py scan"))
+                except Exception:
+                    pass
+        for uid in pending:
+            pushed.add(uid)
+        flag[week_key] = sorted(pushed)
+        _save_ipo_flag(flag)
+        return
+
+    flag.pop("_ungraded_weeks", None)    # 등급이 나오면 연속 카운트를 끊는다
+
     if not hot:
-        grades = ", ".join(sorted({r.get("grade", "?") for r in results}))
         log.info("IPO봇: 후보 %d건이나 A등급 이상 없음 (등급: %s) — 알림 생략",
-                 len(results), grades)
+                 diag["n"], ", ".join(diag["grades"]))
         for uid in pending:
             pushed.add(uid)
         flag[week_key] = sorted(pushed)

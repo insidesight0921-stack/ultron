@@ -102,15 +102,8 @@ def test_send_empty_text_sends_nothing():
 #
 # launchd가 띄운 스크립트는 봇 프로세스의 환경을 물려받지 못한다.
 # 첫 실행에서 "환경변수 없음 — 발송 건너뜀"으로 조용히 아무것도 안 갔다.
-
-
-def test_parse_env_file_handles_comments_quotes_and_blanks():
-    text = '\n'.join(['# 주석', '', 'A=1', 'B = "두 번째"', "C='셋'", '깨진줄', 'D='])
-    assert tn.parse_env_file(text) == {"A": "1", "B": "두 번째", "C": "셋", "D": ""}
-
-
-def test_parse_env_file_keeps_equals_inside_values():
-    assert tn.parse_env_file("URL=https://x?a=1&b=2")["URL"] == "https://x?a=1&b=2"
+# 파싱·파일 처리 자체는 env_config로 옮겼다(tests/test_env_config.py).
+# 여기서는 **텔레그램 키가 실제로 채워지는지**만 본다.
 
 
 def test_ensure_env_fills_missing_keys(tmp_path, monkeypatch):
@@ -153,23 +146,3 @@ def test_explicit_arguments_skip_the_env_file(tmp_path):
     env = tmp_path / ".env"          # 존재하지 않는다
     assert tn.send("x", token="T", chat_ids=["9"], env_path=env,
                    poster=lambda *a: True) == 1
-
-
-def test_a_coding_error_is_not_disguised_as_a_missing_env_file(monkeypatch, tmp_path):
-    """넓은 except가 NameError를 삼켜 '.env 없음'으로 보이게 만든 적이 있다.
-
-    발송이 왜 안 되는지 알 수 없게 되므로, 파일 오류(OSError)만 조용히 넘어간다.
-    """
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    env = tmp_path / ".env"
-    env.write_text("TELEGRAM_BOT_TOKEN=abc\n", encoding="utf-8")
-
-    def boom(_text):
-        raise NameError("Path is not defined")
-
-    monkeypatch.setattr(tn, "parse_env_file", boom)
-    try:
-        tn.ensure_env(env)
-    except NameError:
-        return                     # 그대로 올라와야 한다
-    raise AssertionError("코딩 오류가 조용히 묻혔다")

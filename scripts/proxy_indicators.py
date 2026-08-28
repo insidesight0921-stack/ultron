@@ -24,6 +24,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import env_config
+
 log = logging.getLogger("proxy_indicators")
 
 MA_WINDOW = 200        # 200일선
@@ -156,6 +158,10 @@ def format_snapshot(snap: dict) -> str:
             lines.append(f"      ※ {i['note']}")
     if s["missing"]:
         lines.append(f"  미확보: {', '.join(s['missing'])} — 값을 만들어 채우지 않습니다.")
+    if snap.get("missing_env"):
+        # "수집 실패"와 "키가 없어서 시도조차 못 함"은 고쳐야 할 곳이 다르다.
+        lines.append(f"  ⚙️ 자격 정보 미설정: {', '.join(snap['missing_env'])} "
+                     f"(.env 확인 — 수집 실패가 아니라 시도 자체를 못 한 것)")
     lines.append("  ※ 방향 임계값은 가설이며 표본이 쌓이면 재조정합니다.")
     return "\n".join(lines)
 
@@ -179,12 +185,27 @@ def _kospi_series() -> tuple[list[float], Optional[str]]:
 
 
 def _finance_value(name: str) -> tuple[Optional[float], Optional[str]]:
+    """finance_bot 지표 → (값, 기준일). **실패는 None으로 돌려주고 이유를 남긴다.**
+
+    `fetch_indicator`는 실패 시 값 없이 `{"error": ...}`를 돌려준다. 처음엔 그 dict를
+    성공으로 보고 `float(item.get("value"))`를 불러 `TypeError: ... not 'NoneType'`을
+    냈다 — 진짜 원인(API 키 미로딩)이 형변환 오류에 가려졌다. 값이 없으면 오류
+    문구를 그대로 남긴다.
+    """
     try:
         import finance_bot
         item = finance_bot.fetch_indicator(name)
         if not item:
             return None, None
-        return float(item.get("value")), item.get("date") or item.get("as_of")
+        if item.get("error"):
+            log.warning("%s 조회 실패: %s", name, item["error"])
+            return None, None
+        value = item.get("value")
+        if value is None:
+            log.warning("%s: 값이 비어 있음 — 채우지 않는다", name)
+            return None, None
+        # 키 이름은 `asof`다. `date`/`as_of`를 찾다가 기준일이 늘 비어 있었다.
+        return float(value), item.get("asof") or item.get("date")
     except Exception as exc:  # noqa: BLE001
         log.warning("%s 조회 실패: %s", name, exc)
         return None, None
@@ -212,8 +233,31 @@ def _foreign_net(days: int = 5) -> tuple[Optional[float], Optional[str]]:
         return None, None
 
 
+REQUIRED_ENV = ("ECOS_API_KEY", "FRED_API_KEY", "KRX_ID", "KRX_PW")
+"""이 스냅샷이 쓰는 자격 정보.
+
+  - `ECOS_API_KEY` — 원/달러 환율(한국은행 ECOS)
+  - `FRED_API_KEY` — VIX(세인트루이스 연준 FRED)
+  - `KRX_ID` / `KRX_PW` — 외국인 순매수. 최근 pykrx는 이 조회에 KRX 계정 로그인을
+    요구한다. 없으면 pykrx가 "KRX 로그인 실패"를 낸다.
+
+코스피 200일선 기울기만 로컬 캐시라 키가 필요 없다 — 그래서 키가 하나도 없어도
+1/4는 나온다. 그 1/4을 보고 "지표가 도는구나" 하고 넘어가기 쉬워서, 미설정 키를
+결과에 명시한다.
+"""
+
+
 def snapshot() -> dict:
-    """대리 지표 스냅샷. 실패한 지표는 None으로 남고 그 사실이 결과에 드러난다."""
+    """대리 지표 스냅샷. 실패한 지표는 None으로 남고 그 사실이 결과에 드러난다.
+
+    **`.env`를 먼저 읽는다.** launchd·CLI로 도는 이 스크립트는 봇 프로세스의 환경을
+    물려받지 못한다. 첫 실행에서 `.env`에 키가 멀쩡히 있는데도 ECOS·FRED·KRX 셋 다
+    "미설정"으로 실패했다.
+    """
+    missing_env = env_config.ensure_env(REQUIRED_ENV)
+    if missing_env:
+        log.warning("자격 정보 미설정: %s — 해당 지표는 미확보로 남는다",
+                    ", ".join(missing_env))
     closes, kospi_as_of = _kospi_series()
     slope = ma_slope_pct(closes)
 
@@ -238,7 +282,8 @@ def snapshot() -> dict:
                   as_of=vix_as_of, source="FRED",
                   note="VKOSPI 대용. 미국 시장·다른 기초자산·시차가 있어 같은 지표가 아님"),
     ]
-    return {"indicators": items, "summary": summarize(items)}
+    return {"indicators": items, "summary": summarize(items),
+            "missing_env": missing_env}
 
 
 def _cli() -> int:

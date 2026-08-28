@@ -155,3 +155,68 @@ def test_format_marks_vix_as_a_stand_in():
                         note="VKOSPI 대용. 같은 지표가 아님")
     text = pi.format_snapshot({"indicators": [item], "summary": pi.summarize([item])})
     assert "같은 지표가 아님" in text
+
+
+# ─── 자격 정보·실패 처리 (2026-08-28) ────────────────
+#
+# 첫 실행에서 4개 중 1개만 나왔다. ECOS·FRED·KRX 셋 다 ".env에 키가 있는데"
+# 미설정으로 실패했다 — launchd·CLI 프로세스가 .env를 읽지 않았기 때문이다.
+# 그 위에 float(None) TypeError가 겹쳐 진짜 원인이 가려졌다.
+
+import sys
+import types
+
+
+def _fake_finance(payload):
+    mod = types.ModuleType("finance_bot")
+    mod.fetch_indicator = lambda name: payload
+    return mod
+
+
+def test_finance_value_reads_the_asof_key(monkeypatch):
+    """키 이름은 `asof`다. `date`/`as_of`를 찾다가 기준일이 늘 비어 있었다."""
+    monkeypatch.setitem(sys.modules, "finance_bot",
+                        _fake_finance({"value": 1385.5, "asof": "2026-08-27"}))
+    assert pi._finance_value("USD/KRW") == (1385.5, "2026-08-27")
+
+
+def test_finance_value_survives_an_error_payload(monkeypatch):
+    """fetch_indicator는 실패 시 값 없이 {'error': ...}를 준다 — 이걸 성공으로 보고
+    float()에 넣어 TypeError를 냈다. 원인(키 미로딩)이 형변환 오류에 가려졌다."""
+    monkeypatch.setitem(sys.modules, "finance_bot",
+                        _fake_finance({"key": "fx", "error": "ECOS_API_KEY 미설정"}))
+    assert pi._finance_value("USD/KRW") == (None, None)
+
+
+def test_finance_value_treats_a_null_value_as_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "finance_bot",
+                        _fake_finance({"value": None, "asof": "2026-08-27"}))
+    assert pi._finance_value("VIX") == (None, None)
+
+
+def test_finance_value_does_not_raise_on_a_broken_payload(monkeypatch):
+    monkeypatch.setitem(sys.modules, "finance_bot", _fake_finance({"value": "숫자아님"}))
+    assert pi._finance_value("VIX") == (None, None)
+
+
+def test_required_env_lists_every_credential_the_snapshot_uses():
+    """키를 하나도 안 넣어도 200일선(로컬 캐시)은 나온다 — 1/4을 보고 '도는구나'
+    하고 넘어가지 않도록, 필요한 키를 코드에 명시해 둔다."""
+    assert set(pi.REQUIRED_ENV) == {"ECOS_API_KEY", "FRED_API_KEY", "KRX_ID", "KRX_PW"}
+
+
+def test_format_separates_a_missing_credential_from_a_failed_fetch():
+    """'수집 실패'와 '키가 없어 시도조차 못 함'은 고쳐야 할 곳이 다르다."""
+    item = pi.indicator("VIX", None, "unknown", unit="pt")
+    text = pi.format_snapshot({"indicators": [item],
+                               "summary": pi.summarize([item]),
+                               "missing_env": ["FRED_API_KEY"]})
+    assert "자격 정보 미설정: FRED_API_KEY" in text
+    assert "시도 자체를 못 한 것" in text
+
+
+def test_format_stays_quiet_when_every_credential_is_set():
+    item = pi.indicator("VIX", 20.0, "neutral", unit="pt")
+    text = pi.format_snapshot({"indicators": [item],
+                               "summary": pi.summarize([item]), "missing_env": []})
+    assert "자격 정보 미설정" not in text

@@ -10,9 +10,10 @@ Bot API를 직접 부른다. 그 코드가 스크립트마다 복사되면 재�
     Markdown으로 보내면 텔레그램이 파싱 오류로 거절한다. 서식이 필요한 곳만 명시한다.
   - 발송 실패는 예외를 올리지 않고 건수로 돌려준다 — 알림이 안 갔다고 리포트 생성까지
     실패시킬 이유가 없다. 노트는 이미 파일로 남아 있다.
-  - **`.env`를 여기서 읽는다.** 봇 프로세스는 기동 시 `.env`를 읽지만 launchd가 띄우는
-    스크립트는 그 환경을 물려받지 못한다. 스크립트마다 로딩을 기억해 붙이는 대신,
-    자격 정보를 실제로 쓰는 이 모듈이 필요할 때 읽는다. 이미 설정된 값은 덮지 않는다.
+  - **`.env`는 `env_config`가 읽는다.** 봇 프로세스는 기동 시 `.env`를 읽지만
+    launchd가 띄우는 스크립트는 그 환경을 물려받지 못한다. 처음엔 이 모듈이 직접
+    읽었으나, 같은 문제가 대리 지표(ECOS·FRED·KRX)에서도 나와 로딩을 `env_config`로
+    옮겼다. 여기서는 텔레그램이 쓰는 키만 지정한다.
 """
 from __future__ import annotations
 
@@ -20,8 +21,10 @@ import json
 import logging
 import os
 import urllib.request
-from pathlib import Path
 from typing import Iterable, Optional
+
+import env_config
+from env_config import default_env_path, parse_env_file  # 재수출(기존 호출부 유지)
 
 log = logging.getLogger("telegram_notify")
 
@@ -71,45 +74,13 @@ def chat_ids_from(raw: Optional[str]) -> list[str]:
 ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_USER_ID")
 
 
-def parse_env_file(text: str) -> dict:
-    """.env 텍스트 → {키: 값}(순수). 주석·빈 줄·따옴표를 처리한다."""
-    out = {}
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1]
-        if key:
-            out[key] = val
-    return out
-
-
-def default_env_path() -> Path:
-    return Path(__file__).resolve().parent.parent / ".env"
-
-
 def ensure_env(path=None) -> None:
-    """자격 정보가 없으면 `.env`에서 채운다. **이미 있는 값은 덮지 않는다.**
+    """텔레그램 자격 정보가 없으면 `.env`에서 채운다. 이미 있는 값은 덮지 않는다.
 
-    launchd가 띄운 스크립트는 봇 프로세스의 환경을 물려받지 못한다.
-    python-dotenv가 없어도 동작하도록 직접 읽는다(의존성을 하나 더 만들 이유가 없다).
+    로딩 자체는 `env_config`에 있다 — 같은 문제가 대리 지표(ECOS·FRED·KRX)에서도
+    나와서 한 곳으로 모았다. 여기서는 텔레그램이 쓰는 키만 지정한다.
     """
-    if all(os.environ.get(k, "").strip() for k in ENV_KEYS):
-        return
-    try:
-        text = Path(path or default_env_path()).read_text(encoding="utf-8")
-    except OSError as exc:
-        # 파일이 없거나 못 읽는 경우만 조용히 넘어간다. 넓게 잡으면 코드 오류까지
-        # ".env 없음"으로 보여서, 발송이 왜 안 되는지 알 수 없게 된다.
-        log.debug(".env 읽기 실패: %s", exc)
-        return
-    values = parse_env_file(text)
-    for key in ENV_KEYS:
-        if not os.environ.get(key, "").strip() and values.get(key):
-            os.environ[key] = values[key]
+    env_config.ensure_env(ENV_KEYS, path)
 
 
 def _post(token: str, chat_id: str, text: str, parse_mode: Optional[str]) -> bool:

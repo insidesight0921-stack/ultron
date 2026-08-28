@@ -1330,6 +1330,63 @@ def enrich_with_dart(item: IpoItem) -> IpoItem:
     return item
 
 
+# ─── 스캔 진단 (침묵 실패 방지) ──────────────────────
+
+
+UNGRADED = "?"
+
+
+def diagnose_scan(results: list[dict], min_grade: set) -> dict:
+    """스캔 결과 → **왜 알림이 안 나가는지**(순수).
+
+    2026-08 실측에서 드러난 것: IPO봇은 몇 달째 아무것도 알리지 않았는데,
+    처음엔 "수집 0건"이라고 판단했다가 사용자 맥에서 실제로 돌려 보니 **후보 10건이
+    모두 잡히고 있었다.** 막힌 곳은 수집이 아니라 **등급 산출**이었다 —
+    10건 전부 `[?] 산출불가(확정 1/5, 주관사만)`이고, 필터는 A등급 이상만 통과시키므로
+    영원히 0건이 된다.
+
+    이 셋은 서로 다른 상황이고 대응도 다르다. 하나로 뭉쳐 "알림 없음"으로 끝내면
+    고장이 정상처럼 보인다.
+
+      - `no_results`     수집 0건 → 데이터 소스 점검 (파서·차단)
+      - `all_ungraded`   후보는 있으나 전원 등급 산출불가 → **채점 입력이 없는 것**
+                         (밴드·유통·시총·경쟁률 미확보). 판단을 못 한 것이지
+                         "매력 없음"이 아니다.
+      - `no_hot`         등급은 나왔고 기준 미달 → **정상 동작**
+      - `hot`            통과 종목 있음
+    """
+    if not results:
+        return {"verdict": "no_results", "n": 0, "n_ungraded": 0,
+                "grades": [], "hot": []}
+    grades = sorted({(r.get("grade") or UNGRADED) for r in results})
+    ungraded = [r for r in results if (r.get("grade") or UNGRADED) == UNGRADED]
+    hot = [r for r in results if r.get("grade", UNGRADED) in min_grade]
+    if hot:
+        verdict = "hot"
+    elif len(ungraded) == len(results):
+        verdict = "all_ungraded"
+    else:
+        verdict = "no_hot"
+    return {"verdict": verdict, "n": len(results), "n_ungraded": len(ungraded),
+            "grades": grades, "hot": hot}
+
+
+def missing_factors(results: list[dict]) -> list[str]:
+    """등급을 못 낸 이유 — 어떤 채점 요소가 비어 있는지(순수).
+
+    "산출불가"만 보고서는 무엇을 고쳐야 할지 알 수 없다. 비어 있는 요소 이름을
+    돌려주어, 파서를 고칠 곳(38·KIND·DART 중 어디)이 드러나게 한다.
+    """
+    labels = {"demand_score": "경쟁률", "band_score": "공모가밴드",
+              "float_score": "유통물량", "underwriter_score": "주관사",
+              "size_score": "시가총액"}
+    out = []
+    for key, label in labels.items():
+        if results and all(r.get(key) is None for r in results):
+            out.append(label)
+    return out
+
+
 # ─── 통합 스캔 ───────────────────────────────────────
 
 def scan_upcoming(
