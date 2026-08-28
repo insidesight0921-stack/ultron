@@ -874,3 +874,37 @@ class TestEndToEndGradeRecovery:
             band_low=12500, band_high=15000, final_price=15000,
             underwriter="미래에셋증권")
         assert compute_attraction_score(item).grade == "?"
+
+
+class TestBandPositionBelowBand:
+    """밴드 하단 **미만** 확정 — 2026-08 스카이랩스 실측으로 드러난 구멍.
+
+    희망 13,000~16,000 → 확정 10,000원(하단의 77%). 수요예측 경쟁률 63.41이고
+    신청 물량의 60%가 하단 미만 가격이었다. 기관 수요가 희망 범위조차 채우지
+    못한 것이라, 하단 확정과 같은 점수를 주면 가장 나쁜 신호가 최저 점수와
+    동점이 된다.
+    """
+
+    def test_below_the_band_scores_lower_than_at_the_band(self):
+        from ipo_bot import score_band_position
+        below = score_band_position(13000, 16000, 10000)
+        at_low = score_band_position(13000, 16000, 13000)
+        assert below < at_low
+
+    def test_below_the_band_is_zero(self):
+        from ipo_bot import score_band_position
+        assert score_band_position(13000, 16000, 10000) == 0.0
+
+    def test_the_ordering_holds_across_the_whole_range(self):
+        from ipo_bot import score_band_position
+        scores = [score_band_position(10000, 20000, p)
+                  for p in (9000, 10000, 14000, 19000, 21000)]
+        assert scores == sorted(scores)
+
+    def test_zero_still_counts_as_a_confirmed_factor(self):
+        """0점은 '모름'이 아니라 '나쁨'이다 — 요소에서 빠지면 안 된다."""
+        res = compute_attraction_score(_item(
+            band_low=13000, band_high=16000, final_price=10000,
+            underwriter="한국투자증권", offer_amount=200))
+        assert res.band_score == 0.0
+        assert res.confirmed_factors == 3

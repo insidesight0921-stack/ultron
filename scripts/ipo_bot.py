@@ -192,6 +192,13 @@ def score_band_position(
         return 20.0  # 상단 초과
     if band_low is None or band_high is None:
         return None
+    # **밴드 하단 미만 확정**은 하단 확정과 같은 신호가 아니다. 기관 수요가
+    # 희망 범위조차 채우지 못했다는 뜻이다. 2026-08 스카이랩스 실측 사례:
+    # 희망 13,000~16,000 → 확정 10,000원(하단의 77%), 수요예측 경쟁률 63.41,
+    # 신청 물량의 60%가 하단 미만 가격. 이 경우를 하단 확정(2점)과 같이 두면
+    # **가장 나쁜 신호가 최저 점수와 동점**이 된다.
+    if final_price < band_low:
+        return 0.0
     span = band_high - band_low
     if span <= 0:
         return 10.0  # 단일 밴드

@@ -117,3 +117,45 @@ def test_above_band_needs_both_values():
 def test_above_band_is_computed_when_both_exist():
     out = extract_ipo_metrics("희망공모가액 10,000원 ~ 12,000원 확정공모가액 13,000원")
     assert out["above_band"] is True
+
+
+# ─── 경쟁률: 문장이 아니라 표다 (2026-08-28 실측) ────
+#
+# 아래 두 블록은 스카이랩스 [발행조건확정]증권신고서(20260825000417)와
+# 클로봇 증권발행실적보고서(20260824000231)에서 그대로 발췌했다.
+
+SKYLABS_TABLE = (
+    "일반청약자 배정분 500,000주 (25.00%) 는 수요예측 참여 대상주식이 아닙니다. "
+    "(13) 수요예측 결과 (가) 수요예측 참여 내역 (단위: 건, 주) 구 분 국내 기관투자자 "
+    "해외 기관투자자 합 계 건수 2 41 24 4 2 45 92 36 - 246 "
+    "수량 890,000 16,208,000 4,779,000 1,532,000 1,501,000 8,990,000 47,192,000 "
+    "14,020,000 - 95,112,000 "
+    "경쟁률 0.59 10.81 3.19 1.02 1.00 5.99 31.46 9.35 - 63.41"
+)
+RIGHTS_OFFERING_TABLE = (
+    "3. 초과청약 배정 후 실권주 처리 내역 : 실권주 일반공모 (단위: 주) "
+    "일반공모 주식수 일반공모 청약주식수 일반공모 청약 경쟁률 292,491 143,321,648 490.00 : 1"
+)
+
+
+def test_the_total_of_the_table_is_the_competition_rate():
+    """'XXX : 1' 문장을 찾던 패턴으로는 원리적으로 잡을 수 없었다 —
+    그 문자열이 문서에 없다. 마지막 값이 합계다(95,112,000 ÷ 1,500,000 = 63.41)."""
+    assert extract_ipo_metrics(SKYLABS_TABLE)["competition_rate"] == 63.41
+
+
+def test_a_rights_offering_subscription_rate_is_not_a_demand_forecast():
+    """같은 모양의 표가 유상증자 실권주 일반공모에도 있다. 문맥을 안 보면
+    그 청약 경쟁률(490.00)을 기관 수요예측 경쟁률로 읽는다 — 실제로 그랬다."""
+    assert extract_ipo_metrics(RIGHTS_OFFERING_TABLE)["competition_rate"] is None
+
+
+def test_a_bare_mention_without_numbers_is_ignored():
+    assert extract_ipo_metrics(
+        "수요예측 경쟁률에 관한 주의사항 당사의 수요예측 예정일은 2026년 9월 28일입니다"
+    )["competition_rate"] is None
+
+
+def test_too_few_numbers_is_not_a_table():
+    """숫자 두어 개는 표가 아니다 — 문장 속 숫자를 표로 오인하면 안 된다."""
+    assert extract_ipo_metrics("수요예측 경쟁률 12.5")["competition_rate"] is None

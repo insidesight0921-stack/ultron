@@ -31,6 +31,7 @@ import csv
 import io
 import json
 import re
+from typing import Optional
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -173,6 +174,51 @@ def _to_num(s: str) -> float:
     return float(s.replace(",", ""))
 
 
+# 2026-08-28 실측: 경쟁률은 **문장이 아니라 표**로 실린다.
+#
+#   건수   2 41 24 4 2 45 92 36 - 246
+#   수량   890,000 16,208,000 … - 95,112,000
+#   경쟁률 0.59 10.81 3.19 1.02 1.00 5.99 31.46 9.35 - 63.41
+#
+# 마지막 값이 합계 경쟁률이다(스카이랩스 63.41 = 신청 95,112,000주 ÷ 기준
+# 1,500,000주, 본문 주석과 일치). "XXX : 1" 형태를 찾던 패턴으로는 원리적으로
+# 잡을 수 없었다 — 그 문자열이 문서에 없다.
+#
+# 숫자가 3개 이상 나열될 때만 표로 인정한다. 본문에 흔한 주의사항 문구
+# ("수요예측 경쟁률에 관한 주의사항")는 뒤에 숫자 나열이 없어 걸리지 않는다.
+_RATE_CONTEXT = 320      # 표 제목이 들어오는 거리(실측: 스카이랩스 표 제목까지 ~300자)
+_RATE_TABLE_RE = re.compile(r"경쟁률((?:\s+(?:[\d,]+(?:\.\d+)?|-)){3,})")
+
+
+def extract_competition_from_table(text: str) -> Optional[float]:
+    """가격대별 수요예측 참여내역 표에서 **합계 경쟁률**을 뽑는다(순수).
+
+    합계는 나열의 마지막 숫자다. 표 자체가 없으면 None — 없는 값을 만들지 않는다.
+    """
+    best = None
+    for m in _RATE_TABLE_RE.finditer(text):
+        # **표 앞 문맥을 본다.** 같은 모양의 표가 유상증자 실권주 일반공모에도
+        # 있어서, 문맥을 안 보면 그 청약 경쟁률(클로봇 490.00)을 기관 수요예측
+        # 경쟁률로 읽는다 — 실측에서 실제로 그렇게 잡혔다.
+        head = text[max(0, m.start() - _RATE_CONTEXT):m.start()]
+        if "수요예측" not in head or "일반공모" in head:
+            continue
+        nums = [x for x in m.group(1).split() if x not in ("-",)]
+        if len(nums) < 3:
+            continue
+        try:
+            value = _to_num(nums[-1])
+        except ValueError:
+            continue
+        if value <= 0:
+            continue
+        # 같은 표가 여러 번 나오면(정정 공시) 가장 큰 합계를 택하지 않는다 —
+        # 첫 번째(본문 순서상 최신 정정본이 앞에 온다)를 그대로 쓴다.
+        if best is None:
+            best = value
+    return best
+
+
 def extract_ipo_metrics(text: str) -> dict:
     """텍스트에서 IPO 수치 추출. 실패한 필드는 None."""
     out = {
@@ -184,11 +230,14 @@ def extract_ipo_metrics(text: str) -> dict:
         "above_band": None,  # bool
     }
 
-    for pat in PATTERNS["competition_rate"]:
-        m = re.search(pat, text)
-        if m:
-            out["competition_rate"] = _to_num(m.group(1))
-            break
+    # 표가 먼저다 — 실측에서 값이 실제로 있던 형태다.
+    out["competition_rate"] = extract_competition_from_table(text)
+    if out["competition_rate"] is None:
+        for pat in PATTERNS["competition_rate"]:
+            m = re.search(pat, text)
+            if m:
+                out["competition_rate"] = _to_num(m.group(1))
+                break
 
     for pat in PATTERNS["lockup_ratio"]:
         m = re.search(pat, text)
