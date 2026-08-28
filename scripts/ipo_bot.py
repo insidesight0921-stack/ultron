@@ -7,10 +7,10 @@ IPO봇 (ipo_bot) — 공모주 매력지수 스캐너 (v3.34)
   2. 공모가 밴드 위치 — 확정가가 밴드 어디에 위치하는지
   3. 유통 비율        — 상장 직후 유통 가능 물량 비율 (낮을수록 ↑)
   4. 주관사 티어      — 대형 증권사 주관 여부
-  5. 공모 규모(시총)  — 작을수록 수급 부담 적음 (↑)
+  5. 공모 규모(공모금액) — 작을수록 수급 부담 적음 (↑)
 
 데이터 소스:
-  - KIND (krx.co.kr)      : 청약 일정, 공모가 밴드, 확정가, 시총
+  - KIND (krx.co.kr)      : 청약 일정, 확정가, 공모금액
   - 38커뮤니케이션         : 청약 일정 백업
   - DART                   : 수요예측 경쟁률, 유통 비율 (dart_demand_parser 재활용)
 
@@ -305,12 +305,26 @@ def _grade(score: float) -> str:
     return "C"
 
 
+_SPAC_MARKERS = ("스팩", "기업인수목적")
+
+
+def is_spac(item: IpoItem) -> bool:
+    """스팩(기업인수목적회사)인가(순수).
+
+    스팩은 **기관 수요예측을 하지 않는다.** 공모가도 2,000원 단일이다. 그런데
+    "경쟁률 미확보(DART 파싱 확인 필요)"를 붙이면 고칠 것이 없는데 고장으로
+    읽힌다 — 진짜 파싱 실패가 그 잡음에 묻힌다.
+    """
+    return any(marker in (item.corp_name or "") for marker in _SPAC_MARKERS)
+
+
 STAGE_PRE = "사전"
 STAGE_FINAL = "확정"
 
 # 수요예측 **전에도** 확보 가능한 요소. 나머지 셋(경쟁률·밴드위치·확정가)은
 # 수요예측이 끝나야 비로소 존재한다.
 MIN_CONFIRMED_PRE = 2      # 주관사 + 공모규모
+SUB_IMMINENT_DAYS = 5      # 청약이 이만큼 남았으면 수요예측은 끝났다고 본다
 MIN_CONFIRMED_FINAL = 3
 
 
@@ -376,7 +390,7 @@ def compute_attraction_score(item: IpoItem) -> AttractionResult:
             note += " · 주관사 미확보"
         if stage == STAGE_PRE and s is None:
             note += " · 공모금액 미확보"
-    if stage == STAGE_FINAL and item.competition_rate is None:
+    if stage == STAGE_FINAL and item.competition_rate is None and not is_spac(item):
         note += " · 경쟁률 미확보(DART 파싱 확인 필요)"
 
     return AttractionResult(
@@ -828,13 +842,15 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
 
     kind_items   = fetch_ipo_schedule_kind(days_ahead)
     items_38     = fetch_ipo_schedule_38(days_ahead)
-    progcom_items = fetch_ipo_schedule_kind_progcom(days_ahead)
+    progcom_items, progcom_all = fetch_ipo_schedule_kind_progcom(
+        days_ahead, include_all=True)
 
     # ── 캘린더 맵 ──────────────────────────────────────
     kind_map: dict[str, IpoItem] = {it.corp_name: it for it in kind_items}
 
     # ── 공모기업현황 맵 ────────────────────────────────
-    progcom_map: dict[str, IpoItem] = {it.corp_name: it for it in progcom_items}
+    # 보강 맵은 **필터 전 전체**로 만든다(위 include_all 주석 참고).
+    progcom_map: dict[str, IpoItem] = {it.corp_name: it for it in progcom_all}
 
     # ── 38 기반으로 병합 ───────────────────────────────
     merged: dict[str, IpoItem] = {}
@@ -1211,7 +1227,8 @@ def _parse_kind_progcom_html(html: str) -> list[IpoItem]:
     return items
 
 
-def fetch_ipo_schedule_kind_progcom(days_ahead: int = 30) -> list[IpoItem]:
+def fetch_ipo_schedule_kind_progcom(days_ahead: int = 30, *,
+                                   include_all: bool = False):
     """KIND 공모기업현황에서 청약 일정 수집 (days_ahead 이내).
 
     캘린더 API보다 구조화된 데이터 (공모가·주관사·상장일 포함) 를 제공.
@@ -1226,7 +1243,7 @@ def fetch_ipo_schedule_kind_progcom(days_ahead: int = 30) -> list[IpoItem]:
     html = _kind_fetch_ipo_progcom(from_date, to_date)
     if not html:
         log.warning("KIND 공모기업현황 응답 없음")
-        return []
+        return ([], []) if include_all else []
 
     items = _parse_kind_progcom_html(html)
 
@@ -1241,6 +1258,13 @@ def fetch_ipo_schedule_kind_progcom(days_ahead: int = 30) -> list[IpoItem]:
         f"KIND 공모기업현황: {len(filtered)}건 "
         f"({days_ahead}일 이내 / 전체 {len(items)}건)"
     )
+    if include_all:
+        # **보강용은 필터하지 않는다.** 일정 필터는 "무엇을 보여줄지"를 정하는
+        # 것이고, 값 보강은 "그 종목의 빈칸을 채우는" 별개의 일이다. 둘을 같은
+        # 목록으로 하면, 청약일이 범위 밖이라는 이유로 **이미 보여주기로 한
+        # 종목의 공모금액까지 버려진다.** 2026-08-28 실측에서 정확히 그랬다 —
+        # progcom 10건 중 30일 이내는 1건뿐이라 38의 10건이 규모를 못 받았다.
+        return filtered, items
     return filtered
 
 
@@ -1369,10 +1393,18 @@ def _demand_forecast_done(item: IpoItem) -> bool:
         return True
     if item.final_price is not None:
         return True
-    if not item.demand_end:
-        return False
-    today_str = date.today().strftime("%Y%m%d")
-    return item.demand_end < today_str
+    today = date.today()
+    today_str = today.strftime("%Y%m%d")
+    if item.demand_end:
+        return item.demand_end < today_str
+    # demand_end를 못 받은 종목(38 목록에는 없다)이 영원히 조회 대상에서
+    # 빠지는 것을 막는다. **수요예측은 제도상 청약 전에 반드시 끝난다** —
+    # 보통 청약 2~5영업일 전이다. 청약이 코앞이면 결과가 나와 있다고 보고
+    # 한 번은 확인한다(캐시 TTL 1일이라 반복 호출은 아니다).
+    if item.sub_start:
+        due = (today + timedelta(days=SUB_IMMINENT_DAYS)).strftime("%Y%m%d")
+        return item.sub_start <= due
+    return False
 
 
 def fetch_dart_metrics(
@@ -1530,7 +1562,7 @@ def diagnose_scan(results: list[dict], min_grade: set) -> dict:
 
       - `no_results`     수집 0건 → 데이터 소스 점검 (파서·차단)
       - `all_ungraded`   후보는 있으나 전원 등급 산출불가 → **채점 입력이 없는 것**
-                         (밴드·유통·시총·경쟁률 미확보). 판단을 못 한 것이지
+                         (밴드·유통·공모금액·경쟁률 미확보). 판단을 못 한 것이지
                          "매력 없음"이 아니다.
       - `no_hot`         등급은 나왔고 기준 미달 → **정상 동작**
       - `hot`            통과 종목 있음
@@ -1646,7 +1678,7 @@ def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
             "(결과 없음 — KIND/38 파서 구현 대기 또는 청약 일정 없음)\n\n"
             "수동 입력 예시:\n"
             "  /ipo 분석 기업명=OOO 경쟁률=1200 공모가=15000 "
-            "밴드하단=13000 밴드상단=15000 시총=800 주관사=미래에셋"
+            "밴드하단=13000 밴드상단=15000 공모금액=800 주관사=미래에셋"
         )
 
     n = len(results)
@@ -1698,7 +1730,7 @@ def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
         lines += [
             f"{i}. {emoji} {name}  [{grade}] {score_str} ({n_conf}/5)",
             f"   청약 {sub_s}~{sub_e}  상장 {listing}",
-            f"   공모가 {price_str}  시총 {amt_str}  주관 {uw}",
+            f"   공모가 {price_str}  {amt_str}  주관 {uw}",
             f"   {factor_line}",
         ]
         if note:
@@ -1919,7 +1951,7 @@ def _cli() -> None:
     p_ana.add_argument("--float",      type=float, help="유통 비율(%)")
     p_ana.add_argument("--lockup",     type=float, help="기관 의무보유 확약 비율(%)")
     p_ana.add_argument("--underwriter",            help="주관사명")
-    p_ana.add_argument("--cap",        type=float, help="시총(억원)")
+    p_ana.add_argument("--cap",        type=float, help="공모금액(억원)")
 
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

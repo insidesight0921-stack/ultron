@@ -1002,3 +1002,83 @@ class TestMetricsComplete:
 
     def test_a_rate_alone_is_not_enough(self):
         assert not metrics_complete({"competition_rate": 63.41})
+
+
+# ═══════════════════════════════════════════════════════
+# 14. 보강 범위·스팩 (2026-08-28 실측 스캔에서 드러남)
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import is_spac  # noqa: E402
+
+
+class TestEnrichmentScope:
+    """일정 필터와 값 보강은 별개의 일이다.
+
+    실측: KIND 공모기업현황 10건 중 30일 이내는 1건뿐이었고, 그 필터된 목록을
+    보강 맵으로 써서 38의 10건이 공모금액을 하나도 못 받았다. 청약일이 범위
+    밖이라는 이유로 **이미 보여주기로 한 종목의 값까지 버려진** 것이다.
+    """
+
+    def test_progcom_can_return_the_unfiltered_list(self):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        assert "include_all: bool = False" in src
+
+    def test_the_merge_map_uses_the_unfiltered_list(self):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def fetch_ipo_schedule("):]
+        body = body[:body.index("\ndef ", 10)]
+        assert "for it in progcom_all}" in body
+        assert "for it in progcom_items}" not in body
+
+
+class TestSpac:
+    def test_a_spac_is_recognised_by_name(self):
+        for name in ("KB스팩34호", "한국스팩17호", "엔에이치기업인수목적34호"):
+            assert is_spac(_item(corp_name=name))
+
+    def test_an_operating_company_is_not_a_spac(self):
+        for name in ("스카이랩스", "빅웨이브로보틱스", "덕산넵코어스"):
+            assert not is_spac(_item(corp_name=name))
+
+    def test_a_spac_is_not_flagged_for_a_missing_competition_rate(self):
+        """스팩은 기관 수요예측을 하지 않는다. 고칠 것이 없는데 고장으로 읽히면
+        진짜 파싱 실패가 그 잡음에 묻힌다."""
+        res = compute_attraction_score(_item(corp_name="NH스팩34호", final_price=2000))
+        assert "경쟁률 미확보" not in res.note
+
+    def test_an_operating_company_is_still_flagged(self):
+        res = compute_attraction_score(_item(corp_name="스카이랩스", final_price=10000))
+        assert "경쟁률 미확보" in res.note
+
+
+class TestDemandForecastLookup:
+    """demand_end를 못 받은 종목이 영원히 DART 조회에서 빠지지 않게.
+
+    38 목록에는 수요예측 일정이 없다. `demand_end`만 보면 그 종목들은 청약
+    당일까지도 경쟁률을 확인하지 않는다. 수요예측은 제도상 청약 전에 반드시
+    끝나므로, 청약이 코앞이면 한 번은 확인한다.
+    """
+
+    def _days_from_now(self, n):
+        from datetime import date, timedelta
+        return (date.today() + timedelta(days=n)).strftime("%Y%m%d")
+
+    def test_an_imminent_subscription_triggers_a_lookup(self):
+        from ipo_bot import _demand_forecast_done
+        assert _demand_forecast_done(_item(sub_start=self._days_from_now(2)))
+
+    def test_a_distant_subscription_does_not(self):
+        """아직 수요예측 전이면 조회해 봐야 값이 없다 — 다운로드만 낭비한다."""
+        from ipo_bot import _demand_forecast_done
+        assert not _demand_forecast_done(_item(sub_start=self._days_from_now(30)))
+
+    def test_an_explicit_demand_end_still_wins(self):
+        from ipo_bot import _demand_forecast_done
+        assert _demand_forecast_done(_item(demand_end="20200101",
+                                           sub_start=self._days_from_now(30)))
+
+    def test_nothing_known_means_no_lookup(self):
+        from ipo_bot import _demand_forecast_done
+        assert not _demand_forecast_done(_item())
