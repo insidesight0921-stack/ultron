@@ -214,11 +214,18 @@ def run_backup() -> None:
     print(f"   {result.stdout.strip().splitlines()[-1]}")
 
 
-def verify(candidate: Path) -> None:
-    """**진짜 로더로** 검증한다. 여기서 통과하지 못하면 설치하지 않는다."""
+def verify(candidate: Path, *, private_root: Path | None = None) -> None:
+    """**진짜 로더로** 검증한다. 여기서 통과하지 못하면 설치하지 않는다.
+
+    로더는 번들이 `private_root/private-write-activation.json` **바로 그 경로**일 것을
+    요구한다. 그래서 스테이징의 후보를 검증하려면 `private_root`를 스테이징으로
+    지정해야 한다. 처음엔 이걸 빼먹어서 설치 직전에 `invalid_bundle_file`로 멈췄다
+    (아무것도 바꾸지 않고 멈춘 것은 의도대로였다).
+    """
     environ = dict(os.environ)
     environ[BUNDLE_PATH_ENV] = str(candidate)
-    bundle = load_private_write_runtime_bundle(environ)
+    kwargs = {} if private_root is None else {"private_root": private_root}
+    bundle = load_private_write_runtime_bundle(environ, **kwargs)
     if bundle is None:
         raise ReissueError("검증 실패: 번들이 비활성으로 읽힘")
     if not bundle.paper_writes_enabled:
@@ -251,7 +258,7 @@ def reissue(*, do_backup: bool) -> int:
             assistant, paper, staging)
         candidate_path = Path(candidate.path)
         print("④ 실제 로더로 검증...")
-        verify(candidate_path)
+        verify(candidate_path, private_root=candidate_path.parent)
 
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         kept = path.with_name(f"{path.stem}.{stamp}{path.suffix}")
@@ -265,7 +272,13 @@ def reissue(*, do_backup: bool) -> int:
         os.replace(tmp, path)          # 원자적 교체
         print(f"⑥ 설치 완료: {path.name}")
 
-        verify(path)
+        try:
+            verify(path)               # 운영 경로에서 한 번 더 (기본 private_root)
+        except Exception:
+            shutil.copy2(kept, path)   # 설치본이 이상하면 즉시 되돌린다
+            os.chmod(path, 0o600)
+            print(f"⚠️ 설치본 검증 실패 — {kept.name}으로 되돌렸습니다")
+            raise
         print("⑦ 설치본 재검증 통과 ✅")
     except Exception:
         raise

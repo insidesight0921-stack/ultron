@@ -100,3 +100,31 @@ def test_evidence_carries_the_new_manifest_into_both_stacks(tmp_path):
     assert (assistant.private_write_evidence.database_path
             != paper.private_write_evidence.database_path)
     assert paper.caller_policies[0].approval_mode == "explicit-user"
+
+
+# ─── 검증 경로 (2026-08-28) ──────────────────────────
+#
+# 첫 실행에서 ④단계 `invalid_bundle_file`로 멈췄다. 로더는 번들이
+# `private_root/private-write-activation.json` **바로 그 경로**일 것을 요구하는데,
+# 스테이징의 후보를 기본 private_root로 검증하려 했기 때문이다.
+# (설치 전에 멈춘 것 자체는 의도대로였다 — 아무것도 바뀌지 않았다.)
+
+import inspect  # noqa: E402
+
+
+def test_candidate_is_verified_against_its_own_staging_root():
+    src = inspect.getsource(pr.reissue)
+    assert "verify(candidate_path, private_root=candidate_path.parent)" in src
+
+
+def test_the_installed_bundle_is_verified_at_the_operational_path():
+    """설치본은 기본 private_root로 봐야 한다 — 스테이징으로 보면 의미가 없다."""
+    src = inspect.getsource(pr.reissue)
+    assert "verify(path)" in src
+
+
+def test_a_bad_install_is_rolled_back():
+    """검증에 실패한 번들을 그대로 두면 다음 재시작에서 전 서비스가 잠긴다."""
+    src = inspect.getsource(pr.reissue)
+    assert "shutil.copy2(kept, path)" in src
+    assert "되돌렸습니다" in src
