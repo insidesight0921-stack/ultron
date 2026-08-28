@@ -259,14 +259,15 @@ class TestComputeAttractionScore:
         assert res.confirmed_factors == 2
 
     def test_three_factors_gives_grade(self):
-        # demand=17, float=17, size=20 → 54/60 → 90.0 → A++
+        # demand=17, float=17, size=20 → 54/60 → 90.0 → A++ 구간
+        # 다만 2026-08-28부터 확정 3개는 A+가 상한이다(아는 것이 셋뿐이므로).
         res = compute_attraction_score(_item(
             competition_rate=1000, float_ratio=20, offer_amount=100,
         ))
         assert res.grade != "?"
-        assert res.total_score is not None
+        assert res.total_score == 90.0
         assert res.confirmed_factors == 3
-        assert res.grade == "A++"
+        assert res.grade == "A+"
 
     def test_all_five_perfect(self):
         res = compute_attraction_score(_item(
@@ -1158,3 +1159,46 @@ class TestBuildMatchMap:
 
     def test_nameless_items_are_skipped(self):
         assert build_match_map([_item(corp_name="")]) == {}
+
+
+# ═══════════════════════════════════════════════════════
+# 16. 등급 상한·확정가 교차검증 (2026-08-28 실측 스캔)
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import cap_grade  # noqa: E402
+
+
+class TestGradeCap:
+    """엘리스그룹이 유통 14 + 주관사 20 = 85점 → A++로 나왔다.
+
+    아는 것이 둘뿐인데 최고 등급이다. 100점 환산은 "확정된 것들 중에서 얼마나
+    좋은가"만 말하고 **무엇을 모르는지는 말하지 않는다.**
+    """
+
+    def test_two_factors_cannot_reach_the_top_grade(self):
+        assert cap_grade("A++", 2) == "A"
+
+    def test_three_factors_stop_at_a_plus(self):
+        assert cap_grade("A++", 3) == "A+"
+
+    def test_four_or_more_are_uncapped(self):
+        assert cap_grade("A++", 4) == "A++"
+        assert cap_grade("A++", 5) == "A++"
+
+    def test_a_low_grade_is_never_raised(self):
+        """상한이지 보정이 아니다 — 낮은 등급을 끌어올리면 안 된다."""
+        assert cap_grade("C", 5) == "C"
+        assert cap_grade("B", 2) == "B"
+
+    def test_the_cap_is_stated_in_the_note(self):
+        res = compute_attraction_score(_item(
+            underwriter="미래에셋증권", float_ratio=20.81,
+            band_low=70400, band_high=90500))
+        assert res.grade == "A"
+        assert "등급을 A로 제한" in res.note and "A++ 구간" in res.note
+
+    def test_the_score_itself_is_not_changed(self):
+        """점수는 그대로 남긴다 — 나중에 재분석할 때 원자료가 필요하다."""
+        res = compute_attraction_score(_item(
+            underwriter="미래에셋증권", float_ratio=20.81))
+        assert res.total_score == 85.0

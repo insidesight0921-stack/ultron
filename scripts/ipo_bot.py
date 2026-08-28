@@ -293,6 +293,28 @@ def score_offer_size(offer_amount_eok: Optional[float]) -> Optional[float]:
     return 2.0                       # 대형 공모 — 상장일 매물 부담 큼
 
 
+# 확정 요소 수에 따른 **등급 상한**(2026-08-28).
+#
+# 실측 스캔에서 엘리스그룹이 유통 14 + 주관사 20 = 34/40 → 85점 → A++로 나왔다.
+# 아는 것이 둘뿐인데 최고 등급이다. 100점 환산은 "확정된 것들 중에서 얼마나
+# 좋은가"만 말하고 **무엇을 모르는지는 말하지 않는다.**
+#
+# 표본이 적을수록 추정이 흔들리므로 상한을 둔다. 점수와 확정 요소 수를 함께
+# 보여 주는 것만으로는 부족했다 — 등급 문자가 먼저 눈에 들어온다.
+_GRADE_ORDER = ("C", "B", "A", "A+", "A++")
+_MAX_GRADE_BY_CONFIRMED = {2: "A", 3: "A+", 4: "A++", 5: "A++"}
+
+
+def cap_grade(grade: str, confirmed: int) -> str:
+    """확정 요소 수만큼만 등급을 인정한다(순수)."""
+    ceiling = _MAX_GRADE_BY_CONFIRMED.get(confirmed)
+    if ceiling is None or grade not in _GRADE_ORDER:
+        return grade
+    if _GRADE_ORDER.index(grade) <= _GRADE_ORDER.index(ceiling):
+        return grade
+    return ceiling
+
+
 def _grade(score: float) -> str:
     if score >= 85:
         return "A++"
@@ -378,11 +400,16 @@ def compute_attraction_score(item: IpoItem) -> AttractionResult:
         raw_sum = sum(confirmed)
         total = round(raw_sum / max_possible * 100, 1)
         grade = _grade(total)
+        capped = cap_grade(grade, n)
+        if capped != grade:
+            note = (f"확정 {n}/5라 등급을 {capped}로 제한했습니다 "
+                    f"(환산 {total:.0f}점은 {grade} 구간). ")
+            grade = capped
         if stage == STAGE_PRE:
-            note = (f"📋 사전등급 — 수요예측 전이라 경쟁률·확정가가 없습니다 "
-                    f"(확정 {n}/5). 참고용이며 자동 구독 대상이 아닙니다")
+            note += (f"📋 사전등급 — 수요예측 전이라 경쟁률·확정가가 없습니다 "
+                     f"(확정 {n}/5). 참고용이며 자동 구독 대상이 아닙니다")
         elif n < 5:
-            note = f"⚠️ {5-n}개 요소 미확정 — 환산 점수 (확정 {n}/5)"
+            note += f"⚠️ {5-n}개 요소 미확정 — 환산 점수 (확정 {n}/5)"
     else:
         note = (f"⚠️ 확정 요소 {n}개 (필요 {required}개, {stage} 단계) — "
                 f"신뢰도 부족, 등급 산출 불가")

@@ -311,6 +311,31 @@ def extract_ipo_metrics(text: str) -> dict:
 
     out["float_ratio"] = extract_float_ratio(text)
 
+    # ── 확정가 교차검증 (2026-08-28 실측) ──────────────
+    #
+    # 실제 스캔에서 브릴스 16,500원·네오사피엔스 13,800원이 확정가로 잡혔는데,
+    # **둘 다 그 종목의 밴드 하단과 정확히 같았다**(16,500~19,500 / 13,800~15,800).
+    # 수요예측 전 증권신고서는 "인수대가는 … 하단인 16,500원 기준으로 산정" 같은
+    # 문장에서 하단 금액을 여러 번 언급한다. "확정공모가액" 뒤 30자 안에 그 숫자가
+    # 들어오면 확정가로 읽힌다.
+    #
+    # 확정가가 잘못 채워지면 단계가 "확정"으로 넘어가 밴드 하단 확정(2점)이 매겨지고,
+    # **확정되지도 않은 종목이 최저 점수를 받는다.**
+    #
+    # 그래서 밴드 하단과 정확히 같은 확정가는 **수요예측 결과가 함께 확인될 때만**
+    # 믿는다. 스카이랩스는 진짜 하단 미만 확정(10,000)이었고 경쟁률 63.41이 같은
+    # 문서에 있었다 — 그 경우는 그대로 통과한다.
+    #
+    # 밴드 폭이 0인 경우(스팩: 2,000원 단일)는 제외한다. 하단·상단·확정가가 원래
+    # 같으므로 이 검사가 의미를 갖지 않는다.
+    if (out["final_price"] is not None
+            and out["offer_band_low"] is not None
+            and out["offer_band_high"] is not None
+            and out["offer_band_high"] > out["offer_band_low"]
+            and out["final_price"] == out["offer_band_low"]
+            and out["competition_rate"] is None):
+        out["final_price"] = None
+
     if out["final_price"] and out["offer_band_high"]:
         out["above_band"] = out["final_price"] > out["offer_band_high"]
 

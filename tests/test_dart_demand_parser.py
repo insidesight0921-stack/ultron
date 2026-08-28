@@ -225,3 +225,43 @@ def test_no_mention_is_none():
 
 def test_the_metrics_dict_carries_it():
     assert extract_ipo_metrics(FORM_A)["float_ratio"] == 26.42
+
+
+# ─── 확정가 교차검증 (2026-08-28 실측 스캔) ──────────
+#
+# 실제 스캔에서 브릴스 16,500원·네오사피엔스 13,800원이 확정가로 잡혔는데
+# 둘 다 그 종목의 **밴드 하단과 정확히 같았다**(16,500~19,500 / 13,800~15,800).
+# 수요예측 전 증권신고서는 "인수대가는 … 하단인 16,500원 기준으로 산정" 같은
+# 문장에서 하단 금액을 여러 번 언급한다.
+
+BAND_LOW_REPEATED = (
+    "희망공모가액 16,500원 ~ 19,500원 중 최저가액인 16,500원 기준입니다. "
+    "확정공모가액은 16,500원 기준으로 산정하였습니다"
+)
+REAL_CONFIRMED_WITH_RATE = (
+    "제시 희망공모가액인 13,000원 ~ 16,000원 중 최저가액인 13,000원 기준입니다 "
+    "(가) 수요예측 참여 내역 건수 2 41 24 - 246 "
+    "경쟁률 0.59 10.81 3.19 - 63.41 "
+    "협의하여 결정한 확정공모가액인 10,000원 기준입니다"
+)
+
+
+def test_a_band_low_echo_is_not_a_confirmed_price():
+    """확정가가 잘못 채워지면 단계가 '확정'으로 넘어가 밴드 하단 확정(2점)이
+    매겨지고, 확정되지도 않은 종목이 최저 점수를 받는다."""
+    out = extract_ipo_metrics(BAND_LOW_REPEATED)
+    assert out["final_price"] is None
+    assert out["offer_band_low"] == 16500.0      # 밴드는 그대로 살린다
+
+
+def test_a_confirmed_price_backed_by_a_demand_result_survives():
+    """스카이랩스는 진짜 하단 미만 확정이었고 경쟁률이 같은 문서에 있었다."""
+    out = extract_ipo_metrics(REAL_CONFIRMED_WITH_RATE)
+    assert out["final_price"] == 10000.0 and out["competition_rate"] == 63.41
+
+
+def test_a_single_price_band_is_exempt():
+    """스팩은 하단·상단·확정가가 원래 같다 — 이 검사가 의미를 갖지 않는다."""
+    out = extract_ipo_metrics(
+        "희망공모가액 2,000원 ~ 2,000원 확정공모가액 2,000원")
+    assert out["final_price"] == 2000.0
