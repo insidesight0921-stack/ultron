@@ -72,7 +72,13 @@ from telegram_write_identity import (  # noqa: E402
     build_watchlist_write_identity,
 )
 from paper_trade_identity import build_paper_trade_write_identity  # noqa: E402
-from private_write_runtime import load_private_write_runtime_bundle  # noqa: E402
+from private_write_runtime import (  # noqa: E402
+    PrivateWriteRuntimeError,
+    load_private_write_runtime_bundle,
+)
+from private_write_cutover import PrivateWriteCutoverError  # noqa: E402
+from private_write_readiness import PrivateWriteReadinessError  # noqa: E402
+import telegram_notify  # noqa: E402  # v3.56 기동 실패 알림(봇과 독립)
 from kium_bot import run as kium_run, scan_universe as kium_scan  # noqa: E402
 from quant_bot import (
     run as quant_run,
@@ -269,6 +275,66 @@ async def _execute_private_paper_write(
         price=price,
         notes=notes,
     )
+
+
+class PrivateWriteLocked(RuntimeError):
+    """Private write 경로를 쓸 수 없는 상태에서 원본 DB 직접 쓰기를 막는다."""
+
+
+_PRIVATE_WRITE_LOCKED = False
+_PRIVATE_WRITE_LOCK_REASON = ""
+
+# 기동 게이트가 막는 것은 **쓰기**여야 한다 (2026-08-28 결정).
+#
+# 이전에는 번들 로딩이 실패하면 봇 프로세스 자체가 죽었다. 그런데 장 중 손절·익절
+# 모니터가 이 프로세스 안에서 돈다. 데이터를 지키려는 가드가 **손절 감시를 꺼서
+# 더 큰 위험을 만들고** 있었다. 이제 봇은 뜨고 쓰기만 잠근다.
+#
+# 다만 executor를 None으로 두는 것만으로는 부족하다. 폴백 경로가 `_pdb`로 **원본
+# DB에 직접** 쓰기 때문에, 그대로 두면 번들이 끄겠다고 선언한 통로
+# (`direct_db_fallback_disabled`)가 오히려 활짝 열린다. 그래서 잠금 상태에서는
+# 직접 쓰기도 거부한다.
+#
+#   executor 있음            → 정상 경로
+#   executor 없음 + 잠금 아님 → 직접 쓰기 (Private write 미도입 환경)
+#   executor 없음 + 잠금      → **거부**
+
+
+def _direct_paper_write(fn, *args, **kwargs):
+    """executor가 없을 때의 직접 쓰기. 잠겨 있으면 거부한다."""
+    if _PRIVATE_WRITE_LOCKED:
+        raise PrivateWriteLocked(
+            f"Private write 잠금 — 직접 쓰기 거부 ({_PRIVATE_WRITE_LOCK_REASON})")
+    return fn(*args, **kwargs)
+
+
+def _start_private_write_runtime() -> None:
+    """번들을 싣는다. 게이트가 막으면 **쓰기만 잠그고 봇은 계속 뜬다.**
+
+    잡는 예외는 게이트가 내는 것만이다. 넓게 잡으면 코딩 오류까지 "게이트 때문"으로
+    보여서 원인을 알 수 없게 된다 — 이미 `.env` 로딩에서 한 번 겪었다.
+    """
+    global _PRIVATE_WRITE_LOCKED, _PRIVATE_WRITE_LOCK_REASON
+    try:
+        _configure_private_write_runtime(load_private_write_runtime_bundle())
+    except (PrivateWriteRuntimeError, PrivateWriteCutoverError,
+            PrivateWriteReadinessError) as exc:
+        _configure_private_write_runtime(None)
+        _PRIVATE_WRITE_LOCKED = True
+        _PRIVATE_WRITE_LOCK_REASON = str(exc)
+        log.error("Private write 잠금 — 봇은 기동하되 쓰기를 막습니다: %s", exc)
+        try:
+            telegram_notify.send(
+                "🔒 Private write 잠금\n"
+                f"사유: {exc}\n\n"
+                "봇은 정상 기동했고 조회·알림·장중 손절 모니터는 그대로 돕니다.\n"
+                "paper 매수·매도 기록만 막혀 있습니다.\n"
+                "복구: python3 scripts/private_write_reissue.py --check")
+        except Exception:  # noqa: BLE001
+            log.warning("잠금 알림 발송 실패", exc_info=True)
+        return
+    _PRIVATE_WRITE_LOCKED = False
+    _PRIVATE_WRITE_LOCK_REASON = ""
 
 
 def _configure_private_write_runtime(runtime_bundle) -> None:
@@ -1490,6 +1556,7 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
         try:
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
                 await asyncio.to_thread(
+                    _direct_paper_write,
                     _pdb.record_buy, int(slot_id), r["ticker"], r.get("name") or r["ticker"],
                     int(r["qty"]), float(r["price"]), notes,
                 )
@@ -1638,7 +1705,8 @@ async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             notes = f"{action} 자동청산[{reason}] ({pnl_pct*100:.1f}%)"
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
-                _pdb.record_sell(
+                _direct_paper_write(
+                    _pdb.record_sell,
                     slot_id,
                     ticker,
                     qty,
@@ -2431,7 +2499,8 @@ async def handle_kium_paper_callback(
             try:
                 notes = f"[AUTO] {week_key} 키움봇 청산 (pnl {pnl_pct:.1f}%)"
                 if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
-                    _pdb.record_sell(
+                    _direct_paper_write(
+                        _pdb.record_sell,
                         int(slot_id),
                         ticker,
                         qty,
@@ -2569,7 +2638,8 @@ async def handle_kium_paper_callback(
             except Exception:
                 log.warning("키움 진입 태그 생성 실패", exc_info=True)
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
-                _pdb.record_buy(
+                _direct_paper_write(
+                    _pdb.record_buy,
                     int(slot_id),
                     r["ticker"],
                     r["name"],
@@ -2696,7 +2766,8 @@ async def handle_quant_paper_callback(
                 continue
             notes = f"[AUTO] {month_key} 콴텍봇 퇴출청산"
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
-                _pdb.record_sell(
+                _direct_paper_write(
+                    _pdb.record_sell,
                     int(slot_id),
                     ticker,
                     qty,
@@ -2860,7 +2931,8 @@ async def handle_quant_paper_callback(
                 except Exception:
                     log.warning("콴텍 진입 태그 생성 실패", exc_info=True)
                 if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
-                    _pdb.record_buy(
+                    _direct_paper_write(
+                        _pdb.record_buy,
                         int(slot_id),
                         tkr,
                         name,
@@ -3370,7 +3442,7 @@ async def cmd_test_kium(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    _configure_private_write_runtime(load_private_write_runtime_bundle())
+    _start_private_write_runtime()
     log.info(f"🤖 텔레그램 봇 시작 (허용 사용자: {len(ALLOWED_IDS)}명)")
     log.info(f"   마스터: {MASTER_MODEL} (라우팅)")
     log.info(f"   하위:   {LLM_MODEL} (지식봇)")

@@ -31,6 +31,23 @@ def _identity(**overrides):
     return build_paper_trade_write_identity(**values)
 
 
+def _writer_name(node):
+    """record_buy/record_sell을 **호출이든 참조든** 같게 본다.
+
+    2026-08-28에 직접 쓰기를 `_direct_paper_write(_pdb.record_buy, ...)` 형태로
+    감쌌다(잠금 상태에서 원본 DB 직접 쓰기를 거부하려고). 호출만 세던 탐지기는
+    그 순간 telegram_bot의 직접 쓰기를 **하나도 못 보게** 됐다 — 목록이 비면
+    "직접 쓰기가 없다"로 읽혀서, 감시하려던 것이 사라진다.
+    """
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
+
+
 def _direct_calls(module_name):
     source = (ROOT / "scripts" / module_name).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -40,14 +57,7 @@ def _direct_calls(module_name):
             continue
         operations = set()
         for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            function = child.func
-            name = (
-                function.attr
-                if isinstance(function, ast.Attribute)
-                else function.id if isinstance(function, ast.Name) else ""
-            )
+            name = _writer_name(child)
             if name == "record_buy":
                 operations.add("paper.buy")
             elif name == "record_sell":
@@ -81,15 +91,9 @@ def _unguarded_direct_calls(function, executor_name):
             for child in node.orelse:
                 walk(child, guarded)
             return
-        if isinstance(node, ast.Call):
-            target = node.func
-            name = (
-                target.attr
-                if isinstance(target, ast.Attribute)
-                else target.id if isinstance(target, ast.Name) else ""
-            )
-            if name in {"record_buy", "record_sell"} and not guarded:
-                found.append((name, node.lineno))
+        name = _writer_name(node)
+        if name in {"record_buy", "record_sell"} and not guarded:
+            found.append((name, node.lineno))
         for child in ast.iter_child_nodes(node):
             walk(child, guarded)
 
@@ -144,8 +148,16 @@ def test_inventory_assigns_single_future_db_writer_and_retires_cli_direct_path()
         for policy in PAPER_DIRECT_WRITER_INVENTORY
         if policy.target_mode == "private-client"
     ]
-    assert len(operational) == 5
+    # 6번째는 2026-08-28에 드러난 대기 큐 체결(`_drain_pending_orders`)이다.
+    # 목록에 없었던 것이 아니라 **탐지기가 못 보고 있었다** — 참조로 넘기는
+    # `asyncio.to_thread(_pdb.record_buy, ...)` 형태였기 때문이다.
+    assert len(operational) == 6
     assert {policy.target_owner for policy in operational} == {"private-data-api"}
+    pending = next(
+        policy for policy in PAPER_DIRECT_WRITER_INVENTORY
+        if policy.key == "telegram-pending"
+    )
+    assert pending.operations == {"paper.buy"}
     cli = next(policy for policy in PAPER_DIRECT_WRITER_INVENTORY if policy.key == "operator-cli")
     assert cli.target_owner == "none"
     assert cli.target_mode == "retire-direct-rollback-only"

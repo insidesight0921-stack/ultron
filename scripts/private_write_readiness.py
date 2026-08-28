@@ -22,6 +22,7 @@ from private_data_security import verify_database
 
 EXPECTED_WRITER_OWNER = "private-data-api"
 DEFAULT_MAX_BACKUP_AGE = timedelta(hours=24)
+_CLOCK_SKEW_TOLERANCE = timedelta(minutes=-5)
 SUPPORTED_PRIVATE_WRITE_DATABASE_NAMES = frozenset({"assistant.db", "paper.db"})
 
 
@@ -150,66 +151,123 @@ def _source_integrity_ok(path: Path) -> bool:
     return result.get("integrity") == "ok" and result.get("restore_verified") is True
 
 
+def _manifest_age(manifest_path: Path, now: datetime) -> timedelta | None:
+    """manifest의 `created_at` 기준 나이. 알 수 없으면 None(0이 아니다).
+
+    파일 mtime을 쓰지 않는다 — 백업 디렉터리를 복사하면 mtime은 갱신되지만
+    백업이 새것이 되는 것은 아니다.
+    """
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        created_at = datetime.fromisoformat(payload["created_at"])
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+        return None
+    if created_at.tzinfo is None or now.tzinfo is None:
+        return None
+    try:
+        return now.astimezone(created_at.tzinfo) - created_at
+    except (OverflowError, ValueError):
+        return None
+
+
+def newest_backup_age(
+    backup_root: Path, now: datetime, *, database_name: str
+) -> timedelta | None:
+    """승인된 백업 루트에서 **가장 최근** 검증 완료 백업의 나이.
+
+    2026-08-28 이전에는 신선도를 **번들이 고정(pin)한 manifest**에서 쟀다. 그런데
+    고정된 manifest의 내용 해시가 활성화 지문에 들어가므로, 백업을 새로 뜨면
+    번들을 재발급해야 한다. 신선도 한도가 24시간이니 **매일 재발급하지 않으면
+    서비스가 재시작 때 죽는** 구조였고, 실제로 그렇게 됐다(텔레그램 봇·Private API
+    동시 기동 실패).
+
+    두 질문은 원래 다른 것이다.
+      - 고정 manifest = "이 백업으로 롤백이 **검증**됐는가" (변하지 않아야 한다)
+      - 신선도       = "**최근** 백업이 존재하는가" (매번 새로 봐야 한다)
+
+    그래서 신선도는 고정 핀이 아니라 백업 루트 전체에서 잰다. 백업을 매일 돌려도
+    번들은 그대로 유효하다.
+    """
+    ages = []
+    try:
+        manifests = sorted(backup_root.glob("*/manifest.json"))
+    except OSError:
+        return None
+    for manifest in manifests:
+        if not _is_private_regular_file(manifest, expected_name="manifest.json"):
+            continue
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("all_restore_verified") is not True:
+            continue
+        databases = payload.get("databases")
+        if not isinstance(databases, list) or not any(
+            isinstance(item, dict)
+            and item.get("database") == database_name
+            and item.get("restore_verified") is True
+            and item.get("integrity") == "ok"
+            for item in databases
+        ):
+            continue
+        age = _manifest_age(manifest, now)
+        # 미래로 찍힌 백업은 아예 후보에서 뺀다. 그냥 최소값을 취하면 시계가
+        # 틀린 스냅샷 하나가 멀쩡한 최근 백업까지 무효로 만든다.
+        if age is not None and age >= _CLOCK_SKEW_TOLERANCE:
+            ages.append(age)
+    return min(ages) if ages else None
+
+
 def _backup_checks(
     manifest_path: Path,
     *,
     database_name: str,
-    now: datetime,
-    max_backup_age: timedelta,
-) -> tuple[bool, bool, bool]:
-    """Return manifest-valid, database-valid, fresh without exposing paths."""
+) -> tuple[bool, bool]:
+    """Return manifest-valid, database-valid without exposing paths."""
     manifest_valid = _is_private_regular_file(manifest_path, expected_name="manifest.json")
     if not manifest_valid:
-        return False, False, False
+        return False, False
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError, TypeError):
-        return False, False, False
+        return False, False
     if not isinstance(payload, dict) or payload.get("all_restore_verified") is not True:
-        return False, False, False
-
-    fresh = False
-    try:
-        created_at = datetime.fromisoformat(payload["created_at"])
-        if created_at.tzinfo is not None and now.tzinfo is not None:
-            age = now.astimezone(created_at.tzinfo) - created_at
-            fresh = timedelta(minutes=-5) <= age <= max_backup_age
-    except (KeyError, TypeError, ValueError, OverflowError):
-        fresh = False
+        return False, False
 
     databases = payload.get("databases")
     if not isinstance(databases, list):
-        return False, False, fresh
+        return False, False
     matches = [
         item
         for item in databases
         if isinstance(item, dict) and item.get("database") == database_name
     ]
     if len(matches) != 1:
-        return False, False, fresh
+        return False, False
     item = matches[0]
     if item.get("restore_verified") is not True or item.get("integrity") != "ok":
-        return False, False, fresh
+        return False, False
 
     backup_name = item.get("backup_file")
     if not isinstance(backup_name, str) or not backup_name or Path(backup_name).name != backup_name:
-        return False, False, fresh
+        return False, False
     backup_path = manifest_path.parent / backup_name
     if not _is_private_regular_file(backup_path, expected_name=backup_name):
-        return True, False, fresh
+        return True, False
     try:
         if _sha256(backup_path) != item.get("sha256"):
-            return True, False, fresh
+            return True, False
         verification = verify_database(backup_path)
     except (OSError, RuntimeError, ValueError, sqlite3.Error):
-        return True, False, fresh
+        return True, False
     database_valid = (
         verification.get("integrity") == "ok"
         and verification.get("restore_verified") is True
         and verification.get("schema_sha256") == item.get("schema_sha256")
         and verification.get("table_counts") == item.get("table_counts")
     )
-    return True, database_valid, fresh
+    return True, database_valid
 
 
 def assess_private_write_readiness(
@@ -217,6 +275,7 @@ def assess_private_write_readiness(
     *,
     now: datetime | None = None,
     max_backup_age: timedelta = DEFAULT_MAX_BACKUP_AGE,
+    backup_root: Path | None = None,
 ) -> PrivateWriteReadinessReport:
     """Assess a prospective cutover without changing files or runtime state."""
     checked_at = now or datetime.now().astimezone()
@@ -234,12 +293,18 @@ def assess_private_write_readiness(
         ),
     )
     source_integrity = database_private and _source_integrity_ok(evidence.database_path)
-    manifest_valid, backup_valid, backup_fresh = _backup_checks(
+    manifest_valid, backup_valid = _backup_checks(
         evidence.backup_manifest_path,
         database_name=evidence.database_path.name,
-        now=checked_at,
-        max_backup_age=max_backup_age,
     )
+    # 신선도는 **고정 핀이 아니라 백업 루트 전체**에서 잰다 (newest_backup_age 참고).
+    # 루트는 고정 manifest가 놓인 승인된 위치에서 얻는다 — 런타임이 이미
+    # "manifest의 부모의 부모 == 승인된 백업 루트"임을 검증한다.
+    root = backup_root or evidence.backup_manifest_path.parent.parent
+    newest_age = newest_backup_age(
+        root, checked_at, database_name=evidence.database_path.name
+    )
+    backup_fresh = newest_age is not None and newest_age <= max_backup_age
     owners = tuple(owner.strip() for owner in evidence.writer_owners if owner.strip())
     single_writer = owners == (evidence.expected_writer_owner,)
 

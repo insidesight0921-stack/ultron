@@ -1,0 +1,60 @@
+"""test_private_write_lock.py — 기동 게이트가 막는 것은 쓰기여야 한다 (소스 배선 검증).
+
+2026-08-28: 번들 로딩이 실패하면 텔레그램 봇 프로세스가 통째로 죽었다. 장 중
+손절·익절 모니터가 그 프로세스 안에서 돌기 때문에, 데이터를 지키려는 가드가
+**손절 감시를 꺼서 더 큰 위험을 만들고** 있었다.
+
+봇을 띄우는 것만으로는 부족하다. executor가 없을 때의 폴백이 원본 DB에 직접
+쓰기 때문에, 그대로 두면 번들이 끄겠다고 선언한 통로가 오히려 열린다.
+여기서는 그 두 가지가 코드에 실제로 배선돼 있는지 본다.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SRC = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+
+
+def test_startup_does_not_die_on_a_gate_failure():
+    assert "_start_private_write_runtime()" in SRC
+    body = SRC[SRC.index("def _start_private_write_runtime"):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "_PRIVATE_WRITE_LOCKED = True" in body
+    assert "_configure_private_write_runtime(None)" in body
+
+
+def test_only_gate_errors_are_caught():
+    """넓게 잡으면 코딩 오류까지 '게이트 때문'으로 보인다 — .env에서 한 번 겪었다."""
+    body = SRC[SRC.index("def _start_private_write_runtime"):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "except (PrivateWriteRuntimeError, PrivateWriteCutoverError," in body
+    assert "except Exception:" not in body.split("telegram_notify.send")[0]
+
+
+def test_every_direct_write_goes_through_the_lock():
+    """폴백이 _pdb를 직접 부르면 잠금이 무의미해진다."""
+    for line_no, line in enumerate(SRC.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("_pdb.record_buy(") or stripped.startswith("_pdb.record_sell("):
+            raise AssertionError(f"{line_no}행: 직접 쓰기가 잠금을 우회한다 — {stripped}")
+
+
+def test_the_lock_refuses_instead_of_writing():
+    body = SRC[SRC.index("def _direct_paper_write"):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "if _PRIVATE_WRITE_LOCKED:" in body
+    assert "raise PrivateWriteLocked" in body
+
+
+def test_the_lock_is_off_by_default():
+    """Private write를 도입하지 않은 환경에서는 폴백이 그대로 동작해야 한다."""
+    assert "_PRIVATE_WRITE_LOCKED = False" in SRC
+
+
+def test_the_user_is_told_the_bot_is_still_watching_stops():
+    """'쓰기만 막혔다'를 안 알리면 봇이 죽은 줄 알고 손을 놓는다."""
+    body = SRC[SRC.index("def _start_private_write_runtime"):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "손절 모니터는 그대로" in body
+    assert "private_write_reissue.py" in body

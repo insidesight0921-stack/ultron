@@ -58,6 +58,19 @@ PAPER_DIRECT_WRITER_INVENTORY = (
         target_mode="private-client",
     ),
     PaperDirectWriterPolicy(
+        # 2026-08-28 추가. 장외 신호 대기 큐가 개장 후 체결할 때도 직접 쓴다.
+        # 목록에서 빠져 있었는데, 탐지기가 **호출만** 세고 있어서 드러나지 않았다
+        # (`asyncio.to_thread(_pdb.record_buy, ...)`는 호출이 아니라 참조다).
+        key="telegram-pending",
+        module="telegram_bot.py",
+        function="_drain_pending_orders",
+        operations=frozenset({"paper.buy"}),
+        current_owner="telegram-pending-drain",
+        target_owner="private-data-api",
+        approval_mode="explicit-user-batch",
+        target_mode="private-client",
+    ),
+    PaperDirectWriterPolicy(
         key="telegram-intraday",
         module="telegram_bot.py",
         function="intraday_monitor_job",

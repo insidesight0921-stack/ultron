@@ -262,3 +262,118 @@ def test_activation_permits_from_different_evidence_do_not_match(tmp_path):
 
     with pytest.raises(PrivateWriteActivationError, match="do not match"):
         require_private_write_activation_permit(first, matching_permit=second)
+
+
+# ─── 고정 핀과 신선도 분리 (2026-08-28) ──────────────
+#
+# 이전에는 신선도를 **번들이 고정한 manifest**에서 쟀다. 고정 manifest의 내용
+# 해시가 활성화 지문에 들어가므로 백업을 새로 뜨면 번들을 재발급해야 하는데,
+# 신선도 한도는 24시간이고 백업 스케줄은 주 1회였다. 그래서 재시작하는 순간
+# 텔레그램 봇과 Private API가 함께 죽었다(2026-08-28 실제 발생).
+
+from private_write_readiness import newest_backup_age  # noqa: E402
+
+
+def _extra_snapshot(evidence, name, created_at):
+    """같은 백업 루트에 검증 완료 스냅샷을 하나 더 만든다."""
+    root = evidence.backup_manifest_path.parent.parent
+    src = evidence.backup_manifest_path
+    payload = json.loads(src.read_text(encoding="utf-8"))
+    payload["created_at"] = created_at.isoformat()
+    snapshot = root / name
+    snapshot.mkdir(mode=0o700)
+    manifest = snapshot / "manifest.json"
+    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    manifest.chmod(0o600)
+    return manifest
+
+
+def test_a_stale_pin_still_passes_when_a_recent_backup_exists(tmp_path):
+    """핀은 '이 백업으로 롤백이 검증됐다'는 증거지, '최근'이라는 뜻이 아니다."""
+    evidence = _ready_evidence(tmp_path)
+    old = json.loads(evidence.backup_manifest_path.read_text(encoding="utf-8"))
+    old["created_at"] = (NOW - timedelta(days=30)).isoformat()
+    evidence.backup_manifest_path.write_text(json.dumps(old), encoding="utf-8")
+
+    assert assess_private_write_readiness(evidence, now=NOW).ready is False
+
+    _extra_snapshot(evidence, "recent", NOW - timedelta(hours=2))
+    assert assess_private_write_readiness(evidence, now=NOW).ready is True
+
+
+def test_a_fresh_pin_alone_is_not_enough_if_nothing_recent_exists(tmp_path):
+    """반대 방향도 확인한다 — 최근 백업이 사라지면 통과하면 안 된다."""
+    evidence = _ready_evidence(tmp_path)
+    for manifest in evidence.backup_manifest_path.parent.parent.glob("*/manifest.json"):
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["created_at"] = (NOW - timedelta(days=9)).isoformat()
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+    report = assess_private_write_readiness(evidence, now=NOW)
+    assert report.ready is False and "backup_fresh" in report.failed_codes
+
+
+def test_freshness_takes_the_newest_backup_not_the_first_found(tmp_path):
+    evidence = _ready_evidence(tmp_path)
+    _extra_snapshot(evidence, "aaa-오래됨", NOW - timedelta(days=40))
+    _extra_snapshot(evidence, "zzz-최근", NOW - timedelta(hours=1))
+    age = newest_backup_age(
+        evidence.backup_manifest_path.parent.parent, NOW,
+        database_name=evidence.database_path.name)
+    assert age < timedelta(hours=2)
+
+
+def test_an_unverified_snapshot_does_not_count_as_fresh(tmp_path):
+    """복구 검증을 통과하지 못한 백업은 '최근 백업이 있다'의 근거가 될 수 없다."""
+    evidence = _ready_evidence(tmp_path)
+    manifest = _extra_snapshot(evidence, "unverified", NOW - timedelta(hours=1))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["all_restore_verified"] = False
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    old = json.loads(evidence.backup_manifest_path.read_text(encoding="utf-8"))
+    old["created_at"] = (NOW - timedelta(days=30)).isoformat()
+    evidence.backup_manifest_path.write_text(json.dumps(old), encoding="utf-8")
+
+    assert assess_private_write_readiness(evidence, now=NOW).ready is False
+
+
+def test_a_snapshot_for_another_database_does_not_count(tmp_path):
+    """paper.db 백업만 최근이라면 assistant.db는 여전히 오래된 것이다."""
+    evidence = _ready_evidence(tmp_path)
+    manifest = _extra_snapshot(evidence, "다른DB", NOW - timedelta(hours=1))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    for item in payload["databases"]:
+        item["database"] = "paper.db"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    old = json.loads(evidence.backup_manifest_path.read_text(encoding="utf-8"))
+    old["created_at"] = (NOW - timedelta(days=30)).isoformat()
+    evidence.backup_manifest_path.write_text(json.dumps(old), encoding="utf-8")
+
+    assert assess_private_write_readiness(evidence, now=NOW).ready is False
+
+
+def test_no_backup_root_at_all_is_not_fresh(tmp_path):
+    assert newest_backup_age(tmp_path / "없음", NOW, database_name="assistant.db") is None
+
+
+def test_a_future_dated_backup_is_rejected(tmp_path):
+    """시계가 틀렸거나 조작된 백업을 '아주 신선함'으로 받아들이면 안 된다."""
+    evidence = _ready_evidence(tmp_path)
+    for manifest in evidence.backup_manifest_path.parent.parent.glob("*/manifest.json"):
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["created_at"] = (NOW + timedelta(days=1)).isoformat()
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+    report = assess_private_write_readiness(evidence, now=NOW)
+    assert report.ready is False and "backup_fresh" in report.failed_codes
+
+
+def test_one_future_dated_backup_does_not_invalidate_a_good_one(tmp_path):
+    """시계가 틀린 스냅샷 하나가 멀쩡한 최근 백업까지 무효로 만들면 안 된다."""
+    evidence = _ready_evidence(tmp_path)
+    _extra_snapshot(evidence, "시계틀림", NOW + timedelta(days=1))
+    _extra_snapshot(evidence, "정상", NOW - timedelta(hours=1))
+    old = json.loads(evidence.backup_manifest_path.read_text(encoding="utf-8"))
+    old["created_at"] = (NOW - timedelta(days=30)).isoformat()
+    evidence.backup_manifest_path.write_text(json.dumps(old), encoding="utf-8")
+    assert assess_private_write_readiness(evidence, now=NOW).ready is True
