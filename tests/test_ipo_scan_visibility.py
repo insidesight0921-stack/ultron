@@ -114,3 +114,47 @@ def test_ungraded_alert_says_it_is_not_a_lack_of_appeal():
 def test_a_graded_scan_clears_the_ungraded_streak():
     body = _job((SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8"))
     assert 'flag.pop("_ungraded_weeks", None)' in body
+
+
+# ─── 사전 단계는 고장이 아니다 (2026-08-28 실측) ─────
+#
+# KIND는 공모금액을 **확정공모가가 나온 뒤에만** 채운다(실측 10건: 확정가 있는
+# 9건 전부 값 있음, 미정 1건만 None). 즉 공모규모는 사전에 확보할 수 있는
+# 요소가 아니다. 유통물량 파서가 없는 지금, 사전 단계에서 얻는 것은 주관사
+# 하나뿐이라 등급 불가가 **구조**다. 이걸 고장으로 경고하면 매주 거짓 경보다.
+
+from ipo_bot import STAGE_FINAL, STAGE_PRE  # noqa: E402
+
+
+def _pre(name="가"):
+    return {"corp_name": name, "grade": "?", "stage": STAGE_PRE}
+
+
+def _fin(name="나", grade="?"):
+    return {"corp_name": name, "grade": grade, "stage": STAGE_FINAL}
+
+
+def test_all_pre_stage_is_not_a_fault():
+    d = ipo_bot.diagnose_scan([_pre("가"), _pre("나")], MIN)
+    assert d["verdict"] == "pre_stage_only"
+
+
+def test_a_confirmed_stage_failure_is_still_a_fault():
+    """수요예측이 끝났는데도 등급이 없으면 그건 진짜 확인 대상이다."""
+    d = ipo_bot.diagnose_scan([_pre("가"), _fin("나")], MIN)
+    assert d["verdict"] == "all_ungraded"
+
+
+def test_pre_stage_only_does_not_warn():
+    body = _job((SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8"))
+    i = body.index('"pre_stage_only"')
+    j = body.index('"all_ungraded"')
+    assert i < j                       # 경고 분기보다 먼저 걸러야 한다
+    assert 'flag.pop("_ungraded_weeks", None)' in body[i:j]
+
+
+def test_pre_stage_only_clears_the_streak():
+    """사전 단계가 이어지는 동안 연속 카운트가 쌓이면 나중에 오경보가 터진다."""
+    body = _job((SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8"))
+    i = body.index('"pre_stage_only"')
+    assert "_ungraded_weeks" in body[i:i + 400]

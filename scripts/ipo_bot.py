@@ -1626,8 +1626,19 @@ def diagnose_scan(results: list[dict], min_grade: set) -> dict:
                if r.get("grade", UNGRADED) in min_grade
                and r.get("stage") == STAGE_PRE]
 
+    # 전원 사전 단계라면 등급이 없는 것이 **정상**이다.
+    # 2026-08-28 실측으로 확인된 사실: 공모금액은 KIND가 **확정공모가가 나온 뒤에만**
+    # 채운다(확정가 있는 9건 전부 값 있음, 미정 1건만 None). 즉 공모규모는 사전에
+    # 확보할 수 있는 요소가 아니다. 유통물량 파서가 없는 지금 사전 단계에서 얻을 수
+    # 있는 것은 주관사 하나뿐이라, 등급 불가가 고장이 아니라 구조다.
+    # 이걸 `all_ungraded`로 두면 매주 잘못된 고장 경고가 나간다.
+    pre_only = bool(ungraded) and all(
+        r.get("stage") == STAGE_PRE for r in ungraded)
+
     if hot:
         verdict = "hot"
+    elif len(ungraded) == len(results) and pre_only:
+        verdict = "pre_stage_only"
     elif len(ungraded) == len(results):
         verdict = "all_ungraded"
     elif preview:

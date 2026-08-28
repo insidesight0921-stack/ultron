@@ -3067,6 +3067,17 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     diag = ipo_diagnose_scan(results, IPO_MIN_GRADE)
     hot = diag["hot"]
 
+    if diag["verdict"] == "pre_stage_only":
+        # 전원 수요예측 전 — 등급이 없는 것이 정상이다. 경고하지 않는다.
+        flag.pop("_ungraded_weeks", None)
+        log.info("IPO봇: 후보 %d건 전원 수요예측 전 — 등급 산출은 수요예측 후",
+                 diag["n"])
+        for uid in pending:
+            pushed.add(uid)
+        flag[week_key] = sorted(pushed)
+        _save_ipo_flag(flag)
+        return
+
     if diag["verdict"] == "all_ungraded":
         ung_weeks = sorted(set(flag.get("_ungraded_weeks", [])) | {week_key})
         flag["_ungraded_weeks"] = ung_weeks[-12:]
