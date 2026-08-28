@@ -597,19 +597,40 @@ class TestScanBandBackfill:
         assert results[0]["band_low"] == 12000
         assert results[0]["band_high"] == 15000
 
-    def test_no_dart_call_when_band_present_and_forecast_pending(self):
-        # 밴드 이미 있음(38 종목) + 수요예측 미래 → DART 호출 불필요
+    def test_no_dart_call_when_nothing_is_missing(self):
+        """밴드·유통물량이 다 있고 수요예측 전이면 부를 이유가 없다.
+
+        2026-08-28에 조건이 바뀌었다. 이전에는 밴드만 보고 판단해서, 38이 밴드를
+        주는 종목은 DART를 아예 안 불렀다 — 그래서 **유통물량을 영원히 못 받았고**
+        사전 단계 확정 요소가 주관사 하나로 남았다.
+        """
         item = IpoItem(
             corp_name="38종목", source="38",
             sub_start="29990101", sub_end="29990102",
             demand_end="29991231",
             band_low=10000, band_high=12000, final_price=None,
+            float_ratio=30.0,
         )
         dart_mock = MagicMock(return_value={})
         with patch("ipo_bot.fetch_ipo_schedule", return_value=[item]), \
              patch("ipo_bot.fetch_dart_metrics", dart_mock):
             scan_upcoming(days_ahead=30, top_n=10)
         dart_mock.assert_not_called()
+
+    def test_a_missing_float_ratio_triggers_a_dart_call(self):
+        """유통물량은 38·KIND 어느 쪽도 주지 않는다 — DART에서만 온다."""
+        item = IpoItem(
+            corp_name="38종목", source="38",
+            sub_start="29990101", sub_end="29990102",
+            demand_end="29991231",
+            band_low=10000, band_high=12000, final_price=None,
+        )
+        dart_mock = MagicMock(return_value={"float_ratio": 28.5})
+        with patch("ipo_bot.fetch_ipo_schedule", return_value=[item]), \
+             patch("ipo_bot.fetch_dart_metrics", dart_mock):
+            results = scan_upcoming(days_ahead=30, top_n=10)
+        dart_mock.assert_called()
+        assert results[0]["float_ratio"] == 28.5
 
     def test_dart_called_when_forecast_done(self):
         # 확정가 있음 → 수요예측 종료 확정 → 전체 보강 트리거
@@ -993,15 +1014,23 @@ class TestMergeMetrics:
 
 
 class TestMetricsComplete:
-    def test_rate_and_band_are_enough_to_stop(self):
-        """더 받을 이유가 없으면 다운로드를 멈춘다."""
-        assert metrics_complete({"competition_rate": 63.41, "offer_band_high": 16000.0})
+    def test_everything_present_stops_the_downloads(self):
+        assert metrics_complete({"competition_rate": 63.41, "offer_band_high": 16000.0,
+                                 "float_ratio": 27.29})
 
     def test_a_band_alone_is_not_enough(self):
         assert not metrics_complete({"offer_band_high": 16000.0})
 
     def test_a_rate_alone_is_not_enough(self):
         assert not metrics_complete({"competition_rate": 63.41})
+
+    def test_before_the_forecast_the_rate_is_not_required(self):
+        """아직 존재하지 않는 값을 조건에 넣으면 매번 최대 건수까지 받아 버린다."""
+        assert metrics_complete({"offer_band_high": 16000.0, "float_ratio": 27.29},
+                                need_rate=False)
+
+    def test_the_float_ratio_is_always_required(self):
+        assert not metrics_complete({"offer_band_high": 16000.0}, need_rate=False)
 
 
 # ═══════════════════════════════════════════════════════

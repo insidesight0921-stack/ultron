@@ -1378,7 +1378,7 @@ DART_MAX_FILINGS = 3          # 종목당 파싱할 공시 수 (다운로드 비
 
 # 병합 대상 — 값이 있는 것만 취하고, 먼저 얻은 값을 덮지 않는다
 _MERGE_FIELDS = ("competition_rate", "lockup_ratio", "offer_band_low",
-                 "offer_band_high", "final_price", "above_band")
+                 "offer_band_high", "final_price", "above_band", "float_ratio")
 
 
 def filing_rank(report_nm: str) -> int:
@@ -1417,10 +1417,19 @@ def merge_metrics(chunks: list[dict]) -> dict:
     return out
 
 
-def metrics_complete(metrics: dict) -> bool:
-    """더 읽을 필요가 없는지. 경쟁률과 밴드가 있으면 충분하다."""
-    return (metrics.get("competition_rate") is not None
-            and metrics.get("offer_band_high") is not None)
+def metrics_complete(metrics: dict, *, need_rate: bool = True) -> bool:
+    """더 읽을 필요가 없는지.
+
+    **수요예측 전이면 경쟁률을 기다리지 않는다.** 아직 존재하지 않는 값을
+    조건에 넣으면 매번 최대 건수까지 문서를 받아 버린다.
+    """
+    if metrics.get("offer_band_high") is None:
+        return False
+    if metrics.get("float_ratio") is None:
+        return False
+    if need_rate and metrics.get("competition_rate") is None:
+        return False
+    return True
 
 
 def _demand_forecast_done(item: IpoItem) -> bool:
@@ -1455,6 +1464,7 @@ def fetch_dart_metrics(
     corp_name: str,
     rcept_no: Optional[str] = None,
     days_back: int = 90,
+    need_rate: bool = True,
 ) -> dict:
     """DART 공시에서 수요예측 수치 추출 (캐시 적용).
 
@@ -1545,7 +1555,7 @@ def fetch_dart_metrics(
             continue
         chunks.append({k: v for k, v in result.items()
                        if k not in ("rcept_no", "text_len", "error")})
-        if metrics_complete(merge_metrics(chunks)):
+        if metrics_complete(merge_metrics(chunks), need_rate=need_rate):
             break                      # 필요한 값이 다 모이면 더 받지 않는다
     metrics = merge_metrics(chunks)
 
@@ -1563,9 +1573,14 @@ def enrich_with_dart(item: IpoItem) -> IpoItem:
     38커뮤니케이션에 없는 종목은 DART 증권신고서 본문에서 보완한다.
     (공모 희망가 밴드는 수요예측 이전 증권신고서에 이미 기재됨)
     """
-    metrics = fetch_dart_metrics(item.corp_name, rcept_no=item.rcept_no)
+    metrics = fetch_dart_metrics(item.corp_name, rcept_no=item.rcept_no,
+                                 need_rate=_demand_forecast_done(item))
     if not metrics:
         return item
+    # 유통물량은 **청약 전 증권신고서**에 있다 — 수요예측을 기다리지 않고
+    # 확보할 수 있는 유일한 채점 요소라, 사전 단계 등급이 여기 달려 있다.
+    if item.float_ratio is None and metrics.get("float_ratio"):
+        item.float_ratio = metrics["float_ratio"]
     if item.competition_rate is None and metrics.get("competition_rate"):
         item.competition_rate = metrics["competition_rate"]
     if item.lockup_ratio is None and metrics.get("lockup_ratio"):
@@ -1698,6 +1713,9 @@ def scan_upcoming(
             _demand_forecast_done(item)
             or item.band_low is None
             or item.band_high is None
+            # 유통물량이 비어 있으면 부른다. 38·KIND 어느 쪽도 주지 않는 값이라
+            # 이 조건이 없으면 사전 단계에서 확정 요소가 주관사 하나로 남는다.
+            or item.float_ratio is None
         )
         if needs_dart:
             try:

@@ -159,3 +159,69 @@ def test_a_bare_mention_without_numbers_is_ignored():
 def test_too_few_numbers_is_not_a_table():
     """숫자 두어 개는 표가 아니다 — 문장 속 숫자를 표로 오인하면 안 된다."""
     assert extract_ipo_metrics("수요예측 경쟁률 12.5")["competition_rate"] is None
+
+
+# ─── 유통가능 물량 (2026-08-28 실측) ─────────────────
+#
+# 청약 **전** 증권신고서에 있어서, 수요예측을 기다리지 않고 확보할 수 있는
+# 유일한 채점 요소다. 아래 문장은 전부 저장된 실제 공시에서 발췌했다.
+# 저장 샘플 36건에 돌려 12건 추출, 전부 원문과 대조 확인(오탐 0).
+
+from dart_demand_parser import extract_float_ratio  # noqa: E402
+
+FORM_A = ("당사의 상장예정주식수(금번 공모주식 및 의무인수분 포함) 11,363,649주 중 "
+          "26.42%에 해당하는 3,002,063주는 상장 직후 유통가능 물량에 해당 하며.")
+FORM_B = ("상기의 의무보유 수량을 제외한 주식수 8,071,582주는 상장 직후 시장에서 "
+          "유통가능한 물량이며, 상장예정주식수 기준으로 36.93%에 해당합니다.")
+FORM_C = ("상기의 의무보유 수량을 제외한 주식수 2,119,460주(38.42%)는 상장 직후 "
+          "시장에서 유통가능한 물량에 해당합니다.")
+FORM_D = ("[기간별 유통가능물량] (기준일: 증권신고서 제출일) 구분 주식수 유통가능 주식수 "
+          "비율 상장일 유통가능 12,652,939 DR 25.6% 상장후 1개월뒤 유통가능 "
+          "28,871,128 DR 58.3%")
+WITH_CUMULATIVE = ("당사의 상장예정주식수 3,786,533주 중 58.44%에 해당하는 2,212,851주는 "
+                   "상장 직후 유통가능 물량에 해당합니다. 상장 이후 기간별 누적 유통가능 "
+                   "물량은 상장 후 6개월 뒤 2,298,308주(누적 60.70%), 12개월 뒤 "
+                   "3,786,533주(누적 100.00%)입니다.")
+
+
+def test_the_percentage_before_the_share_count():
+    assert extract_float_ratio(FORM_A) == 26.42
+
+
+def test_the_percentage_after_the_share_count():
+    assert extract_float_ratio(FORM_B) == 36.93
+
+
+def test_the_percentage_in_parentheses():
+    assert extract_float_ratio(FORM_C) == 38.42
+
+
+def test_the_table_form():
+    assert extract_float_ratio(FORM_D) == 25.6
+
+
+def test_the_cumulative_figures_are_not_taken():
+    """같은 문단에 6개월·12개월 후 **누적** 비율이 이어진다. 그걸 잡으면
+    유통물량을 실제보다 크게 봐서 점수가 조용히 낮아진다."""
+    assert extract_float_ratio(WITH_CUMULATIVE) == 58.44
+
+
+def test_a_spac_can_legitimately_be_very_high():
+    """스팩은 발기주주 지분이 작아 유통비율이 90%대다 — 오탐이 아니다.
+    (실측: 6,500,000 / 6,670,000 = 97.45%)"""
+    text = ("당사의 상장예정주식수 6,670,000주 중 97.45%에 해당하는 6,500,000주는 "
+            "상장 직후 유통가능하나,")
+    assert extract_float_ratio(text) == 97.45
+
+
+def test_an_impossible_ratio_is_rejected():
+    """유통비율은 상장예정주식수에 대한 비율이라 100%를 넘을 수 없다."""
+    assert extract_float_ratio("상장예정주식수 100주 중 250.0%에 해당하는 250주는 상장 직후") is None
+
+
+def test_no_mention_is_none():
+    assert extract_float_ratio("유통물량에 관한 일반적인 설명만 있는 문단입니다") is None
+
+
+def test_the_metrics_dict_carries_it():
+    assert extract_ipo_metrics(FORM_A)["float_ratio"] == 26.42

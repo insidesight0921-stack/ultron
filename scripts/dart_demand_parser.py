@@ -219,6 +219,52 @@ def extract_competition_from_table(text: str) -> Optional[float]:
     return best
 
 
+# ─── 유통가능 물량 (2026-08-28 실측) ─────────────────
+#
+# 저장된 실제 공시에서 확인한 표현들. 청약 **전**에 나오는 증권신고서에 있어서,
+# 수요예측 결과를 기다리지 않고 확보할 수 있는 유일한 채점 요소다.
+#
+#   "상장예정주식수(…) 11,363,649주 중 26.42%에 해당하는 3,002,063주는
+#    상장 직후 유통가능 물량에 해당"
+#   "2,119,460주(38.42%)는 상장 직후 시장에서 유통가능한 물량에 해당합니다"
+#   "8,071,582주는 상장 직후 시장에서 유통가능한 물량이며, 상장예정주식수
+#    기준으로 36.93%에 해당합니다"
+#   "[기간별 유통가능물량] … 상장일 유통가능 12,652,939 DR 25.6%"
+#
+# **"상장 직후"에 한정하는 것이 핵심이다.** 같은 문단에 6개월·12개월 후 *누적*
+# 비율이 이어진다("6개월 후 2,428,742주(누적 41.56%)"). 그걸 잡으면 유통물량을
+# 실제보다 크게 봐서 점수가 낮아진다 — 조용히 틀린 값이 들어간다.
+
+_PCT = r"(\d{1,3}(?:\.\d+)?)"
+
+FLOAT_PATTERNS = (
+    r"중\s*" + _PCT + r"\s*%에\s*해당하는\s*[\d,]+\s*주(?:는|가)?\s*상장\s*직후",
+    r"[\d,]+\s*주\s*\(\s*" + _PCT + r"\s*%\s*\)\s*(?:는|가)?\s*상장\s*직후",
+    r"상장\s*직후[^.]{0,60}?유통가능한?\s*물량이며[^.]{0,40}?상장예정주식수\s*"
+    r"기준으로\s*" + _PCT + r"\s*%",
+    r"상장일\s*유통가능\s*[\d,]+\s*\S{0,4}?\s*" + _PCT + r"\s*%",
+)
+
+
+def extract_float_ratio(text: str) -> Optional[float]:
+    """상장 직후 유통가능 비율(%)을 뽑는다(순수). 없으면 None.
+
+    범위를 벗어난 값(0 이하·100 초과)은 버린다 — 유통비율은 상장예정주식수에
+    대한 비율이라 100%를 넘을 수 없다. 넘었다면 다른 숫자를 잡은 것이다.
+    """
+    for pattern in FLOAT_PATTERNS:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        try:
+            value = float(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 0 < value <= 100:
+            return value
+    return None
+
+
 def extract_ipo_metrics(text: str) -> dict:
     """텍스트에서 IPO 수치 추출. 실패한 필드는 None."""
     out = {
@@ -227,6 +273,7 @@ def extract_ipo_metrics(text: str) -> dict:
         "offer_band_low": None,
         "offer_band_high": None,
         "final_price": None,
+        "float_ratio": None,      # 상장 직후 유통가능 비율(%)
         "above_band": None,  # bool
     }
 
@@ -261,6 +308,8 @@ def extract_ipo_metrics(text: str) -> dict:
         if m:
             out["final_price"] = _to_num(m.group(1))
             break
+
+    out["float_ratio"] = extract_float_ratio(text)
 
     if out["final_price"] and out["offer_band_high"]:
         out["above_band"] = out["final_price"] > out["offer_band_high"]
