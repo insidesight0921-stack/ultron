@@ -1365,8 +1365,26 @@ def _get_naver_price(ticker: str) -> float | None:
 
 
 def _get_realtime_price(ticker: str) -> float | None:
-    """장중 현재가 — 네이버 실시간 우선, 실패 시 pykrx 최신 종가 폴백."""
+    """장중 현재가 — 네이버 실시간 우선, 실패 시 pykrx 최신 종가 폴백.
+
+    **청산 판정 전용.** 가격을 아예 모르면 손절 자체를 못 하므로 폴백이 있는 편이 낫고,
+    폴백이 연속되면 `exit_rules.naver_health`가 경고한다.
+    신규 매수에는 쓰지 않는다 — `_get_execution_price`를 쓸 것.
+    """
     return _get_naver_price(ticker) or _get_pykrx_price(ticker)
+
+
+def _get_execution_price(ticker: str) -> float | None:
+    """**신규 매수 체결가 전용 — 폴백 금지.** 네이버 실시간만 쓴다.
+
+    `_get_pykrx_price`는 이름과 달리 '최신 일봉 종가'라, 장중에 부르면 전 거래일 종가가
+    돌아온다. 그 값으로 매수를 기록하면 2026-06-08 사고(4거래일 전 종가로 8종목 진입 →
+    22분 만에 전량 손절, −678만원)와 같은 일이 폴백 경로로 되살아난다.
+
+    청산은 가격을 모르면 판정 자체를 못 하니 폴백이 낫지만, 매수는 **안 사면 그만**이다.
+    못 얻으면 `execution_price`가 대기 큐로 넘긴다.
+    """
+    return _get_naver_price(ticker)
 
 
 def _now_kst():
@@ -1434,13 +1452,12 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
     if not orders:
         return []
 
-    prices: dict = {}
+    # 대기 주문 체결도 매수다 — 폴백 금지(일봉 종가로 채우면 대기시킨 의미가 없다).
     tickers = [o.get("ticker") for o in orders]
     fetched = await asyncio.gather(
-        *(asyncio.to_thread(_get_naver_price, t) for t in tickers)
+        *(asyncio.to_thread(_get_execution_price, t) for t in tickers)
     )
-    for t, px in zip(tickers, fetched):
-        prices[t] = px or await asyncio.to_thread(_get_pykrx_price, t)
+    prices: dict = dict(zip(tickers, fetched))
 
     results = po.revalidate_all(orders, prices, now.date())
     slot_ids = {s["name"]: s["id"] for s in await asyncio.to_thread(_pdb.list_slots)}
@@ -2508,7 +2525,7 @@ async def handle_kium_paper_callback(
         import execution_price as _ep
 
         _live = await asyncio.gather(
-            *(asyncio.to_thread(_get_realtime_price, r["ticker"]) for r in new_results)
+            *(asyncio.to_thread(_get_execution_price, r["ticker"]) for r in new_results)
         )
         _res = _ep.resolve_batch(
             [{"ticker": r["ticker"], "name": r["name"], "price": r.get("current_price", 0)}
@@ -2667,7 +2684,14 @@ async def handle_quant_paper_callback(
             qty = int(pos.get("quantity", 0))
             if qty <= 0 or avg <= 0:
                 continue
-            cur = await asyncio.to_thread(_get_pykrx_price, ticker) or avg
+            # 청산은 폴백을 허용한다(가격을 모르면 정리 자체를 못 함).
+            # 다만 **평균단가로 채우지 않는다** — 그러면 손익 0%인 가짜 청산이 기록된다.
+            cur = await asyncio.to_thread(_get_realtime_price, ticker)
+            if not cur or cur <= 0:
+                lines_result.append(
+                    f"  ⚠ {pos.get('name', ticker)}: 시세를 얻지 못해 퇴출청산 보류 "
+                    f"— 장중 모니터가 다시 판정합니다")
+                continue
             notes = f"[AUTO] {month_key} 콴텍봇 퇴출청산"
             if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
                 _pdb.record_sell(
@@ -2787,7 +2811,7 @@ async def handle_quant_paper_callback(
             import execution_price as _ep
 
             _live = await asyncio.gather(
-                *(asyncio.to_thread(_get_realtime_price, _rec_attr(r, "ticker", ""))
+                *(asyncio.to_thread(_get_execution_price, _rec_attr(r, "ticker", ""))
                   for r in new_recs))
             _res = _ep.resolve_batch(
                 [{"ticker": _rec_attr(r, "ticker", ""), "name": _rec_attr(r, "name", "?"),

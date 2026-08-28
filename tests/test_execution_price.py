@@ -133,3 +133,62 @@ def test_auto_buy_uses_the_realtime_price_helper():
 def test_deferred_items_go_to_the_pending_queue():
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
     assert src.count('r["verdict"] == "defer"') == 2
+
+
+# ─── 시세 소스 분리 (2026-08-28) ─────────────────────
+#
+# `_get_realtime_price`는 네이버 실패 시 pykrx '최신 일봉 종가'로 폴백한다.
+# 장중에 그것은 전 거래일 종가다. 매수에 쓰면 스테일 진입가가 폴백 경로로 되살아난다.
+
+
+def test_buy_paths_use_the_no_fallback_price_source():
+    """매수는 안 사면 그만이다 — 모르는 가격으로 사지 않는다."""
+    src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    fn = src[src.index("def _get_execution_price"):
+             src.index("def ", src.index("def _get_execution_price") + 10)]
+    assert "_get_pykrx_price" not in fn.split('"""')[-1]   # 본문에 폴백이 없다
+    assert "_get_naver_price" in fn
+
+
+def test_no_buy_path_uses_the_fallback_source():
+    """체결가를 만드는 조회 블록에는 폴백 소스가 없어야 한다.
+
+    같은 콜백 안에서도 퇴출청산(매도)은 `_get_realtime_price`를 쓰므로,
+    함수 전체가 아니라 **resolve_batch로 들어가는 조회 구간**만 본다.
+    """
+    src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    for body in _buy_callbacks(src):
+        start = body.index("_live = ")
+        block = body[start:body.index("resolve_batch", start)]
+        assert "_get_execution_price" in block
+        assert "_get_realtime_price" not in block
+        assert "_get_pykrx_price" not in block
+
+
+def test_pending_drain_also_refuses_the_fallback():
+    """대기 주문 체결도 매수다 — 일봉 종가로 채우면 대기시킨 의미가 없다."""
+    src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    fn = src[src.index("async def _drain_pending_orders"):
+             src.index("async def intraday_monitor_job")]
+    assert "_get_execution_price" in fn and "_get_pykrx_price" not in fn
+
+
+def test_exit_paths_keep_the_fallback():
+    """청산은 가격을 모르면 판정 자체를 못 한다 — 폴백을 남긴다."""
+    src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    monitor = src[src.index("async def intraday_monitor_job"):]
+    assert "_get_pykrx_price" in monitor
+
+
+def test_exit_does_not_fabricate_a_break_even_price():
+    """평균단가로 채우면 손익 0%인 가짜 청산이 기록된다."""
+    src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    assert "_get_pykrx_price, ticker) or avg" not in src
+
+
+def _buy_callbacks(src):
+    kium = src[src.index("async def handle_kium_paper_callback"):
+               src.index("async def handle_quant_paper_callback")]
+    quant_start = src.index("async def handle_quant_paper_callback")
+    rest = src[quant_start + 10:]
+    return kium, src[quant_start:quant_start + 10 + rest.index("\nasync def ")]
