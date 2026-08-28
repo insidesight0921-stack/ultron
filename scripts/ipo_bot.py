@@ -846,17 +846,18 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
         days_ahead, include_all=True)
 
     # ── 캘린더 맵 ──────────────────────────────────────
-    kind_map: dict[str, IpoItem] = {it.corp_name: it for it in kind_items}
+    kind_map: dict[str, IpoItem] = build_match_map(kind_items)
 
     # ── 공모기업현황 맵 ────────────────────────────────
     # 보강 맵은 **필터 전 전체**로 만든다(위 include_all 주석 참고).
-    progcom_map: dict[str, IpoItem] = {it.corp_name: it for it in progcom_all}
+    # 대조는 이름 완전 일치가 아니라 정규화된 키로 한다.
+    progcom_map: dict[str, IpoItem] = build_match_map(progcom_all)
 
     # ── 38 기반으로 병합 ───────────────────────────────
     merged: dict[str, IpoItem] = {}
     for item in items_38:
         # KIND 캘린더 → 수요예측 기간 보강
-        k = kind_map.get(item.corp_name)
+        k = kind_map.get(match_key(item.corp_name))
         if k and (k.demand_start or k.demand_end):
             item = _replace(item,
                             demand_start=item.demand_start or k.demand_start,
@@ -865,7 +866,7 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
         if k and k.listing_date and not item.listing_date:
             item = _replace(item, listing_date=k.listing_date)
         # KIND 공모기업현황 → 누락 필드 보강
-        p = progcom_map.get(item.corp_name)
+        p = progcom_map.get(match_key(item.corp_name))
         if p:
             item = _replace(item,
                 band_low=item.band_low or p.band_low,
@@ -879,14 +880,14 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
                 demand_start=item.demand_start or p.demand_start,
                 demand_end=item.demand_end or p.demand_end,
             )
-        merged[item.corp_name] = item
+        merged[match_key(item.corp_name)] = item
 
     # ── KIND에만 있는 종목 추가 ────────────────────────
     added_cal = 0
     for item in kind_items:
-        if item.corp_name not in merged:
+        if match_key(item.corp_name) not in merged:
             # 공모기업현황으로 보강
-            p = progcom_map.get(item.corp_name)
+            p = progcom_map.get(match_key(item.corp_name))
             if p:
                 item = _replace(item,
                     band_low=item.band_low or p.band_low,
@@ -896,21 +897,21 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
                     underwriter=item.underwriter or p.underwriter,
                     listing_date=item.listing_date or p.listing_date,
                 )
-            merged[item.corp_name] = item
+            merged[match_key(item.corp_name)] = item
             added_cal += 1
 
     # ── 공모기업현황에만 있는 종목 추가 ──────────────
     added_prog = 0
     for item in progcom_items:
-        if item.corp_name not in merged:
-            k = kind_map.get(item.corp_name)
+        if match_key(item.corp_name) not in merged:
+            k = kind_map.get(match_key(item.corp_name))
             if k:
                 item = _replace(item,
                     demand_start=item.demand_start or k.demand_start,
                     demand_end=item.demand_end or k.demand_end,
                     listing_date=item.listing_date or k.listing_date,
                 )
-            merged[item.corp_name] = item
+            merged[match_key(item.corp_name)] = item
             added_prog += 1
 
     # ── listing_date < sub_start 모순 제거 ───────────────
@@ -1292,6 +1293,49 @@ def _save_dart_cache(cache: dict) -> None:
         )
     except Exception as e:
         log.warning(f"DART 캐시 저장 실패: {e}")
+
+
+def match_key(name: str) -> str:
+    """종목명 → 소스 간 대조용 키(순수).
+
+    38커뮤니케이션·KIND·DART가 같은 회사를 서로 다르게 적는다. 병합이 **완전
+    일치**만 보고 있어서 하나도 붙지 않았다(2026-08-28 실측: 38 10건 × KIND 10건
+    → 매칭 0건, 공모금액 전멸).
+
+      "덕산넵코어스(구.넵코어스)"  ← 38이 옛 이름을 괄호로 덧붙인다
+      "덕산넵코어스"               ← KIND
+
+    여기서는 **확실한 것만** 없앤다 — 괄호 주석, 공백·가운뎃점 같은 구분자,
+    법인 형태 표기. 스팩 명칭 차이(`KB스팩34호` ↔ `케이비제34호기업인수목적`)는
+    별도 규칙이 필요하고, 실제 KIND 표기를 확인하기 전에는 손대지 않는다 —
+    추측으로 만든 매칭은 **틀린 회사를 붙일 수 있어** 안 붙는 것보다 나쁘다.
+    """
+    s = _normalize_corp_name(name or "")
+    s = re.sub(r"[（(][^)）]*[)）]", "", s)        # 괄호 주석 제거
+    s = re.sub(r"[\s·ㆍ\-_,.]", "", s)            # 구분자 제거
+    return s.lower()
+
+
+def build_match_map(items: list) -> dict:
+    """대조용 키 → 항목. **키가 겹치면 담지 않는다.**
+
+    서로 다른 회사가 같은 키로 접히면 엉뚱한 값이 보강된다. 값이 비는 것보다
+    틀린 값이 붙는 쪽이 나쁘다.
+    """
+    seen: dict = {}
+    dupes = set()
+    for item in items:
+        key = match_key(getattr(item, "corp_name", ""))
+        if not key:
+            continue
+        if key in seen:
+            dupes.add(key)
+            continue
+        seen[key] = item
+    for key in dupes:
+        log.warning("종목명 대조 키 충돌 — 보강에서 제외: %s", key)
+        seen.pop(key, None)
+    return seen
 
 
 def _normalize_corp_name(name: str) -> str:

@@ -1029,8 +1029,8 @@ class TestEnrichmentScope:
             encoding="utf-8")
         body = src[src.index("def fetch_ipo_schedule("):]
         body = body[:body.index("\ndef ", 10)]
-        assert "for it in progcom_all}" in body
-        assert "for it in progcom_items}" not in body
+        assert "build_match_map(progcom_all)" in body
+        assert "progcom_items)" not in body.split("build_match_map(progcom_all)")[1]
 
 
 class TestSpac:
@@ -1082,3 +1082,50 @@ class TestDemandForecastLookup:
     def test_nothing_known_means_no_lookup(self):
         from ipo_bot import _demand_forecast_done
         assert not _demand_forecast_done(_item())
+
+
+# ═══════════════════════════════════════════════════════
+# 15. 소스 간 종목명 대조 (2026-08-28 실측)
+#
+# 38 10건 × KIND 10건 → 매칭 0건이었다. 병합이 이름 **완전 일치**만 봤다.
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import build_match_map, match_key  # noqa: E402
+
+
+class TestMatchKey:
+    def test_a_parenthetical_former_name_is_dropped(self):
+        """38은 옛 이름을 괄호로 덧붙인다: '덕산넵코어스(구.넵코어스)'."""
+        assert match_key("덕산넵코어스(구.넵코어스)") == match_key("덕산넵코어스")
+
+    def test_full_width_parentheses_too(self):
+        assert match_key("브릴스（주1）") == match_key("브릴스")
+
+    def test_spacing_and_separators_do_not_matter(self):
+        assert match_key("와이즈플래닛 컴퍼니") == match_key("와이즈플래닛컴퍼니")
+        assert match_key("에스·케이") == match_key("에스케이")
+
+    def test_corporate_suffixes_are_dropped(self):
+        assert match_key("(주)브릴스") == match_key("브릴스 주식회사")
+
+    def test_different_companies_still_differ(self):
+        """정규화가 지나치면 엉뚱한 회사가 붙는다 — 값이 비는 것보다 나쁘다."""
+        assert match_key("네오사피엔스") != match_key("네오이뮨텍")
+        assert match_key("한국스팩17호") != match_key("한국스팩18호")
+
+    def test_an_empty_name_is_an_empty_key(self):
+        assert match_key("") == "" and match_key(None) == ""
+
+
+class TestBuildMatchMap:
+    def test_items_are_reachable_by_key(self):
+        items = [_item(corp_name="덕산넵코어스")]
+        assert build_match_map(items)[match_key("덕산넵코어스(구.넵코어스)")] is items[0]
+
+    def test_colliding_keys_are_dropped_entirely(self):
+        """서로 다른 회사가 같은 키로 접히면 엉뚱한 값이 보강된다."""
+        items = [_item(corp_name="브릴스"), _item(corp_name="(주)브릴스")]
+        assert build_match_map(items) == {}
+
+    def test_nameless_items_are_skipped(self):
+        assert build_match_map([_item(corp_name="")]) == {}
