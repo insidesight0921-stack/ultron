@@ -908,3 +908,97 @@ class TestBandPositionBelowBand:
             underwriter="한국투자증권", offer_amount=200))
         assert res.band_score == 0.0
         assert res.confirmed_factors == 3
+
+
+# ═══════════════════════════════════════════════════════
+# 13. 공시 선택·병합 (2026-08-28)
+#
+# 필요한 값이 한 문서에 다 있지 않다. 밴드는 증권신고서에, 경쟁률·확정가는
+# [발행조건확정]에 있다. 그런데 기존 코드는 rcept_dt 최신순 1건만 읽었다.
+# 스카이랩스는 [발행조건확정](…417)과 [기재정정]투자설명서(…414)가 같은 날
+# 올라왔고, 경쟁률은 앞쪽에만 있었다.
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import (  # noqa: E402
+    filing_rank,
+    merge_metrics,
+    metrics_complete,
+    pick_filings,
+)
+
+
+def _f(nm, dt, no="1"):
+    return {"report_nm": nm, "rcept_dt": dt, "rcept_no": no}
+
+
+class TestFilingRank:
+    def test_the_confirmed_terms_filing_comes_first(self):
+        assert filing_rank("[발행조건확정]증권신고서(지분증권)") < filing_rank("증권신고서(지분증권)")
+
+    def test_a_prospectus_sits_between(self):
+        assert (filing_rank("[발행조건확정]증권신고서")
+                < filing_rank("[기재정정]투자설명서")
+                < filing_rank("증권신고서(지분증권)"))
+
+    def test_unrelated_filings_rank_last(self):
+        for nm in ("철회신고서", "증권발행실적보고서", "분기보고서"):
+            assert filing_rank(nm) > filing_rank("증권신고서(지분증권)")
+
+
+class TestPickFilings:
+    def test_kind_beats_recency(self):
+        """같은 날 올라온 두 건 중 경쟁률이 든 쪽을 골라야 한다."""
+        picked = pick_filings([_f("[기재정정]투자설명서", "20260825", "414"),
+                               _f("[발행조건확정]증권신고서", "20260825", "417")])
+        assert picked[0]["rcept_no"] == "417"
+
+    def test_recency_breaks_ties_within_a_kind(self):
+        picked = pick_filings([_f("증권신고서(지분증권)", "20260701", "old"),
+                               _f("증권신고서(지분증권)", "20260825", "new")])
+        assert picked[0]["rcept_no"] == "new"
+
+    def test_unrelated_filings_are_dropped_entirely(self):
+        """읽어 봐야 IPO 수치가 없고, 유상증자 실권주 청약 경쟁률 같은
+        **닮은 값**이 있어 오히려 오탐의 원인이 된다."""
+        picked = pick_filings([_f("증권발행실적보고서", "20260828", "x"),
+                               _f("철회신고서", "20260827", "y")])
+        assert picked == []
+
+    def test_the_limit_is_respected(self):
+        many = [_f("증권신고서(지분증권)", f"2026080{i}", str(i)) for i in range(1, 9)]
+        assert len(pick_filings(many, limit=3)) == 3
+
+
+class TestMergeMetrics:
+    def test_the_first_value_wins(self):
+        """우선순위 높은 문서를 먼저 넣으므로, 뒤의 예정가액이 확정가를
+        덮어쓰면 안 된다."""
+        merged = merge_metrics([{"final_price": 10000.0},
+                                {"final_price": 13000.0}])
+        assert merged["final_price"] == 10000.0
+
+    def test_gaps_are_filled_from_later_documents(self):
+        merged = merge_metrics([{"competition_rate": 63.41},
+                                {"offer_band_low": 13000.0, "offer_band_high": 16000.0}])
+        assert merged["competition_rate"] == 63.41
+        assert merged["offer_band_high"] == 16000.0
+
+    def test_nothing_produces_all_none(self):
+        merged = merge_metrics([])
+        assert set(merged.values()) == {None}
+
+    def test_none_never_overwrites_a_value(self):
+        merged = merge_metrics([{"final_price": 10000.0}, {"final_price": None}])
+        assert merged["final_price"] == 10000.0
+
+
+class TestMetricsComplete:
+    def test_rate_and_band_are_enough_to_stop(self):
+        """더 받을 이유가 없으면 다운로드를 멈춘다."""
+        assert metrics_complete({"competition_rate": 63.41, "offer_band_high": 16000.0})
+
+    def test_a_band_alone_is_not_enough(self):
+        assert not metrics_complete({"offer_band_high": 16000.0})
+
+    def test_a_rate_alone_is_not_enough(self):
+        assert not metrics_complete({"competition_rate": 63.41})

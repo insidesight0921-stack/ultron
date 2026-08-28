@@ -1288,6 +1288,73 @@ def _normalize_corp_name(name: str) -> str:
     return s.strip()
 
 
+# ─── 공시 선택 (순수) ────────────────────────────────
+#
+# 2026-08-28 실측에서 드러난 것: 필요한 값이 **한 문서에 다 있지 않다.**
+#
+#   증권신고서(지분증권)      → 공모가 밴드
+#   [발행조건확정]증권신고서   → 확정공모가 + 수요예측 결과(경쟁률)
+#
+# 그런데 기존 코드는 `rcept_dt` 최신순 **1건만** 파싱했다. 같은 날 여러 건이
+# 올라오면 정렬이 무엇을 고를지 알 수 없고, 더 최근 날짜에 다른 종류가 있으면
+# 경쟁률이 든 문서를 아예 안 읽는다. 스카이랩스는 [발행조건확정](…417)과
+# [기재정정]투자설명서(…414)가 같은 날 올라왔다.
+
+_FILING_RANKS = (
+    ("발행조건확정", 0),      # 수요예측 결과·확정가가 여기 있다
+    ("투자설명서", 1),        # 확정 후 문서
+    ("증권신고서", 2),        # 밴드
+)
+_FILING_RANK_OTHER = 9
+DART_MAX_FILINGS = 3          # 종목당 파싱할 공시 수 (다운로드 비용과의 타협)
+
+# 병합 대상 — 값이 있는 것만 취하고, 먼저 얻은 값을 덮지 않는다
+_MERGE_FIELDS = ("competition_rate", "lockup_ratio", "offer_band_low",
+                 "offer_band_high", "final_price", "above_band")
+
+
+def filing_rank(report_nm: str) -> int:
+    """공시 종류 → 우선순위(작을수록 먼저). 관심 밖 문서는 큰 값."""
+    name = report_nm or ""
+    for keyword, rank in _FILING_RANKS:
+        if keyword in name:
+            return rank
+    return _FILING_RANK_OTHER
+
+
+def pick_filings(matches: list[dict], limit: int = DART_MAX_FILINGS) -> list[dict]:
+    """읽을 공시를 고른다(순수). **종류 우선, 그 다음 최신순.**
+
+    관심 밖 문서(철회신고서·증권발행실적보고서 등)는 아예 뺀다 — 읽어 봐야
+    IPO 수치가 없고, 유상증자 실권주 청약 경쟁률 같은 **닮은 값**이 있어서
+    오히려 오탐의 원인이 된다.
+    """
+    ranked = [f for f in matches if filing_rank(f.get("report_nm", "")) < _FILING_RANK_OTHER]
+    ranked.sort(key=lambda f: (filing_rank(f.get("report_nm", "")),
+                               -int(f.get("rcept_dt", "0") or 0)))
+    return ranked[:limit]
+
+
+def merge_metrics(chunks: list[dict]) -> dict:
+    """여러 공시에서 얻은 수치를 합친다(순수). **먼저 얻은 값을 덮지 않는다.**
+
+    우선순위가 높은 문서(발행조건확정)를 먼저 넣으므로, 뒤에 오는 증권신고서의
+    예정가액이 확정가를 덮어쓰는 일이 없다.
+    """
+    out: dict = {k: None for k in _MERGE_FIELDS}
+    for chunk in chunks:
+        for key in _MERGE_FIELDS:
+            if out[key] is None and chunk.get(key) is not None:
+                out[key] = chunk[key]
+    return out
+
+
+def metrics_complete(metrics: dict) -> bool:
+    """더 읽을 필요가 없는지. 경쟁률과 밴드가 있으면 충분하다."""
+    return (metrics.get("competition_rate") is not None
+            and metrics.get("offer_band_high") is not None)
+
+
 def _demand_forecast_done(item: IpoItem) -> bool:
     """수요예측이 끝났는지(=DART에 결과가 올라왔을 시점인지) 확인.
 
@@ -1379,15 +1446,32 @@ def fetch_dart_metrics(
         _save_dart_cache(cache)
         return {}
 
-    # 가장 최근 공시 사용
-    latest = sorted(matches, key=lambda x: x.get("rcept_dt", ""), reverse=True)[0]
-    log.info(
-        f"DART: '{corp_name}' → '{latest.get('corp_name')}' "
-        f"— {latest.get('report_nm')} ({latest.get('rcept_dt')})"
-    )
-    result = ddp.parse_one(latest["rcept_no"], save_text=False)
-    metrics = {k: v for k, v in result.items()
-               if k not in ("rcept_no", "text_len", "error")}
+    # 종류 우선순위로 여러 건을 읽어 **비어 있는 필드만** 채운다.
+    # 밴드는 증권신고서에, 경쟁률·확정가는 [발행조건확정]에 있어서
+    # 한 문서만 읽으면 반드시 무언가가 빈다.
+    picked = pick_filings(matches)
+    if not picked:
+        log.info(f"DART: '{corp_name}' 관련 공시는 있으나 IPO 수치 문서 아님")
+        cache[corp_name] = {"date": today_str, "metrics": {}}
+        _save_dart_cache(cache)
+        return {}
+
+    chunks = []
+    for f in picked:
+        log.info(
+            f"DART: '{corp_name}' → '{f.get('corp_name')}' "
+            f"— {f.get('report_nm')} ({f.get('rcept_dt')})"
+        )
+        try:
+            result = ddp.parse_one(f["rcept_no"], save_text=False)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"{corp_name} 공시 {f.get('rcept_no')} 파싱 실패: {exc}")
+            continue
+        chunks.append({k: v for k, v in result.items()
+                       if k not in ("rcept_no", "text_len", "error")})
+        if metrics_complete(merge_metrics(chunks)):
+            break                      # 필요한 값이 다 모이면 더 받지 않는다
+    metrics = merge_metrics(chunks)
 
     # 캐시 저장 (성공·실패 모두)
     cache[corp_name] = {"date": today_str, "metrics": metrics}

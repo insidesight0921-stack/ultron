@@ -301,6 +301,15 @@ def run_recent(days: int = 30) -> None:
             uniq.append(f)
     print(f"공시 {len(uniq)}건 발견 (중복 제거 후)")
 
+    # 종류 우선순위로 정렬한다 — 최근 20건을 무작정 훑으면 수요예측 결과가
+    # 든 [발행조건확정] 문서가 거의 안 걸린다(2026-08-28 실측: 20건 중 1건).
+    try:
+        from ipo_bot import filing_rank
+        uniq.sort(key=lambda f: (filing_rank(f.get("report_nm", "")),
+                                 -int(f.get("rcept_dt", "0") or 0)))
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 우선순위 정렬 생략: {exc}", file=sys.stderr)
+
     results = []
     for i, f in enumerate(uniq[:20], 1):  # v1: 최대 20건
         rno = f["rcept_no"]
