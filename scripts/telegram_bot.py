@@ -2957,11 +2957,40 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
         return
 
+    # v3.55: **수집 0건과 'A등급 없음'을 구분한다.**
+    # 둘 다 "알림 생략"으로 조용히 끝나던 탓에, 데이터 소스가 몇 달째 0건을
+    # 돌려주고 있는데도 아무도 눈치채지 못했다. 후보가 없는 것은 정상이지만
+    # 수집 자체가 안 되는 것은 고장이다.
+    if not results:
+        zero_weeks = sorted(set(flag.get("_zero_weeks", [])) | {week_key})
+        flag["_zero_weeks"] = zero_weeks[-12:]
+        streak = len(zero_weeks)
+        log.warning("IPO봇: 일정 수집 0건 (연속 %d주) — 데이터 소스 점검 필요", streak)
+        if streak >= 2:      # 한 주는 정말 일정이 없을 수 있다
+            for uid in pending:
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=int(uid),
+                        text=(f"⚠️ IPO봇: 공모 일정 수집이 {streak}주 연속 0건입니다.\n"
+                              f"청약 일정이 정말 없을 수도 있지만, KIND·38커뮤니케이션 "
+                              f"수집이 막혔을 가능성이 큽니다.\n"
+                              f"점검: python3 scripts/ipo_bot.py scan"))
+                except Exception:
+                    pass
+        for uid in pending:
+            pushed.add(uid)
+        flag[week_key] = sorted(pushed)
+        _save_ipo_flag(flag)
+        return
+
+    flag.pop("_zero_weeks", None)       # 수집이 되면 연속 카운트를 끊는다
+
     # A등급 이상만 필터
     hot = [r for r in results if r.get("grade", "?") in IPO_MIN_GRADE]
     if not hot:
-        log.info("IPO봇: A등급 이상 종목 없음 — 알림 생략")
-        # 플래그는 기록해서 이번 주 중복 스캔 방지
+        grades = ", ".join(sorted({r.get("grade", "?") for r in results}))
+        log.info("IPO봇: 후보 %d건이나 A등급 이상 없음 (등급: %s) — 알림 생략",
+                 len(results), grades)
         for uid in pending:
             pushed.add(uid)
         flag[week_key] = sorted(pushed)
