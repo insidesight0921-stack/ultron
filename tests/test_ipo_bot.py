@@ -2,7 +2,7 @@
 
 대상:
   - 5점수 함수 (score_demand / score_band_position / score_float_ratio /
-                 score_underwriter / score_size)
+                 score_underwriter / score_offer_size)
   - compute_attraction_score (정상 / 요소 부족 / 전체 None)
   - _parse_38_html (목 HTML — 실제 38.co.kr 컬럼 구조)
   - _parse_kind_progcom_html (목 HTML — KIND 공모기업현황 구조)
@@ -28,7 +28,7 @@ from ipo_bot import (
     score_band_position,
     score_float_ratio,
     score_underwriter,
-    score_size,
+    score_offer_size,
     compute_attraction_score,
     _parse_38_html,
     _parse_kind_progcom_html,
@@ -50,7 +50,7 @@ def _item(**kw) -> IpoItem:
         band_low=None, band_high=None, final_price=None,
         sub_start=None, sub_end=None, listing_date=None,
         competition_rate=None, float_ratio=None,
-        underwriter=None, market_cap=None, source="test",
+        underwriter=None, offer_amount=None, source="test",
     )
     defaults.update(kw)
     return IpoItem(**defaults)
@@ -207,33 +207,39 @@ class TestScoreUnderwriter:
 
 
 # ═══════════════════════════════════════════════════════
-# 5. score_size
+# 5. score_offer_size  (2026-08-28: 시총 → 공모금액으로 입력 교체)
+#    자동으로 얻을 수 있는 값이 공모금액뿐이고, 단기 수급 부담을 결정하는 것도
+#    시장에 새로 풀리는 금액 쪽이다. 임계값은 전부 가설이다.
 # ═══════════════════════════════════════════════════════
 
-class TestScoreSize:
+class TestScoreOfferSize:
     def test_none(self):
-        assert score_size(None) is None
+        assert score_offer_size(None) is None
 
-    def test_le_500(self):
-        assert score_size(500) == 20.0
+    def test_le_100(self):
+        assert score_offer_size(100) == 20.0
 
-    def test_le_1000(self):
-        assert score_size(1000) == 17.0
+    def test_le_200(self):
+        assert score_offer_size(200) == 17.0
+
+    def test_le_400(self):
+        assert score_offer_size(400) == 14.0
+
+    def test_le_800(self):
+        assert score_offer_size(800) == 11.0
+
+    def test_le_1500(self):
+        assert score_offer_size(1500) == 8.0
 
     def test_le_3000(self):
-        assert score_size(3000) == 14.0
+        assert score_offer_size(3000) == 5.0
 
-    def test_le_5000(self):
-        assert score_size(5000) == 11.0
+    def test_over_3000(self):
+        assert score_offer_size(5000) == 2.0
 
-    def test_le_10000(self):
-        assert score_size(10000) == 8.0
-
-    def test_le_30000(self):
-        assert score_size(30000) == 5.0
-
-    def test_over_30000(self):
-        assert score_size(100000) == 2.0
+    def test_smaller_offer_scores_higher(self):
+        """방향이 뒤집히면 큰 공모를 좋다고 추천하게 된다."""
+        assert score_offer_size(100) > score_offer_size(1000) > score_offer_size(5000)
 
 
 # ═══════════════════════════════════════════════════════
@@ -255,7 +261,7 @@ class TestComputeAttractionScore:
     def test_three_factors_gives_grade(self):
         # demand=17, float=17, size=20 → 54/60 → 90.0 → A++
         res = compute_attraction_score(_item(
-            competition_rate=1000, float_ratio=20, market_cap=500,
+            competition_rate=1000, float_ratio=20, offer_amount=100,
         ))
         assert res.grade != "?"
         assert res.total_score is not None
@@ -268,7 +274,7 @@ class TestComputeAttractionScore:
             band_low=10000, band_high=12000, final_price=13000,
             float_ratio=10,
             underwriter="미래에셋증권",
-            market_cap=300,
+            offer_amount=100,
         ))
         assert res.total_score == 100.0
         assert res.grade == "A++"
@@ -280,14 +286,14 @@ class TestComputeAttractionScore:
             band_low=10000, band_high=12000, final_price=10000,
             float_ratio=60,
             underwriter="알수없는소형증권",
-            market_cap=100000,
+            offer_amount=5000,
         ))
         assert res.total_score is not None
         assert res.grade in ("C", "B")
 
     def test_note_when_partial(self):
         res = compute_attraction_score(_item(
-            competition_rate=500, float_ratio=25, market_cap=1000,
+            competition_rate=500, float_ratio=25, offer_amount=1000,
         ))
         assert res.confirmed_factors == 3
         assert "미확정" in res.note or "확정" in res.note
@@ -298,7 +304,7 @@ class TestComputeAttractionScore:
             band_low=10000, band_high=12000, final_price=11500,
             float_ratio=20,
             underwriter="KB증권",
-            market_cap=2000,
+            offer_amount=2000,
         ))
         assert res.confirmed_factors == 5
         assert res.note == ""
@@ -310,7 +316,7 @@ class TestComputeAttractionScore:
             final_price=11500,        # 밴드 없음
             float_ratio=20,
             underwriter="KB증권",
-            market_cap=2000,
+            offer_amount=2000,
         ))
         assert res.band_score is None
         assert res.confirmed_factors == 4
@@ -318,7 +324,7 @@ class TestComputeAttractionScore:
     def test_grade_thresholds(self):
         # A++ >= 85
         res = compute_attraction_score(_item(
-            competition_rate=1500, float_ratio=15, market_cap=300,
+            competition_rate=1500, float_ratio=15, offer_amount=100,
             underwriter="NH투자증권", band_low=10000, band_high=12000, final_price=13000,
         ))
         assert res.grade == "A++"
@@ -327,7 +333,7 @@ class TestComputeAttractionScore:
         res2 = compute_attraction_score(_item(
             competition_rate=100,  # 8
             float_ratio=35,        # 8
-            market_cap=10000,      # 8
+            offer_amount=1500,      # 8
         ))
         # 24/60 → 40.0 → C
         assert res2.grade in ("C", "B")
@@ -683,7 +689,7 @@ class TestRunSmoke:
             band_low=10000, band_high=12000, final_price=13000,
             sub_start=None, sub_end=None, listing_date=None,
             competition_rate=1000, float_ratio=20,
-            underwriter="KB증권", market_cap=500, source="test",
+            underwriter="KB증권", offer_amount=500, source="test",
         )
     ])
     def test_scan_with_item(self, _mock_sched, _mock_dart):
@@ -701,7 +707,7 @@ class TestRunSmoke:
             final_price=12500,
             float_ratio=22,
             underwriter="미래에셋증권",
-            market_cap=2000,
+            offer_amount=2000,
         )
         assert isinstance(answer, str)
         assert "수동분석종목" in answer
@@ -716,3 +722,155 @@ class TestRunSmoke:
         )
         # analyze 출력 ②번 줄에 밴드 숫자 표시
         assert "13,000~15,000원" in answer
+
+
+# ═══════════════════════════════════════════════════════
+# 12. 시점별 2단계 등급 (2026-08-28)
+#
+# 5요소 중 셋(경쟁률·밴드위치·확정가)은 수요예측이 끝나야 존재한다. 그런데
+# 필요 확정 요소를 일률적으로 3개로 두는 바람에, 청약 전 스캔에서는 아무리
+# 수집이 잘 돼도 등급이 나올 수 없었다. 몇 달간 IPO봇이 아무것도 다루지 못한
+# 원인이 이 어긋남이다.
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import (  # noqa: E402
+    STAGE_FINAL,
+    STAGE_PRE,
+    demand_stage,
+    diagnose_scan,
+    _parse_offer_amount,
+)
+
+
+class TestDemandStage:
+    def test_before_the_forecast_it_is_the_pre_stage(self):
+        assert demand_stage(_item(underwriter="KB증권")) == STAGE_PRE
+
+    def test_a_competition_rate_means_the_forecast_is_done(self):
+        assert demand_stage(_item(competition_rate=800)) == STAGE_FINAL
+
+    def test_a_final_price_also_means_the_forecast_is_done(self):
+        assert demand_stage(_item(final_price=12000)) == STAGE_FINAL
+
+    def test_the_schedule_alone_does_not_decide(self):
+        """일정이 지났다고 결과가 손에 들어온 것은 아니다.
+
+        일정만 보고 '확정 단계'라 선언하면, 확보하지도 못한 값을 요구하다
+        등급이 통째로 사라진다 — 정확히 그 어긋남이 이번 장애의 원인이었다.
+        """
+        assert demand_stage(_item(demand_end="20200101")) == STAGE_PRE
+
+
+class TestTwoStageGrade:
+    def test_two_factors_are_enough_before_the_forecast(self):
+        res = compute_attraction_score(_item(
+            underwriter="미래에셋증권", offer_amount=100))
+        assert res.stage == STAGE_PRE
+        assert res.grade != "?" and res.confirmed_factors == 2
+
+    def test_the_pre_grade_says_it_is_not_for_subscription(self):
+        """요소 2개로 낸 등급을 확정 등급처럼 다루면 과신이 된다."""
+        res = compute_attraction_score(_item(
+            underwriter="미래에셋증권", offer_amount=100))
+        assert "사전등급" in res.note and "자동 구독 대상이 아닙니다" in res.note
+
+    def test_one_factor_is_still_not_enough(self):
+        res = compute_attraction_score(_item(underwriter="KB증권"))
+        assert res.grade == "?" and "공모금액 미확보" in res.note
+
+    def test_the_missing_piece_is_named(self):
+        """'산출불가'만으로는 어느 수집기를 고칠지 알 수 없다."""
+        res = compute_attraction_score(_item(offer_amount=100))
+        assert "주관사 미확보" in res.note
+
+    def test_the_final_stage_still_needs_three(self):
+        res = compute_attraction_score(_item(competition_rate=800, offer_amount=100))
+        assert res.stage == STAGE_FINAL and res.grade == "?"
+
+    def test_a_missing_competition_rate_is_flagged_after_the_forecast(self):
+        """확정가는 왔는데 경쟁률이 없으면 DART 파싱을 의심해야 한다."""
+        res = compute_attraction_score(_item(
+            final_price=12000, band_low=10000, band_high=12000,
+            underwriter="KB증권", offer_amount=100))
+        assert "경쟁률 미확보" in res.note
+
+
+class TestOfferAmountParsing:
+    def test_kind_gives_millions_we_store_hundred_millions(self):
+        assert _parse_offer_amount("13,000") == 130.0      # 130억
+        assert _parse_offer_amount("110,700") == 1107.0
+
+    def test_undetermined_is_none_not_zero(self):
+        """0으로 채우면 '공모금액 0억'이 되어 규모 점수 20점(최고)을 받는다 —
+        없는 정보가 최고 점수로 둔갑한다."""
+        for raw in ("-", "", "미정", "&nbsp;"):
+            assert _parse_offer_amount(raw) is None
+
+    def test_zero_is_treated_as_missing(self):
+        assert _parse_offer_amount("0") is None
+
+
+class TestDiagnoseStages:
+    MIN = {"A++", "A+", "A"}
+
+    def _row(self, grade, stage):
+        return {"corp_name": "가", "grade": grade, "stage": stage}
+
+    def test_a_pre_grade_does_not_trigger_subscription(self):
+        d = diagnose_scan([self._row("A++", STAGE_PRE)], self.MIN)
+        assert d["verdict"] == "preview_only" and d["hot"] == []
+        assert len(d["preview"]) == 1
+
+    def test_a_final_grade_does(self):
+        d = diagnose_scan([self._row("A+", STAGE_FINAL)], self.MIN)
+        assert d["verdict"] == "hot" and len(d["hot"]) == 1
+
+    def test_a_row_without_a_stage_is_treated_as_final(self):
+        """단계를 싣지 않는 옛 기록이 조용히 무시되면 안 된다."""
+        d = diagnose_scan([{"corp_name": "가", "grade": "A"}], self.MIN)
+        assert d["verdict"] == "hot"
+
+
+class TestProgcomOfferAmount:
+    """col6 공모금액(백만원) — 값이 있는데도 읽지 않고 있었다(2026-08-28).
+
+    채점 5요소 중 '규모'가 늘 비어 있던 직접 원인이다.
+    """
+
+    def test_offer_amount_is_converted_to_hundred_millions(self):
+        items = _parse_kind_progcom_html(_MOCK_PROGCOM_HTML)
+        mkn = next(i for i in items if "마키나락스" in i.corp_name)
+        assert mkn.offer_amount == 395.2      # 39,525 백만원 → 395.2억
+
+    def test_a_dash_stays_none(self):
+        items = _parse_kind_progcom_html(_MOCK_PROGCOM_HTML)
+        jst = next(i for i in items if "져스텍" in i.corp_name)
+        assert jst.offer_amount is None
+
+    def test_the_merge_carries_offer_amount_over(self):
+        """공모금액은 KIND 공모기업현황에만 있다. 병합에서 옮기지 않으면
+        38에 실린 종목(대부분)은 규모 요소가 영원히 빈다."""
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def fetch_ipo_schedule("):]
+        body = body[:body.index("\ndef ", 10)]
+        assert body.count("offer_amount=item.offer_amount or p.offer_amount") == 2
+
+
+class TestEndToEndGradeRecovery:
+    """수정 전에는 이 조합이 전부 '?'였다 — 실측(2026-08-28)으로 확인한 회귀."""
+
+    def test_a_merged_item_reaches_a_grade(self):
+        item = _item(
+            band_low=12500, band_high=15000, final_price=15000,
+            underwriter="미래에셋증권", offer_amount=395.2)
+        res = compute_attraction_score(item)
+        assert res.grade != "?" and res.confirmed_factors == 3
+        assert res.stage == STAGE_FINAL
+
+    def test_without_the_offer_amount_it_falls_back_to_ungraded(self):
+        """공모금액 하나가 등급의 성립 여부를 가른다."""
+        item = _item(
+            band_low=12500, band_high=15000, final_price=15000,
+            underwriter="미래에셋증권")
+        assert compute_attraction_score(item).grade == "?"

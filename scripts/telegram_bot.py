@@ -3096,8 +3096,35 @@ async def ipo_weekly_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     flag.pop("_ungraded_weeks", None)    # 등급이 나오면 연속 카운트를 끊는다
 
     if not hot:
-        log.info("IPO봇: 후보 %d건이나 A등급 이상 없음 (등급: %s) — 알림 생략",
-                 diag["n"], ", ".join(diag["grades"]))
+        # v3.56: 사전등급(수요예측 전) 후보는 **알리되 자동 구독은 걸지 않는다.**
+        # 요소 2개로 낸 등급이라 확정 등급과 같이 다루면 정보가 거의 없는 종목이
+        # A++로 올라온다. 대신 "언제 다시 보면 되는지"(수요예측 일정)를 준다.
+        if diag["verdict"] == "preview_only":
+            lines = [f"📋 IPO봇 사전 후보 — {week_key}",
+                     f"(수요예측 전 {len(diag['preview'])}종목 · 참고용)",
+                     ""]
+            for i, r in enumerate(diag["preview"], 1):
+                lines.append(
+                    f"{i}. [{r.get('grade','?')}(사전)] {r.get('corp_name','?')}  "
+                    f"공모 {r.get('offer_amount') or '?'}억 / "
+                    f"{r.get('underwriter') or '주관사?'}")
+                lines.append(
+                    f"   수요예측 {r.get('demand_start') or '?'}~{r.get('demand_end') or '?'}"
+                    f" · 청약 {r.get('sub_start') or '?'}~{r.get('sub_end') or '?'}")
+            lines.append("")
+            lines.append("※ 경쟁률·확정가가 없어 판단 근거가 얇습니다. "
+                         "수요예측 종료 후 확정등급으로 다시 올라옵니다.")
+            text = "\n".join(lines)
+            for uid in pending:
+                try:
+                    await ctx.bot.send_message(chat_id=int(uid), text=text,
+                                               disable_web_page_preview=True)
+                except Exception:
+                    log.warning("IPO 사전 후보 발송 실패 uid=%s", uid, exc_info=True)
+            log.info("IPO봇: 사전등급 후보 %d건 안내 (구독 없음)", len(diag["preview"]))
+        else:
+            log.info("IPO봇: 후보 %d건이나 A등급 이상 없음 (등급: %s) — 알림 생략",
+                     diag["n"], ", ".join(diag["grades"]))
         for uid in pending:
             pushed.add(uid)
         flag[week_key] = sorted(pushed)
@@ -3225,7 +3252,7 @@ async def handle_ipo_paper_callback(
             "band_score": r.get("band_score"),
             "float_score": r.get("float_score"),
             "underwriter_score": r.get("underwriter_score"),
-            "size_score": r.get("size_score"),
+            "offer_size_score": r.get("offer_size_score"),
             "band_high": band_high,
         }
         try:

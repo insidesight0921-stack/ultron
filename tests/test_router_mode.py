@@ -428,14 +428,14 @@ def test_system_prompt_mentions_lockup():
 def test_ipo_extract_full_message():
     """완전한 자연어에서 7개 필드 모두 추출 (실환경 실측 메시지)."""
     q = ("마키나락스 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 "
-         "유통비율 38.5% 확약 78% 시총 800억 미래에셋 매력지수 계산해줘")
+         "유통비율 38.5% 확약 78% 공모금액 800억 미래에셋 매력지수 계산해줘")
     out = router._extract_ipo_fields_from_query(q)
     assert out["competition_rate"] == 1200.0
     assert out["band_low"] == 13000.0 and out["band_high"] == 15000.0
     assert out["final_price"] == 16000.0
     assert out["float_ratio"] == 38.5
     assert out["lockup_ratio"] == 78.0
-    assert out["market_cap"] == 800.0
+    assert out["offer_amount"] == 800.0
     assert out["underwriter"] == "미래에셋"
 
 
@@ -451,8 +451,8 @@ def test_ipo_extract_underwriter_with_jeunggwon_suffix():
 
 
 def test_ipo_extract_comma_numbers():
-    out = router._extract_ipo_fields_from_query("시총 1,200억 경쟁률 1,050")
-    assert out["market_cap"] == 1200.0
+    out = router._extract_ipo_fields_from_query("공모금액 1,200억 경쟁률 1,050")
+    assert out["offer_amount"] == 1200.0
     assert out["competition_rate"] == 1050.0
 
 
@@ -468,7 +468,7 @@ def test_route_ipo_regex_backfills_partial_llm(monkeypatch):
         "mode": "fast",
     }, monkeypatch)
     q = ("마키나락스 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 "
-         "유통비율 38.5% 확약 78% 시총 800억 미래에셋 매력지수 계산해줘")
+         "유통비율 38.5% 확약 78% 공모금액 800억 미래에셋 매력지수 계산해줘")
     res = router.route(q)
     a = res["args"]
     assert res["tool"] == "ipo_bot"
@@ -478,7 +478,7 @@ def test_route_ipo_regex_backfills_partial_llm(monkeypatch):
     assert a["final_price"] == 16000.0
     assert a["float_ratio"] == 38.5
     assert a["lockup_ratio"] == 78.0
-    assert a["market_cap"] == 800.0
+    assert a["offer_amount"] == 800.0
     assert a["underwriter"] == "미래에셋"
 
 
@@ -499,7 +499,7 @@ def test_route_ipo_regex_overrides_wrong_llm_value(monkeypatch):
 
 def test_detect_ipo_analyze_full():
     q = ("마키나락스 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 "
-         "유통비율 38.5% 확약 78% 시총 800억 미래에셋 매력지수 계산해줘")
+         "유통비율 38.5% 확약 78% 공모금액 800억 미래에셋 매력지수 계산해줘")
     out = router._detect_ipo_analyze(q)
     assert out is not None
     assert out["action"] == "analyze"
@@ -508,7 +508,7 @@ def test_detect_ipo_analyze_full():
 
 
 def test_detect_ipo_analyze_corp_before_maeryeok():
-    out = router._detect_ipo_analyze("두산로보틱스 매력지수 경쟁률 900 시총 1000억")
+    out = router._detect_ipo_analyze("두산로보틱스 매력지수 경쟁률 900 공모금액 1000억")
     assert out is not None
     assert out["corp_name"] == "두산로보틱스"
 
@@ -540,7 +540,7 @@ def test_route_ipo_override_when_llm_picks_knowledge(monkeypatch):
         "mode": "fast",
     }, monkeypatch)
     q = ("마키나락스 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 "
-         "유통비율 38.5% 확약 78% 시총 800억 미래에셋 매력지수 계산해줘")
+         "유통비율 38.5% 확약 78% 공모금액 800억 미래에셋 매력지수 계산해줘")
     res = router.route(q)
     assert res["tool"] == "ipo_bot"
     a = res["args"]
@@ -557,7 +557,7 @@ def test_route_ipo_short_circuits_without_llm(monkeypatch):
         raise AssertionError("LLM(urlopen)이 호출되면 안 됨 — 단락 실패")
     monkeypatch.setattr(router, "urlopen", boom)
     q = ("마키나락스 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 "
-         "유통비율 38.5% 확약 78% 시총 800억 미래에셋 매력지수 계산해줘")
+         "유통비율 38.5% 확약 78% 공모금액 800억 미래에셋 매력지수 계산해줘")
     res = router.route(q)
     assert res["tool"] == "ipo_bot"
     assert res["args"]["corp_name"] == "마키나락스"
@@ -645,3 +645,13 @@ def test_validate_action_schedule_add_bad_action():
 def test_detect_action_schedule_list_automation_word():
     assert router._detect_action_schedule("자동화 목록 보여줘") == {"op": "list"}
     assert router._detect_action_schedule("내 자동화 작업 알려줘") == {"op": "list"}
+
+
+def test_ipo_size_keyword_is_offer_amount_not_market_cap():
+    """2026-08-28: 규모 요소의 입력이 시총 → 공모금액으로 바뀌었다.
+
+    옛 표현('시총 800억')을 계속 받아 공모금액 자리에 넣으면, 사용자는 시총을
+    말했는데 공모금액으로 채점된다 — 조용히 다른 값이 되는 쪽이 더 나쁘다.
+    """
+    assert router._extract_ipo_fields_from_query("시총 800억") == {}
+    assert router._extract_ipo_fields_from_query("공모규모 800억")["offer_amount"] == 800.0

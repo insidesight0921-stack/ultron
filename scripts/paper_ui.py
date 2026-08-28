@@ -1243,7 +1243,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <table id="ipo-scan-table">
         <thead><tr>
           <th>등급</th><th>종목명</th><th>청약기간</th><th>상장일</th>
-          <th class="num">공모가</th><th class="num">시총</th>
+          <th class="num">공모가</th><th class="num">공모금액</th>
           <th class="num">점수</th><th>경쟁률</th><th>주관</th><th>청약</th>
         </tr></thead>
         <tbody id="ipo-scan-body"><tr><td colspan="10" style="text-align:center;color:var(--muted);">스캔 버튼을 눌러 데이터를 불러오세요</td></tr></tbody>
@@ -2068,7 +2068,7 @@ function renderIpoScan(items) {
     if (it.final_price) price = fmtNum(it.final_price, "원");
     else if (it.band_low && it.band_high) price = fmtNum(it.band_low) + "~" + fmtNum(it.band_high, "원");
     else if (it.offer_band_high) price = "~" + fmtNum(it.offer_band_high, "원");
-    const mktcap = it.market_cap_100m ? fmtNum(it.market_cap_100m, "억") : "-";
+    const offerAmt = it.offer_amount_100m ? fmtNum(it.offer_amount_100m, "억") : "-";
     const rate = it.competition_rate ? it.competition_rate + ":1" : "-";
     const uw = it.underwriter || "-";
     return `<tr>
@@ -2077,7 +2077,7 @@ function renderIpoScan(items) {
       <td>${subPeriod}</td>
       <td>${listDate}</td>
       <td class="num">${price}</td>
-      <td class="num">${mktcap}</td>
+      <td class="num">${offerAmt}</td>
       <td class="num">${score}</td>
       <td class="num">${rate}</td>
       <td>${uw}</td>

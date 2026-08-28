@@ -115,7 +115,7 @@ class IpoItem:
     final_price: Optional[float] = None   # 확정 공모가
     # 규모
     total_shares: Optional[int] = None    # 총 공모주식 수
-    market_cap: Optional[float] = None    # 상장 시 시총 (억원)
+    offer_amount: Optional[float] = None  # 공모금액 (억원) — KIND 공모기업현황 col6
     # 수요예측
     competition_rate: Optional[float] = None  # 기관 수요예측 경쟁률
     lockup_ratio: Optional[float] = None      # 의무보유 확약 비율 (%)
@@ -142,10 +142,11 @@ class AttractionResult:
     band_score: Optional[float] = None        # 공모가 밴드 위치
     float_score: Optional[float] = None       # 유통 비율
     underwriter_score: Optional[float] = None # 주관사 티어
-    size_score: Optional[float] = None        # 공모 규모(시총)
+    offer_size_score: Optional[float] = None  # 공모 규모(공모금액)
     # 총점
     total_score: Optional[float] = None       # 확정 요소 합산 (100점 환산)
     grade: str = "?"                           # A++/A+/A/B/C/?
+    stage: str = "확정"                        # "사전"(수요예측 전) / "확정"
     confirmed_factors: int = 0                # 확정된 요소 수 (5개 만점)
     note: str = ""                            # 경고·참고 메시지
 
@@ -251,26 +252,38 @@ def score_underwriter(name: Optional[str]) -> Optional[float]:
     return float(_TIER_SCORE[tier])
 
 
-def score_size(market_cap_eok: Optional[float]) -> Optional[float]:
-    """공모 규모(시총, 억원) → 0~20점.
+def score_offer_size(offer_amount_eok: Optional[float]) -> Optional[float]:
+    """공모 규모(**공모금액**, 억원) → 0~20점.
 
-    시총이 작을수록 수급 부담이 적어 단기 상승 여력 ↑.
+    2026-08-28에 입력을 시총에서 공모금액으로 바꿨다. 이유는 두 가지다.
+
+      1) **자동으로 얻을 수 있는 값이 공모금액뿐이다.** KIND 공모기업현황이 주는
+         것은 공모금액(백만원)이고, 시총을 얻으려면 상장예정주식수가 필요한데
+         어느 소스에서도 수집하지 않는다. 공모비율을 가정해 역산하면 근거 없는
+         가정 하나가 점수에 섞인다.
+      2) **단기 수급 부담을 결정하는 것은 시장에 새로 풀리는 금액**이다. 시총이
+         커도 공모금액이 작으면 상장일 매물 부담은 작다. 원래 이 요소의 취지
+         ("규모가 작을수록 단기 상승 여력 ↑")에 공모금액이 더 가깝다.
+
+    **임계값은 전부 가설이다.** 시총 기준(500·1000·3000·5000억…)을 그대로 쓸 수 없어
+    공모금액 분포를 보고 새로 잡았다(스팩·소형 100억 미만 ~ 대형 1000억 이상).
+    표본이 쌓이면 재조정한다.
     """
-    if market_cap_eok is None:
+    if offer_amount_eok is None:
         return None
-    if market_cap_eok <= 500:
+    if offer_amount_eok <= 100:      # 스팩·초소형
         return 20.0
-    if market_cap_eok <= 1000:
+    if offer_amount_eok <= 200:
         return 17.0
-    if market_cap_eok <= 3000:
+    if offer_amount_eok <= 400:
         return 14.0
-    if market_cap_eok <= 5000:
+    if offer_amount_eok <= 800:
         return 11.0
-    if market_cap_eok <= 10000:  # 1조
+    if offer_amount_eok <= 1500:
         return 8.0
-    if market_cap_eok <= 30000:  # 3조
+    if offer_amount_eok <= 3000:
         return 5.0
-    return 2.0
+    return 2.0                       # 대형 공모 — 상장일 매물 부담 큼
 
 
 def _grade(score: float) -> str:
@@ -285,36 +298,79 @@ def _grade(score: float) -> str:
     return "C"
 
 
+STAGE_PRE = "사전"
+STAGE_FINAL = "확정"
+
+# 수요예측 **전에도** 확보 가능한 요소. 나머지 셋(경쟁률·밴드위치·확정가)은
+# 수요예측이 끝나야 비로소 존재한다.
+MIN_CONFIRMED_PRE = 2      # 주관사 + 공모규모
+MIN_CONFIRMED_FINAL = 3
+
+
+def demand_stage(item: IpoItem) -> str:
+    """수요예측 결과가 **실제로 확보됐는지**로 단계를 가른다(순수).
+
+    일정(`demand_end`)이 아니라 **값의 존재**로 판단한다. 일정이 지났다고 결과가
+    손에 들어온 것은 아니고, 일정만 보고 "확정 단계"라고 선언하면 확보하지도 못한
+    값을 요구하다 등급이 통째로 사라진다 — 2026-08 몇 달간 IPO봇이 아무것도
+    다루지 못한 원인이 정확히 이 종류의 어긋남이었다.
+    """
+    if item.competition_rate is not None or item.final_price is not None:
+        return STAGE_FINAL
+    return STAGE_PRE
+
+
 def compute_attraction_score(item: IpoItem) -> AttractionResult:
     """IpoItem → AttractionResult (5요소 계산).
 
     미확정 요소는 제외하고 확정 요소만으로 100점 환산.
-    확정 요소가 3개 미만이면 등급 "?" (신뢰도 부족).
+
+    **필요 확정 요소 수는 단계마다 다르다(2026-08-28).** 5요소 중 셋(경쟁률·
+    밴드위치·확정가)은 수요예측이 끝나야 존재하므로, 청약 전 스캔에서는 아무리
+    수집이 잘 돼도 최대 2개(주관사·공모규모)뿐이다. 여기에 일률적으로 "3개 이상"을
+    요구하면 **청약 전에는 구조적으로 항상 등급 불가**가 된다. 실제로 그랬다.
+
+      - 사전 단계: 2개 이상 → 등급 산출. 정보가 적으므로 `stage="사전"`을 함께 싣고,
+        알림·자동 구독은 확정 단계에만 적용한다(과신 방지).
+      - 확정 단계: 3개 이상 → 기존과 동일.
     """
     d = score_demand(item.competition_rate)
     b = score_band_position(item.band_low, item.band_high, item.final_price)
     f = score_float_ratio(item.float_ratio, item.lockup_ratio)
     u = score_underwriter(item.underwriter)
-    s = score_size(item.market_cap)
+    s = score_offer_size(item.offer_amount)
 
     scores = [d, b, f, u, s]
     confirmed = [v for v in scores if v is not None]
     n = len(confirmed)
 
+    stage = demand_stage(item)
+    required = MIN_CONFIRMED_FINAL if stage == STAGE_FINAL else MIN_CONFIRMED_PRE
+
     total = None
     grade = "?"
     note = ""
 
-    if n >= 3:
+    if n >= required:
         # 확정 요소만으로 100점 환산
         max_possible = n * 20
         raw_sum = sum(confirmed)
         total = round(raw_sum / max_possible * 100, 1)
         grade = _grade(total)
-        if n < 5:
+        if stage == STAGE_PRE:
+            note = (f"📋 사전등급 — 수요예측 전이라 경쟁률·확정가가 없습니다 "
+                    f"(확정 {n}/5). 참고용이며 자동 구독 대상이 아닙니다")
+        elif n < 5:
             note = f"⚠️ {5-n}개 요소 미확정 — 환산 점수 (확정 {n}/5)"
     else:
-        note = f"⚠️ 확정 요소 {n}개 — 신뢰도 부족, 등급 산출 불가"
+        note = (f"⚠️ 확정 요소 {n}개 (필요 {required}개, {stage} 단계) — "
+                f"신뢰도 부족, 등급 산출 불가")
+        if stage == STAGE_PRE and u is None:
+            note += " · 주관사 미확보"
+        if stage == STAGE_PRE and s is None:
+            note += " · 공모금액 미확보"
+    if stage == STAGE_FINAL and item.competition_rate is None:
+        note += " · 경쟁률 미확보(DART 파싱 확인 필요)"
 
     return AttractionResult(
         corp_name=item.corp_name,
@@ -322,9 +378,10 @@ def compute_attraction_score(item: IpoItem) -> AttractionResult:
         band_score=b,
         float_score=f,
         underwriter_score=u,
-        size_score=s,
+        offer_size_score=s,
         total_score=total,
         grade=grade,
+        stage=stage,
         confirmed_factors=n,
         note=note,
     )
@@ -634,6 +691,26 @@ def _parse_date_38_end(s: str, year: int) -> Optional[str]:
     return _parse_date_38(end_str, base_year)
 
 
+def _parse_offer_amount(raw: str) -> Optional[float]:
+    """KIND 공모금액(백만원) → 억원. 미확정("-", "", "미정")은 None.
+
+    **모르는 것을 0으로 두지 않는다.** 0으로 채우면 "공모금액 0억"이 되어
+    규모 점수 20점(최고)을 받는다 — 없는 정보가 최고 점수로 둔갑한다.
+    """
+    if not raw:
+        return None
+    text = raw.replace(",", "").strip()
+    if text in ("-", "미정", "", "&nbsp;"):
+        return None
+    m = re.search(r"\d+(?:\.\d+)?", text)
+    if not m:
+        return None
+    million_won = float(m.group())
+    if million_won <= 0:
+        return None
+    return round(million_won / 100.0, 1)      # 백만원 → 억원
+
+
 def _parse_38_html(html: str) -> list[IpoItem]:
     """38커뮤니케이션 HTML → IpoItem 목록.
 
@@ -771,6 +848,9 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
                 band_low=item.band_low or p.band_low,
                 band_high=item.band_high or p.band_high,
                 final_price=item.final_price or p.final_price,
+                # 공모금액은 KIND 공모기업현황에만 있다. 여기서 옮기지 않으면
+                # 38에 실린 종목(대부분)은 규모 요소가 영원히 비어 있게 된다.
+                offer_amount=item.offer_amount or p.offer_amount,
                 underwriter=item.underwriter or p.underwriter,
                 listing_date=item.listing_date or p.listing_date,
                 demand_start=item.demand_start or p.demand_start,
@@ -789,6 +869,7 @@ def fetch_ipo_schedule(days_ahead: int = 30) -> list[IpoItem]:
                     band_low=item.band_low or p.band_low,
                     band_high=item.band_high or p.band_high,
                     final_price=item.final_price or p.final_price,
+                    offer_amount=item.offer_amount or p.offer_amount,
                     underwriter=item.underwriter or p.underwriter,
                     listing_date=item.listing_date or p.listing_date,
                 )
@@ -1083,6 +1164,12 @@ def _parse_kind_progcom_html(html: str) -> list[IpoItem]:
             else None
         )
 
+        # col6: 공모금액 (백만원) — 2026-08-28 추가.
+        # 여기 값이 있는데도 읽지 않고 있었다. 채점 5요소 중 '규모'가 늘 비어
+        # 있었던 직접적인 원인이다. 억원으로 환산해 싣는다(백만원 ÷ 100).
+        amount_raw = texts[6] if len(texts) > 6 else ""
+        offer_amount = _parse_offer_amount(amount_raw)
+
         # col7: 상장예정일
         listing_raw  = texts[7] if len(texts) > 7 else ""
         listing_date = _parse_date_kind(listing_raw)
@@ -1102,13 +1189,15 @@ def _parse_kind_progcom_html(html: str) -> list[IpoItem]:
             band_low=None,
             band_high=None,
             final_price=final_price,
+            offer_amount=offer_amount,
             underwriter=underwriter,
             source="kind_progcom",
         )
         items.append(item)
         log.debug(
             f"KIND 공모기업현황: {corp_name}  "
-            f"청약 {sub_start}~{sub_end}  상장 {listing_date}  확정가 {final_price}"
+            f"청약 {sub_start}~{sub_end}  상장 {listing_date}  "
+            f"확정가 {final_price}  공모 {offer_amount}억"
         )
 
     log.info(f"KIND 공모기업현황 파싱: {len(items)}건")
@@ -1357,18 +1446,29 @@ def diagnose_scan(results: list[dict], min_grade: set) -> dict:
     """
     if not results:
         return {"verdict": "no_results", "n": 0, "n_ungraded": 0,
-                "grades": [], "hot": []}
+                "grades": [], "hot": [], "preview": []}
     grades = sorted({(r.get("grade") or UNGRADED) for r in results})
     ungraded = [r for r in results if (r.get("grade") or UNGRADED) == UNGRADED]
-    hot = [r for r in results if r.get("grade", UNGRADED) in min_grade]
+
+    # **자동 구독은 확정 단계에서만.** 사전등급은 요소 2개로 낸 값이라 확정 등급과
+    # 같은 임계값으로 다루면 정보가 거의 없는 종목이 A++로 올라온다.
+    hot = [r for r in results
+           if r.get("grade", UNGRADED) in min_grade
+           and r.get("stage", STAGE_FINAL) == STAGE_FINAL]
+    preview = [r for r in results
+               if r.get("grade", UNGRADED) in min_grade
+               and r.get("stage") == STAGE_PRE]
+
     if hot:
         verdict = "hot"
     elif len(ungraded) == len(results):
         verdict = "all_ungraded"
+    elif preview:
+        verdict = "preview_only"      # 사전등급 후보만 있음 — 알리되 구독은 안 함
     else:
         verdict = "no_hot"
     return {"verdict": verdict, "n": len(results), "n_ungraded": len(ungraded),
-            "grades": grades, "hot": hot}
+            "grades": grades, "hot": hot, "preview": preview}
 
 
 def missing_factors(results: list[dict]) -> list[str]:
@@ -1379,7 +1479,7 @@ def missing_factors(results: list[dict]) -> list[str]:
     """
     labels = {"demand_score": "경쟁률", "band_score": "공모가밴드",
               "float_score": "유통물량", "underwriter_score": "주관사",
-              "size_score": "시가총액"}
+              "offer_size_score": "공모금액"}
     out = []
     for key, label in labels.items():
         if results and all(r.get(key) is None for r in results):
@@ -1398,11 +1498,11 @@ def scan_upcoming(
 
     각 결과 dict:
       corp_name, listing_date, sub_start, sub_end,
-      final_price, band_low, band_high, market_cap,
+      final_price, band_low, band_high, offer_amount,
       underwriter, competition_rate, float_ratio,
       grade, total_score, confirmed_factors, note,
       demand_score, band_score, float_score,
-      underwriter_score, size_score
+      underwriter_score, offer_size_score
     """
     items = fetch_ipo_schedule(days_ahead)
     if not items:
@@ -1485,8 +1585,8 @@ def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
             )
         else:
             price_str = "미확정"
-        cap = r.get("market_cap")
-        cap_str = f"{cap:,.0f}억" if cap else "?"
+        amt = r.get("offer_amount")
+        amt_str = f"공모 {amt:,.0f}억" if amt else "?"
         uw = r.get("underwriter") or "?"
         n_conf = r.get("confirmed_factors", 0)
         note = r.get("note", "")
@@ -1501,13 +1601,13 @@ def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
             f"밴드:{_s('band_score')} "
             f"유통:{_s('float_score')} "
             f"주관:{_s('underwriter_score')} "
-            f"규모:{_s('size_score')}"
+            f"규모:{_s('offer_size_score')}"
         )
 
         lines += [
             f"{i}. {emoji} {name}  [{grade}] {score_str} ({n_conf}/5)",
             f"   청약 {sub_s}~{sub_e}  상장 {listing}",
-            f"   공모가 {price_str}  시총 {cap_str}  주관 {uw}",
+            f"   공모가 {price_str}  시총 {amt_str}  주관 {uw}",
             f"   {factor_line}",
         ]
         if note:
@@ -1528,7 +1628,7 @@ def analyze_manual(
     float_ratio: Optional[float] = None,
     lockup_ratio: Optional[float] = None,  # 기관 의무보유 확약 비율 (%)
     underwriter: Optional[str] = None,
-    market_cap: Optional[float] = None,   # 억원
+    offer_amount: Optional[float] = None,  # 공모금액 (억원)
     **kwargs,
 ) -> tuple[str, list]:
     """수동 입력 데이터로 단일 종목 매력지수 산출."""
@@ -1541,7 +1641,7 @@ def analyze_manual(
         float_ratio=float_ratio,
         lockup_ratio=lockup_ratio,
         underwriter=underwriter,
-        market_cap=market_cap,
+        offer_amount=offer_amount,
         source="manual",
     )
     result = compute_attraction_score(item)
@@ -1567,8 +1667,8 @@ def analyze_manual(
            if float_ratio else "  (미확정)"),
         f"④ 주관사 티어:      {_fmt(result.underwriter_score)}/20"
         + (f"  ({underwriter})" if underwriter else "  (미확정)"),
-        f"⑤ 공모 규모(시총):  {_fmt(result.size_score)}/20"
-        + (f"  ({market_cap:,.0f}억원)" if market_cap else "  (미확정)"),
+        f"⑤ 공모 규모(공모금액): {_fmt(result.offer_size_score)}/20"
+        + (f"  ({offer_amount:,.0f}억원)" if offer_amount else "  (미확정)"),
     ]
     if result.note:
         lines += ["", result.note]
@@ -1754,8 +1854,8 @@ def _cli() -> None:
                     d.setdefault("name", d["corp_name"])
                 if "band_high" in d:
                     d.setdefault("offer_band_high", d["band_high"])
-                if "market_cap" in d:
-                    d.setdefault("market_cap_100m", d["market_cap"])
+                if "offer_amount" in d:
+                    d.setdefault("offer_amount_100m", d["offer_amount"])
                 return d
             print(_json.dumps(
                 [_serial(it) for it in (items or [])],
@@ -1773,7 +1873,7 @@ def _cli() -> None:
             float_ratio=getattr(args, "float", None),
             lockup_ratio=getattr(args, "lockup", None),
             underwriter=args.underwriter,
-            market_cap=args.cap,
+            offer_amount=args.cap,
         )
         print(msg)
     elif args.cmd == "debug-html":

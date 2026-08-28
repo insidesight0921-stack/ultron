@@ -262,7 +262,7 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = """당신은 현준의 AI 비서 시스템의 �
   "다음달 공모주 일정" → {{"tool":"ipo_bot","args":{{"action":"scan","days_ahead":30}},"mode":"fast"}}
   "OO 공모주 경쟁률 1200 밴드 13000~15000 확정 16000 시총 800억 확약 78% 미래에셋" →
     {{"tool":"ipo_bot","args":{{"action":"analyze","corp_name":"OO","competition_rate":1200,
-     "band_low":13000,"band_high":15000,"final_price":16000,"market_cap":800,"lockup_ratio":78,"underwriter":"미래에셋증권"}},"mode":"fast"}}
+     "band_low":13000,"band_high":15000,"final_price":16000,"offer_amount":800,"lockup_ratio":78,"underwriter":"미래에셋증권"}},"mode":"fast"}}
 
 ### 10. news_bot()
 - 목적: IT/AI 뉴스(Anthropic·DeepMind·한경IT·NAVER·삼성) 최신 기사 헤드라인+3줄 요약
@@ -806,7 +806,11 @@ _IPO_COMP_RE  = re.compile(r"\uacbd\uc7c1\ub960\s*" + _IPO_NUM)
 _IPO_FINAL_RE = re.compile(r"(?:\ud655\uc815(?:\uacf5\ubaa8\uac00|\uac00)?|\uacf5\ubaa8\uac00)\s*" + _IPO_NUM)
 _IPO_FLOAT_RE = re.compile(r"\uc720\ud1b5\s*\ube44\uc728\s*" + _IPO_NUM)
 _IPO_LOCK_RE  = re.compile(r"(?:\uc758\ubb34\ubcf4\uc720\s*)?\ud655\uc57d\s*" + _IPO_NUM)
-_IPO_CAP_RE   = re.compile(r"(?:\uc2dc\uac00\ucd1d\uc561|\uc2dc\ucd1d)\s*" + _IPO_NUM + r"\s*\uc5b5")
+# 2026-08-28: IPO 채점의 규모 입력이 시총 → 공모금액으로 바뀌었다.
+# 자동 수집으로 얻을 수 있는 값이 공모금액뿐이고, 단기 수급 부담도 그쪽에 가깝다.
+# 옛 표현("시총")은 일부러 받지 않는다 — 사용자는 시총을 말했는데 공모금액으로
+# 채점되면, 조용히 다른 값이 되는 쪽이 더 나쁘다.
+_IPO_CAP_RE   = re.compile(r"(?:\uacf5\ubaa8\uae08\uc561|\uacf5\ubaa8\uaddc\ubaa8|\uacf5\ubaa8\uc561)\s*" + _IPO_NUM + r"\s*\uc5b5")
 
 # \uc8fc\uad00\uc0ac: ipo_bot \ud2f0\uc5b4 \uc0ac\uc804 \ud0a4 + 'OO\uc99d\uad8c' \uc77c\ubc18\ud615. \uae34 \uc774\ub984 \uba3c\uc800 \ub9e4\uce6d.
 try:
@@ -839,7 +843,7 @@ def _extract_ipo_fields_from_query(query: str) -> dict:
         out["lockup_ratio"] = _ipo_f(m.group(1))
     m = _IPO_CAP_RE.search(query)
     if m:
-        out["market_cap"] = _ipo_f(m.group(1))
+        out["offer_amount"] = _ipo_f(m.group(1))
     m = _IPO_UW_RE.search(query)
     if m:
         out["underwriter"] = m.group(1)
@@ -1093,7 +1097,7 @@ def _validate_ipo_args(args: dict) -> dict | None:
         out["corp_name"] = corp_name
         # 수치 파라미터 선택적
         for key in ("competition_rate", "band_low", "band_high", "final_price",
-                    "float_ratio", "lockup_ratio", "market_cap"):
+                    "float_ratio", "lockup_ratio", "offer_amount"):
             v = args.get(key)
             if v is not None:
                 try:
