@@ -96,3 +96,80 @@ def test_send_empty_text_sends_nothing():
     assert tn.send("", token="T", chat_ids=["1"],
                    poster=lambda *a: calls.append(a) or True) == 0
     assert calls == []
+
+
+# ─── .env 로딩 (2026-08-28) ──────────────────────────
+#
+# launchd가 띄운 스크립트는 봇 프로세스의 환경을 물려받지 못한다.
+# 첫 실행에서 "환경변수 없음 — 발송 건너뜀"으로 조용히 아무것도 안 갔다.
+
+
+def test_parse_env_file_handles_comments_quotes_and_blanks():
+    text = '\n'.join(['# 주석', '', 'A=1', 'B = "두 번째"', "C='셋'", '깨진줄', 'D='])
+    assert tn.parse_env_file(text) == {"A": "1", "B": "두 번째", "C": "셋", "D": ""}
+
+
+def test_parse_env_file_keeps_equals_inside_values():
+    assert tn.parse_env_file("URL=https://x?a=1&b=2")["URL"] == "https://x?a=1&b=2"
+
+
+def test_ensure_env_fills_missing_keys(tmp_path, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOWED_TELEGRAM_USER_ID", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=abc\nALLOWED_TELEGRAM_USER_ID=7\n", encoding="utf-8")
+    tn.ensure_env(env)
+    assert tn.os.environ["TELEGRAM_BOT_TOKEN"] == "abc"
+
+
+def test_ensure_env_never_overrides_an_existing_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "이미있음")
+    monkeypatch.delenv("ALLOWED_TELEGRAM_USER_ID", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=파일값\nALLOWED_TELEGRAM_USER_ID=7\n", encoding="utf-8")
+    tn.ensure_env(env)
+    assert tn.os.environ["TELEGRAM_BOT_TOKEN"] == "이미있음"
+    assert tn.os.environ["ALLOWED_TELEGRAM_USER_ID"] == "7"
+
+
+def test_ensure_env_missing_file_is_quiet(tmp_path, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    tn.ensure_env(tmp_path / "없음.env")          # 예외 없이 지나가야 한다
+
+
+def test_send_picks_up_credentials_from_the_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOWED_TELEGRAM_USER_ID", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=T\nALLOWED_TELEGRAM_USER_ID=1,2\n", encoding="utf-8")
+    seen = []
+    n = tn.send("안녕", env_path=env,
+                poster=lambda t, c, x, p: seen.append((t, c)) or True)
+    assert n == 2 and seen == [("T", "1"), ("T", "2")]
+
+
+def test_explicit_arguments_skip_the_env_file(tmp_path):
+    """호출부가 값을 넘겼으면 파일을 읽을 이유가 없다."""
+    env = tmp_path / ".env"          # 존재하지 않는다
+    assert tn.send("x", token="T", chat_ids=["9"], env_path=env,
+                   poster=lambda *a: True) == 1
+
+
+def test_a_coding_error_is_not_disguised_as_a_missing_env_file(monkeypatch, tmp_path):
+    """넓은 except가 NameError를 삼켜 '.env 없음'으로 보이게 만든 적이 있다.
+
+    발송이 왜 안 되는지 알 수 없게 되므로, 파일 오류(OSError)만 조용히 넘어간다.
+    """
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=abc\n", encoding="utf-8")
+
+    def boom(_text):
+        raise NameError("Path is not defined")
+
+    monkeypatch.setattr(tn, "parse_env_file", boom)
+    try:
+        tn.ensure_env(env)
+    except NameError:
+        return                     # 그대로 올라와야 한다
+    raise AssertionError("코딩 오류가 조용히 묻혔다")

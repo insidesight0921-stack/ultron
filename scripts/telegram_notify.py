@@ -10,6 +10,9 @@ Bot API를 직접 부른다. 그 코드가 스크립트마다 복사되면 재�
     Markdown으로 보내면 텔레그램이 파싱 오류로 거절한다. 서식이 필요한 곳만 명시한다.
   - 발송 실패는 예외를 올리지 않고 건수로 돌려준다 — 알림이 안 갔다고 리포트 생성까지
     실패시킬 이유가 없다. 노트는 이미 파일로 남아 있다.
+  - **`.env`를 여기서 읽는다.** 봇 프로세스는 기동 시 `.env`를 읽지만 launchd가 띄우는
+    스크립트는 그 환경을 물려받지 못한다. 스크립트마다 로딩을 기억해 붙이는 대신,
+    자격 정보를 실제로 쓰는 이 모듈이 필요할 때 읽는다. 이미 설정된 값은 덮지 않는다.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import json
 import logging
 import os
 import urllib.request
+from pathlib import Path
 from typing import Iterable, Optional
 
 log = logging.getLogger("telegram_notify")
@@ -64,6 +68,50 @@ def chat_ids_from(raw: Optional[str]) -> list[str]:
 # ─── 경계 ────────────────────────────────────────────
 
 
+ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "ALLOWED_TELEGRAM_USER_ID")
+
+
+def parse_env_file(text: str) -> dict:
+    """.env 텍스트 → {키: 값}(순수). 주석·빈 줄·따옴표를 처리한다."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
+
+
+def default_env_path() -> Path:
+    return Path(__file__).resolve().parent.parent / ".env"
+
+
+def ensure_env(path=None) -> None:
+    """자격 정보가 없으면 `.env`에서 채운다. **이미 있는 값은 덮지 않는다.**
+
+    launchd가 띄운 스크립트는 봇 프로세스의 환경을 물려받지 못한다.
+    python-dotenv가 없어도 동작하도록 직접 읽는다(의존성을 하나 더 만들 이유가 없다).
+    """
+    if all(os.environ.get(k, "").strip() for k in ENV_KEYS):
+        return
+    try:
+        text = Path(path or default_env_path()).read_text(encoding="utf-8")
+    except OSError as exc:
+        # 파일이 없거나 못 읽는 경우만 조용히 넘어간다. 넓게 잡으면 코드 오류까지
+        # ".env 없음"으로 보여서, 발송이 왜 안 되는지 알 수 없게 된다.
+        log.debug(".env 읽기 실패: %s", exc)
+        return
+    values = parse_env_file(text)
+    for key in ENV_KEYS:
+        if not os.environ.get(key, "").strip() and values.get(key):
+            os.environ[key] = values[key]
+
+
 def _post(token: str, chat_id: str, text: str, parse_mode: Optional[str]) -> bool:
     payload: dict = {"chat_id": chat_id, "text": text,
                      "disable_web_page_preview": True}
@@ -86,12 +134,14 @@ def _post(token: str, chat_id: str, text: str, parse_mode: Optional[str]) -> boo
 
 def send(text: str, *, parse_mode: Optional[str] = None,
          token: Optional[str] = None, chat_ids: Optional[Iterable[str]] = None,
-         poster=_post) -> int:
+         poster=_post, env_path=None) -> int:
     """등록된 모든 chat_id에 보낸다. **보낸 조각 수**를 돌려준다(0이면 발송 안 됨).
 
     환경변수가 없으면 조용히 0을 돌려준다 — 토큰 없는 환경에서 리포트 생성이
     실패하면 안 된다.
     """
+    if token is None or chat_ids is None:
+        ensure_env(env_path)
     token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     ids = list(chat_ids) if chat_ids is not None else chat_ids_from(
         os.environ.get("ALLOWED_TELEGRAM_USER_ID"))
