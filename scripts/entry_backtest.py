@@ -336,31 +336,43 @@ def _fetch_universe_series(market_code: str = "1028",
 
 
 def _tag_real_entries() -> str:
-    """실거래 라운드트립 진입 시점 피처 태깅 → 승/패 교차(가설 후보 추출용)."""
-    from datetime import datetime, timedelta
-    from pykrx import stock as stk
+    """실거래 라운드트립 진입 시점 피처 태깅 → 승/패 교차(가설 후보 추출용).
+
+    2026-08-27: 데이터 품질 규칙에 걸린 라운드트립은 뺀다. 진입가가 며칠 전 종가였던
+    건은 '그 시점 피처로 그 결과가 났다'는 관계 자체가 성립하지 않으므로, 승패 교차에
+    넣으면 없는 상관을 만들어 낸다. 시세는 로컬 일봉 캐시를 쓴다(pykrx 불필요).
+    캐시에 거래량이 없어 `vol_z`는 계산하지 않는다 — 없는 값을 0으로 채우면
+    '거래량이 평범했다'는 없는 사실이 만들어진다.
+    """
     import paper_db
+    import price_sanity as ps
     import trade_analytics as ta
 
-    rts = ta.compute_roundtrips(paper_db.list_trades(limit=100000))
-    lines = ["🏷️ 실거래 진입 시점 태깅 (승패 교차용 원자료)"]
-    for r in rts:
-        try:
-            buy = datetime.strptime(r["buy_at"][:10], "%Y-%m-%d")
-            s = (buy - timedelta(days=140)).strftime("%Y%m%d")
-            df = stk.get_market_ohlcv(s, buy.strftime("%Y%m%d"), r["ticker"])
-            closes = [float(x) for x in df["종가"]]
-            vols = [float(x) for x in df["거래량"]]
-            f = compute_features(closes, len(closes) - 1, vols)
-            if not f:
-                continue
-            lines.append(
-                f"{r['buy_at'][:10]} {r['name']} [{'승' if r['pnl'] > 0 else '패'} "
-                f"{r['ret']*100:+.1f}%] ma20 {f['ma20_gap']*100:+.1f}% · "
-                f"ma60 {f['ma60_gap']*100:+.1f}% · dd20 {f['dd20']*100:+.1f}% · "
-                f"5일 {f['ret5']*100:+.1f}% · volz {f['vol_z']:.1f}")
-        except Exception as e:
-            lines.append(f"{r.get('buy_at', '?')[:10]} {r.get('name')}: 조회 실패 {e}")
+    kept, dropped = ta.roundtrips_for_analysis(paper_db.list_trades(limit=100000))
+    calendar = ps.trading_calendar()
+    series: dict = {}
+
+    lines = [f"🏷️ 실거래 진입 시점 태깅 (승패 교차용 원자료) — "
+             f"{len(kept)}건 (품질 제외 {len(dropped)}건)"]
+    for r in kept:
+        buy_day = str(r.get("buy_at") or "")[:10].replace("-", "")
+        ticker = r.get("ticker")
+        if not buy_day or not ticker:
+            continue
+        if ticker not in series:
+            series[ticker] = ps.load_series(ticker, calendar)
+        hist = [c for d, c in series[ticker] if d <= buy_day and c]
+        if len(hist) < 60:
+            lines.append(f"{r['buy_at'][:10]} {r.get('name')}: 일봉 {len(hist)}일 — 건너뜀")
+            continue
+        f = compute_features(hist, len(hist) - 1, None)
+        if not f:
+            continue
+        lines.append(
+            f"{r['buy_at'][:10]} {r['name']} [{'승' if r['pnl'] > 0 else '패'} "
+            f"{r['ret']*100:+.1f}%] ma20 {f['ma20_gap']*100:+.1f}% · "
+            f"ma60 {f['ma60_gap']*100:+.1f}% · dd20 {f['dd20']*100:+.1f}% · "
+            f"5일 {f['ret5']*100:+.1f}%")
     return "\n".join(lines)
 
 
