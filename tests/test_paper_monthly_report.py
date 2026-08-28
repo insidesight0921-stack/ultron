@@ -240,3 +240,64 @@ def test_missing_metric_does_not_render_a_bare_unit():
                         bench={d["date"]: 2000.0 for d in days})
     text = mr.render_note(r)          # 표본이 짧아 베타·알파가 None
     assert "알파 —" in text and "알파 —%" not in text
+
+
+# ─── 텔레그램 요약 (2026-08-28) ──────────────────────
+#
+# 노트를 그대로 보내지 않는다. 표는 폰에서 읽히지 않고, 길면 잘려서 결론이 뒤로 밀린다.
+
+
+def _with_curve(**kw):
+    days = [{"date": f"202608{d:02d}", "total": 100.0 + d} for d in range(1, 29)]
+    return mr.build_report([_rt()], as_of=date(2026, 8, 15),
+                           curve={"days": days, "n_days": 28, "coverage": 1.0,
+                                  "missing_days": [], "missing_tickers": {}},
+                           bench={d["date"]: 2000.0 + i for i, d in enumerate(days)},
+                           **kw)
+
+
+def test_telegram_summary_is_much_shorter_than_the_note():
+    r = _with_curve()
+    assert len(mr.format_telegram(r)) < len(mr.render_note(r)) / 2
+
+
+def test_telegram_summary_avoids_markdown_control_characters():
+    """성과 리포트에는 -, _, *가 흔하다. Markdown으로 보내면 텔레그램이 거절한다."""
+    text = mr.format_telegram(_with_curve())
+    assert "**" not in text and "__" not in text
+
+
+def test_telegram_summary_leads_with_the_headline_numbers():
+    text = mr.format_telegram(_with_curve())
+    head = text.split("\n")[0]
+    assert "2026-08" in head
+    assert "모의투자, 실계좌 아님" in text
+
+
+def test_telegram_summary_carries_the_verdict_and_its_caveat():
+    text = mr.format_telegram(_with_curve())
+    assert "샤프" in text and "6개월 표본 전에는" in text
+
+
+def test_telegram_summary_mentions_exclusions():
+    dropped = [dict(_rt(pnl=-500_000), excluded_kind="stale_price",
+                    excluded_reason="진입가 오류")]
+    text = mr.format_telegram(_with_curve(excluded=dropped))
+    assert "집계 제외 1건" in text and "DB에 남아" in text
+
+
+def test_telegram_summary_without_a_curve_still_reports_trades():
+    text = mr.format_telegram(mr.build_report([_rt()], as_of=date(2026, 8, 15)))
+    assert "완결 1건" in text and "샤프" not in text
+
+
+def test_telegram_summary_points_to_the_note():
+    assert "옵시디언 월간 노트" in mr.format_telegram(_with_curve())
+
+
+def test_notify_failure_does_not_raise(monkeypatch):
+    """알림이 안 갔다고 리포트 생성까지 실패시킬 이유가 없다."""
+    import telegram_notify
+    monkeypatch.setattr(telegram_notify, "send",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("네트워크")))
+    assert mr._notify("x") == 0

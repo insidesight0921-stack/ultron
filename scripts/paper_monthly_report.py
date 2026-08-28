@@ -265,6 +265,50 @@ def render_note(report: dict, data_file: Optional[str] = None) -> str:
     return "\n".join(out)
 
 
+def format_telegram(report: dict) -> str:
+    """텔레그램용 요약(순수). 평문 — 서식 문자를 쓰지 않는다.
+
+    노트를 그대로 보내지 않는다. 표는 폰에서 읽히지 않고, 길면 잘려서 결론이
+    맨 뒤로 밀린다. **판정과 그 근거만** 담고 자세한 내용은 노트로 넘긴다.
+    """
+    n, won, pct = wk._num, wk._won, wk._pct
+    t = report["total"]
+    out = [f"📅 페이퍼 월간 성과 {report['month']}",
+           f"({report['start']} ~ {report['end']} · 모의투자, 실계좌 아님)", "",
+           f"완결 {t['n']}건 · {won(t['pnl'])}원 · 승률 {pct(t['win_rate'])} "
+           f"· PF {n(t['profit_factor'])}"]
+
+    for row in report["slots"]:
+        out.append(f"  {row['label']}{wk._mark(row['n'])} {row['n']}건 "
+                   f"{won(row['pnl'])}원 승률 {pct(row['win_rate'])}")
+
+    m = report.get("month_metrics")
+    if m and m.get("n_days"):
+        out += ["", f"이번 달 자산 {_unit(m['port_return'], '%')} "
+                    f"(코스피 {_unit(m['bench_return'], '%')}, "
+                    f"초과 {_unit(m['excess_return'], '%p')})"]
+        if not m.get("usable"):
+            out.append(f"  ※ {' / '.join(m.get('reasons') or [])}")
+
+    c = report.get("cumulative_metrics")
+    if c and c.get("n_days"):
+        out += ["", f"누적 {c['n_days']}거래일 · 자산 {_unit(c['port_return'], '%')} "
+                    f"· 샤프 {n(c['sharpe'])} · MDD {_unit(c['mdd'], '%')}"]
+        for check in c.get("verdict") or []:
+            mark = ("· 판정 불가" if check["passed"] is None
+                    else ("✅" if check["passed"] else "❌"))
+            out.append(f"  {mark} {check['name']} {n(check['value'])} "
+                       f"(기준 {check['threshold']} {check['direction']})")
+        out.append("  ※ 6개월 표본 전에는 충족해도 전환 근거가 아닙니다.")
+
+    ex = report.get("excluded") or {}
+    if ex.get("n"):
+        out += ["", f"집계 제외 {ex['n']}건 ({won(ex['pnl'])}원) — 진입가 오류. "
+                    f"기록은 DB에 남아 있습니다."]
+    out += ["", "자세한 내용은 옵시디언 월간 노트를 보세요."]
+    return "\n".join(out)
+
+
 def build_data_payload(report: dict) -> dict:
     """재집계용 JSON. 비율이 아니라 충분통계와 원자료를 남긴다."""
     def _d(v):
@@ -324,6 +368,17 @@ def write_report(report: dict, *, vault_root: Path, state_root: Path) -> tuple[P
     return note_target, json_target
 
 
+def _notify(text: str) -> int:
+    """텔레그램 발송. 실패해도 예외를 올리지 않는다 — 알림이 안 갔다고 리포트 생성까지
+    실패시킬 이유가 없다. 노트는 이미 파일로 남아 있다."""
+    try:
+        import telegram_notify
+        return telegram_notify.send(text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("텔레그램 발송 실패: %s", exc)
+        return 0
+
+
 def _cli() -> int:
     ap = argparse.ArgumentParser(description="페이퍼 월간 성과 노트 + 분석 JSON 생성")
     ap.add_argument("--date", help="집계 기준일 YYYY-MM-DD (기본: 오늘)")
@@ -332,6 +387,9 @@ def _cli() -> int:
     ap.add_argument("--vault"), ap.add_argument("--state"), ap.add_argument("--db")
     ap.add_argument("--rf", type=float, default=0.0, help="무위험수익률(연, 0.03 = 3%%)")
     ap.add_argument("--stdout", action="store_true", help="파일로 쓰지 않고 노트만 출력")
+    ap.add_argument("--notify", action="store_true", help="텔레그램으로 요약 발송")
+    ap.add_argument("--notify-only", action="store_true",
+                    help="파일을 쓰지 않고 텔레그램 요약만 발송(점검용)")
     args = ap.parse_args()
 
     as_of = wk._date_of(args.date) or date.today()
@@ -342,6 +400,11 @@ def _cli() -> int:
     report = build_report(kept, as_of=as_of, curve=curve, bench=bench, excluded=dropped,
                           slot_order=["콴텍", "키움", "IPO", wk.MYQUANT_SLOT],
                           rf_annual=args.rf)
+    if args.notify_only:
+        summary = format_telegram(report)
+        print(summary)
+        _notify(summary)
+        return 0
     if args.stdout:
         print(render_note(report))
         return 0
@@ -351,6 +414,10 @@ def _cli() -> int:
         state_root=Path(args.state) if args.state else wk.default_state_root())
     print(f"✅ 월간 노트: {note}")
     print(f"   분석 JSON: {data}")
+    if args.notify:
+        sent = _notify(format_telegram(report))
+        print(f"   텔레그램 발송: {sent}건" if sent
+              else "   텔레그램 발송 안 됨(환경변수 없음)")
     return 0
 
 

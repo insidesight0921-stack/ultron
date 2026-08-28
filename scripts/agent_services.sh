@@ -598,6 +598,7 @@ write_plist_paper_monthly() {
         <string>${PYTHON}</string>
         <string>${SCRIPTS}/paper_monthly_report.py</string>
         <string>--last-month</string>
+        <string>--notify</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -831,7 +832,7 @@ cmd_start() {
     fi
     if [ -f "$PLIST_PAPER_MONTHLY" ]; then
         launchctl load "$PLIST_PAPER_MONTHLY"
-        echo "  ✅ 페이퍼 월간 성과 리포트 등록 (매월 1일 17:00, 직전 달 집계)"
+        echo "  ✅ 페이퍼 월간 성과 리포트 등록 (매월 1일 17:00, 직전 달 집계 + 텔레그램)"
     fi
     echo "▶️  서비스 시작됨"
     sleep 2
