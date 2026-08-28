@@ -128,9 +128,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 def test_both_auto_buy_paths_write_tags():
     """키움·콴텍 두 자동 매수 경로 모두 태그를 남겨야 커버리지가 찬다."""
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
-    assert src.count("kium_tags(") == 2       # 즉시 체결 · 대기 큐 적재
-    assert src.count("quant_tags(") == 2
-    assert src.count("format_note(") == 3      # 키움 · 콴텍 · 대기 체결
+    kium, quant = _buy_callbacks(src)
+    # 주문을 만드는 모든 경로(즉시 체결 · 장외 큐 · 실시세 미확보 큐)에서 태그를 남긴다
+    assert kium.count("kium_tags(") >= 2 and "quant_tags(" not in kium
+    assert quant.count("quant_tags(") >= 2 and "kium_tags(" not in quant
+    assert "format_note(" in kium and "format_note(" in quant
 
 
 def test_tagging_failure_does_not_block_the_buy():
@@ -140,3 +142,13 @@ def test_tagging_failure_does_not_block_the_buy():
         i = src.index(marker)
         window = src[max(0, i - 400):i + 200]
         assert "except Exception" in window
+
+
+def _buy_callbacks(src):
+    """키움·콴텍 자동 매수 콜백 본문 두 개."""
+    kium = src[src.index("async def handle_kium_paper_callback"):
+               src.index("async def handle_quant_paper_callback")]
+    quant_start = src.index("async def handle_quant_paper_callback")
+    rest = src[quant_start + 10:]
+    quant_end = quant_start + 10 + rest.index("\nasync def ")
+    return kium, src[quant_start:quant_end]

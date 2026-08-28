@@ -221,10 +221,30 @@ def test_verdict_marks_unusable_as_undecided():
 
 def test_verdict_checks_direction_per_metric():
     ev = ec.evaluate(_curve(), _bench())
-    ev["sharpe"], ev["mdd"], ev["excess_return"] = 1.5, 10.0, 5.0
+    ev["sharpe"], ev["mdd"], ev["excess_return"], ev["alpha"] = 1.5, 10.0, 5.0, 4.0
     assert all(c["passed"] for c in ec.verdict(ev))
     ev["mdd"] = 20.0                                    # MDD는 작아야 통과
-    assert [c["passed"] for c in ec.verdict(ev)] == [True, False, True]
+    assert [c["passed"] for c in ec.verdict(ev)] == [True, False, True, True]
+
+
+def test_verdict_requires_both_alpha_definitions():
+    """현금 비중이 높으면 하락장에서 초과수익은 저절로 양수가 된다.
+
+    한쪽만 보면 '시장을 이겼다'는 착시를 통과시킨다. 위험 대비로도 앞섰는지를 함께 본다.
+    """
+    ev = ec.evaluate(_curve(), _bench())
+    ev["sharpe"], ev["mdd"] = 1.5, 10.0
+    ev["excess_return"], ev["alpha"] = 5.0, -18.59      # 총액은 앞섰지만 위험 대비 뒤짐
+    by_name = {c["name"]: c["passed"] for c in ec.verdict(ev)}
+    assert by_name["코스피 대비 초과수익"] is True
+    assert by_name["젠센 알파(연환산)"] is False
+    assert not all(c["passed"] for c in ec.verdict(ev))
+
+
+def test_alpha_exactly_zero_does_not_pass():
+    ev = ec.evaluate(_curve(), _bench())
+    ev["alpha"] = 0.0
+    assert {c["name"]: c["passed"] for c in ec.verdict(ev)}["젠센 알파(연환산)"] is False
 
 
 # ─── 표시 ────────────────────────────────────────────

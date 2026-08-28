@@ -266,11 +266,20 @@ def evaluate(curve: dict, bench: dict, *, rf_annual: float = 0.0,
 
 
 def verdict(ev: dict) -> list[dict]:
-    """실전 전환 기준 대조(순수). 판정 불가면 그렇다고 말한다."""
+    """실전 전환 기준 대조(순수). 판정 불가면 그렇다고 말한다.
+
+    계획서의 "코스피 대비 알파 양수 + 3%p 이상"은 두 조건으로 나눠 **둘 다** 본다.
+      - 단순 초과수익 ≥ +3%p — 총액으로 시장을 앞섰는가
+      - 젠센 알파 > 0 — 감수한 위험 대비로도 앞섰는가
+    둘은 반대 방향을 가리킬 수 있다. 현금 비중이 높으면 하락장에서 초과수익은
+    저절로 양수가 되지만(베타가 낮아서), 위험 대비로는 뒤질 수 있다.
+    한쪽만 보면 그 착시를 통과시키게 된다.
+    """
     checks = [
         ("샤프 비율", ev.get("sharpe"), 1.0, "이상"),
         ("MDD", ev.get("mdd"), 15.0, "이내"),
         ("코스피 대비 초과수익", ev.get("excess_return"), 3.0, "이상"),
+        ("젠센 알파(연환산)", ev.get("alpha"), 0.0, "초과"),
     ]
     out = []
     for name, value, threshold, direction in checks:
@@ -278,6 +287,8 @@ def verdict(ev: dict) -> list[dict]:
             passed = None
         elif direction == "이내":
             passed = value <= threshold
+        elif direction == "초과":
+            passed = value > threshold
         else:
             passed = value >= threshold
         out.append({"name": name, "value": value, "threshold": threshold,

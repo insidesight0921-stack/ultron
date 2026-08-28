@@ -2500,15 +2500,45 @@ async def handle_kium_paper_callback(
             lines_result.append(_po.format_queued(_queued))
             new_results = []
 
+    # v3.53: 체결가는 스캔가(일봉 종가)가 아니라 **실행 시점 실시세**로 확정한다.
+    # 스캔 결과의 current_price는 일봉 마지막 종가라, 장중에 사도 전 거래일 종가가
+    # 진입가로 남는다. 실시세를 못 얻으면 일봉으로 대체하지 않고 대기 큐로 보낸다.
+    _resolved: dict = {}
+    if new_results:
+        import execution_price as _ep
+
+        _live = await asyncio.gather(
+            *(asyncio.to_thread(_get_realtime_price, r["ticker"]) for r in new_results)
+        )
+        _res = _ep.resolve_batch(
+            [{"ticker": r["ticker"], "name": r["name"], "price": r.get("current_price", 0)}
+             for r in new_results],
+            {r["ticker"]: px for r, px in zip(new_results, _live)}, alloc_per)
+        _note = _ep.format_resolution(_res)
+        if _note:
+            lines_result.append(_note)
+        _defer = [r for r in _res if r["verdict"] == "defer"]
+        if _defer:
+            _queued = []
+            for _d in _defer:
+                _src = next(r for r in new_results if r["ticker"] == _d["ticker"])
+                try:
+                    import entry_tags as _et
+                    _tags = _et.kium_tags(_src, _rank_of.get(_d["ticker"]))
+                except Exception:
+                    _tags = []
+                _queued.append(_po.make_order(
+                    slot=slot_name, ticker=_d["ticker"], name=_d["name"],
+                    signal_price=float(_d["signal_price"]), alloc=float(alloc_per),
+                    signal_at=_now_kst_, source=f"{week_key} 키움봇", tags=_tags))
+            if _queued:
+                await asyncio.to_thread(_po.enqueue, _queued)
+        _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
+        new_results = [r for r in new_results if r["ticker"] in _resolved]
+
     for result_index, r in enumerate(new_results):
-        price = r.get("current_price", 0)
-        if not price or price <= 0:
-            lines_result.append(f"  ⚠ {r['name']}: 현재가 없음 — 건너뜀")
-            continue
-        qty = int(alloc_per // price)
-        if qty < 1:
-            lines_result.append(f"  ⚠ {r['name']}: 배정금액 부족 — 건너뜀")
-            continue
+        _fill = _resolved[r["ticker"]]
+        price, qty = _fill["price"], _fill["qty"]
         try:
             notes = f"[AUTO] {week_key} 키움봇"
             try:  # 태그는 부가 정보다 — 실패해도 매수를 막지 않는다
@@ -2751,18 +2781,49 @@ async def handle_quant_paper_callback(
                 lines_result.append(_po.format_queued(_queued))
                 new_recs = []
 
+        # v3.53: 체결가는 실행 시점 실시세로 확정한다(키움 경로와 같은 이유)
+        _resolved: dict = {}
+        if new_recs:
+            import execution_price as _ep
+
+            _live = await asyncio.gather(
+                *(asyncio.to_thread(_get_realtime_price, _rec_attr(r, "ticker", ""))
+                  for r in new_recs))
+            _res = _ep.resolve_batch(
+                [{"ticker": _rec_attr(r, "ticker", ""), "name": _rec_attr(r, "name", "?"),
+                  "price": _rec_attr(r, "current_price", 0) or 0} for r in new_recs],
+                {_rec_attr(r, "ticker", ""): px for r, px in zip(new_recs, _live)},
+                alloc_per)
+            _note = _ep.format_resolution(_res)
+            if _note:
+                lines_result.append(_note)
+            _defer = [r for r in _res if r["verdict"] == "defer"]
+            if _defer:
+                _queued = []
+                for _d in _defer:
+                    _src = next(r for r in new_recs
+                                if _rec_attr(r, "ticker", "") == _d["ticker"])
+                    try:
+                        import entry_tags as _et
+                        _tags = _et.quant_tags(_src, _entry_phase)
+                    except Exception:
+                        _tags = []
+                    _queued.append(_po.make_order(
+                        slot=slot_name, ticker=_d["ticker"], name=_d["name"],
+                        signal_price=float(_d["signal_price"]), alloc=float(alloc_per),
+                        signal_at=_now_q, source=f"{month_key} 콴텍봇", tags=_tags))
+                if _queued:
+                    await asyncio.to_thread(_po.enqueue, _queued)
+            _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
+            new_recs = [r for r in new_recs
+                        if _rec_attr(r, "ticker", "") in _resolved]
+
         for result_index, rec in enumerate(new_recs):
             try:
-                price = _rec_attr(rec, "current_price", 0) or 0
                 name = _rec_attr(rec, "name", "?")
                 tkr = _rec_attr(rec, "ticker", "")
-                if price <= 0:
-                    lines_result.append(f"  ⚠ {name}: 현재가 없음 — 건너뜀")
-                    continue
-                qty = int(alloc_per // price)
-                if qty < 1:
-                    lines_result.append(f"  ⚠ {name}: 배정금액 부족 — 건너뜀")
-                    continue
+                _fill = _resolved[tkr]
+                price, qty = _fill["price"], _fill["qty"]
                 notes = f"[AUTO] {month_key} 콴텍봇 신규"
                 try:  # 태그는 부가 정보다 — 실패해도 매수를 막지 않는다
                     import entry_tags

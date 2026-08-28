@@ -203,8 +203,10 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 def test_both_auto_buy_paths_check_market_hours():
     """키움·콴텍 두 경로 모두 장외면 큐로 보내야 한다 — 한쪽만 고치면 편향이 남는다."""
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
-    assert src.count("is_market_hours") == 2
-    assert src.count("_po.enqueue") == 2
+    kium, quant = _buy_callbacks(src)
+    for body in (kium, quant):
+        assert "is_market_hours" in body      # 장외면 큐로
+        assert "_po.enqueue" in body          # 실제로 적재까지
 
 
 def test_intraday_monitor_drains_the_queue():
@@ -231,3 +233,13 @@ def test_drain_clears_the_queue_even_on_failure():
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
     fn = src[src.index("async def _drain_pending_orders"):src.index("async def intraday_monitor_job")]
     assert ".clear)" in fn
+
+
+def _buy_callbacks(src):
+    """키움·콴텍 자동 매수 콜백 본문 두 개."""
+    kium = src[src.index("async def handle_kium_paper_callback"):
+               src.index("async def handle_quant_paper_callback")]
+    quant_start = src.index("async def handle_quant_paper_callback")
+    rest = src[quant_start + 10:]
+    quant_end = quant_start + 10 + rest.index("\nasync def ")
+    return kium, src[quant_start:quant_end]
