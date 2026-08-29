@@ -1322,6 +1322,46 @@ def _save_dart_cache(cache: dict) -> None:
         log.warning(f"DART 캐시 저장 실패: {e}")
 
 
+# 스팩 명칭 대조 (2026-08-28 실측).
+#
+# 38과 DART가 같은 스팩을 완전히 다르게 적는다. 실제로 확인한 표기:
+#
+#   38                DART / KIND
+#   KB스팩34호        케이비제34호기업인수목적
+#   한국스팩17호      한국제17호기업인수목적
+#   NH스팩34호        엔에이치기업인수목적34호
+#
+# 실측 로그: "DART: 'KB스팩34호' 관련 공시 없음" — 부분 문자열 매칭으로는
+# 한 글자도 겹치지 않는다. 그래서 스팩 3종만 유통물량을 못 받았다.
+#
+# 대조 키는 **(증권사, 호수)** 두 가지다. 호수만 맞추면 `KB스팩34호`와
+# `엔에이치기업인수목적34호`가 붙어 **완전히 다른 회사의 값이 들어간다.**
+# 증권사 약칭이 아래 표에 없으면 원문끼리 비교하므로, 못 붙을지언정 틀리게
+# 붙지는 않는다.
+_BROKER_ALIAS = {
+    "KB": "케이비", "NH": "엔에이치", "SK": "에스케이", "IBK": "아이비케이",
+    "DB": "디비", "BNK": "비엔케이", "KTB": "케이티비", "DS": "디에스",
+    "LS": "엘에스", "SGA": "에스지에이", "HB": "에이치비",
+}
+_SPAC_NOISE_RE = re.compile(r"(스팩|기업인수목적|제|호|주식회사|\(주\)|㈜)")
+
+
+def spac_key(name: str) -> Optional[str]:
+    """스팩 명칭 → (증권사, 호수) 키. 스팩이 아니면 None(순수)."""
+    text = (name or "").strip()
+    if not any(marker in text for marker in _SPAC_MARKERS):
+        return None
+    numbers = re.findall(r"\d+", text)
+    if not numbers:
+        return None
+    number = int(numbers[-1])          # "제34호" / "34호" 모두 마지막 숫자가 호수
+    base = _SPAC_NOISE_RE.sub("", re.sub(r"\d+", "", text)).strip()
+    base = _BROKER_ALIAS.get(base.upper(), base)
+    if not base:
+        return None
+    return f"spac:{base}:{number}"
+
+
 def match_key(name: str) -> str:
     """종목명 → 소스 간 대조용 키(순수).
 
@@ -1545,10 +1585,16 @@ def fetch_dart_metrics(
 
     # 기업명 일치 필터 — 정규화 후 부분 문자열 매칭 (양방향)
     norm_query = _normalize_corp_name(corp_name)
+    query_spac = spac_key(corp_name)
     matches = []
     for f in filings:
         dart_name = f.get("corp_name", "")
         norm_dart = _normalize_corp_name(dart_name)
+        # 스팩은 표기가 통째로 다르다 — (증권사, 호수)로 대조한다.
+        if query_spac is not None:
+            if spac_key(dart_name) == query_spac:
+                matches.append(f)
+            continue
         # 어느 쪽이 다른 쪽을 포함하면 매칭
         if norm_query in norm_dart or norm_dart in norm_query:
             matches.append(f)

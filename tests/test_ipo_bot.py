@@ -1202,3 +1202,63 @@ class TestGradeCap:
         res = compute_attraction_score(_item(
             underwriter="미래에셋증권", float_ratio=20.81))
         assert res.total_score == 85.0
+
+
+# ═══════════════════════════════════════════════════════
+# 17. 스팩 명칭 대조 (2026-08-28 실측)
+#
+# 실측 로그: "DART: 'KB스팩34호' 관련 공시 없음 (최근 90일)"
+# 38과 DART가 같은 스팩을 완전히 다르게 적어 한 글자도 겹치지 않는다.
+# ═══════════════════════════════════════════════════════
+
+from ipo_bot import spac_key  # noqa: E402
+
+
+class TestSpacKey:
+    def test_the_three_real_pairs_match(self):
+        """실제 표기에서 확인한 세 쌍."""
+        pairs = [("KB스팩34호", "케이비제34호기업인수목적"),
+                 ("한국스팩17호", "한국제17호기업인수목적"),
+                 ("NH스팩34호", "엔에이치기업인수목적34호")]
+        for short, formal in pairs:
+            assert spac_key(short) == spac_key(formal) is not None
+
+    def test_the_same_number_from_a_different_broker_does_not_match(self):
+        """호수만 맞추면 완전히 다른 회사의 값이 들어간다."""
+        assert spac_key("KB스팩34호") != spac_key("엔에이치기업인수목적34호")
+
+    def test_a_different_number_does_not_match(self):
+        assert spac_key("한국스팩17호") != spac_key("한국제16호기업인수목적")
+
+    def test_an_operating_company_has_no_key(self):
+        for name in ("엘리스그룹", "덕산넵코어스(구.넵코어스)", "브릴스"):
+            assert spac_key(name) is None
+
+    def test_a_spac_without_a_number_has_no_key(self):
+        assert spac_key("기업인수목적회사") is None
+
+    def test_an_unknown_broker_abbreviation_fails_safely(self):
+        """표에 없는 약칭은 못 붙을지언정 **틀리게 붙지는 않는다.**"""
+        assert spac_key("ZZ스팩1호") != spac_key("제트제트제1호기업인수목적")
+
+    def test_corporate_markers_do_not_break_the_key(self):
+        assert spac_key("케이비제34호기업인수목적 주식회사") == spac_key("KB스팩34호")
+
+
+class TestSpacLookupWiring:
+    def test_dart_search_uses_the_spac_key(self):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def fetch_dart_metrics("):]
+        body = body[:body.index("\ndef ", 10)]
+        assert "query_spac = spac_key(corp_name)" in body
+        assert "spac_key(dart_name) == query_spac" in body
+
+    def test_a_spac_query_does_not_fall_through_to_substring_matching(self):
+        """부분 문자열 매칭까지 흘러가면 엉뚱한 회사가 걸릴 수 있다."""
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def fetch_dart_metrics("):]
+        i = body.index("spac_key(dart_name) == query_spac")
+        j = body.index("norm_query in norm_dart")
+        assert "continue" in body[i:j]
