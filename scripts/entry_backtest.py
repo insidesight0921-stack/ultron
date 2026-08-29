@@ -208,6 +208,162 @@ def split_halves(series_list: list[dict]) -> tuple[list[dict], list[dict]]:
     return first, second
 
 
+# ─── 안정성 검사 (2026-08-29) ────────────────────────
+#
+# **왜 필요한가.** 실거래 56건을 아무 의미 없이 무작위로 4분할해 보니, "최고 그룹"이
+# 절반의 확률로 승률 50%·평균 +17.6%로 나왔다(전체는 39.3%·+4.5%). 진입 조건이
+# 아무 정보를 담지 않아도 그 정도는 나온다는 뜻이다. 그래서 조건의 성적을 **혼자
+# 보면 안 되고**, "같은 개수를 아무 때나 샀으면 얼마였나"와 나란히 놓아야 한다.
+#
+# 청산 파라미터에서 같은 검사를 먼저 했고, 1위가 우연임을 밝혀내 변경을 막았다
+# (전후반 불일치 · 부트스트랩 1위 유지율 34% · 2개 경로가 차이의 100%).
+
+
+def _entry_indices(closes: list[float], volumes, condition_fn,
+                   horizon: int, arm, drop) -> list[int]:
+    """조건이 실제로 진입한 시점들(중첩 방지 규칙 그대로, 순수)."""
+    out, i = [], MIN_HISTORY
+    while i < len(closes) - 1:
+        f = compute_features(closes, i, volumes)
+        if f is None or not condition_fn(f):
+            i += 1
+            continue
+        out.append(i)
+        window = closes[i:i + 1 + horizon]
+        r = exit_backtest.simulate_exit(window, closes[i], arm=arm, drop=drop)
+        i += max(r["day"], 1) + 1        # event_study와 같은 재진입 금지 규칙
+    return out
+
+
+def _returns_at(closes: list[float], entries: list[int], horizon: int,
+                arm, drop, cost: float) -> list[float]:
+    """주어진 진입 시점들의 수익률(순수)."""
+    rets = []
+    for i in entries:
+        window = closes[i:i + 1 + horizon]
+        r = exit_backtest.simulate_exit(window, closes[i], arm=arm, drop=drop)
+        rets.append(r["ret"] - cost)
+    return rets
+
+
+def permuted_baseline(series_list: list[dict], condition_fn,
+                      horizon: int = DEFAULT_HORIZON,
+                      arm=DEFAULT_ARM, drop=DEFAULT_DROP,
+                      cost: float = 0.003, trials: int = 200,
+                      seed: int = 20260829) -> dict:
+    """**진입 빈도만 같고 시점은 무작위인** 기준선(순수).
+
+    조건 대신 "확률 p로 진입"하는 함수를 같은 `event_study`에 태운다. 그래야
+    **재진입 금지 규칙이 양쪽에 똑같이** 적용된다.
+
+    첫 구현은 무작위 시점 k개를 뽑아 독립적으로 시뮬레이션했는데, 그건 공정한
+    비교가 아니었다. 실제 조건은 청산할 때까지 다시 사지 않는 반면 무작위 쪽은
+    상승 구간의 여러 시점을 겹쳐 담을 수 있어, **기준선이 실제보다 유리해진다.**
+    실데이터에서 `베이스라인(무조건)` 조건이 백분위 0으로 나와 들켰다 — 정의상
+    시점을 고르지 않는 조건이므로 기준선과 같아야 하는데 그렇지 않았다.
+    음성 대조가 검사 자체의 결함을 잡아낸 것이다.
+
+    반환: {trials, avg_of_avgs, p95, percentile_of_actual, actual, n}
+    """
+    import random as _random
+
+    actual = event_study(series_list, condition_fn, horizon,
+                         arm=arm, drop=drop, cost=cost)
+    if not actual["n"]:
+        return {"trials": 0, "avg_of_avgs": None, "p95": None,
+                "percentile_of_actual": None, "actual": None, "n": 0}
+
+    # 무조건 진입했을 때의 건수 → 조건의 진입 빈도(=확률)를 추정한다.
+    full = event_study(series_list, lambda f: True, horizon,
+                       arm=arm, drop=drop, cost=cost)
+    rate = min(1.0, actual["n"] / full["n"]) if full["n"] else 1.0
+
+    sims = []
+    for t in range(trials):
+        rng = _random.Random(seed + t)
+        stat = event_study(series_list, lambda f: rng.random() < rate,
+                           horizon, arm=arm, drop=drop, cost=cost)
+        if stat["n"] and stat["avg_ret"] is not None:
+            sims.append(stat["avg_ret"])
+    if not sims:
+        return {"trials": 0, "avg_of_avgs": None, "p95": None,
+                "percentile_of_actual": None, "actual": actual["avg_ret"],
+                "n": actual["n"]}
+
+    sims.sort()
+    # 동률은 절반으로 센다(mid-p). 안 그러면 기준선과 **정확히 같은** 조건
+    # (`베이스라인(무조건)`, 진입확률 1.0)이 백분위 0으로 나와 "우연보다 나쁨"으로
+    # 읽힌다. 실제로 그렇게 나와서 알아챘다.
+    below = sum(1 for x in sims if x < actual["avg_ret"])
+    equal = sum(1 for x in sims if x == actual["avg_ret"])
+    below += equal / 2
+    return {
+        "trials": len(sims),
+        "avg_of_avgs": round(sum(sims) / len(sims), 4),
+        "p95": round(sims[int(len(sims) * 0.95) - 1], 4),
+        "percentile_of_actual": round(below / len(sims) * 100, 1),
+        "actual": actual["avg_ret"],
+        "n": actual["n"],
+        "rate": round(rate, 4),
+    }
+
+
+def bootstrap_conditions(series_list: list[dict],
+                         conditions: dict = None,
+                         horizon: int = DEFAULT_HORIZON,
+                         cost: float = 0.003, trials: int = 200,
+                         seed: int = 20260829) -> list[dict]:
+    """**종목을 리샘플링**해 1위가 유지되는지 본다(순수).
+
+    종목 몇 개가 결과를 떠받치고 있으면 1위가 표본에 따라 흔들린다. 청산
+    파라미터에서 실제로 그랬다 — 62경로 중 **2개**가 차이의 100%를 만들었다.
+    """
+    import random as _random
+    rng = _random.Random(seed)
+    conds = conditions or CONDITIONS
+    wins = {name: 0 for name in conds}
+    valid = 0
+    for _ in range(trials):
+        sample = [series_list[rng.randrange(len(series_list))]
+                  for _ in range(len(series_list))]
+        best, best_ret = None, None
+        for name, fn in conds.items():
+            stat = event_study(sample, fn, horizon, cost=cost)
+            if not stat["n"] or stat["avg_ret"] is None:
+                continue
+            if best_ret is None or stat["avg_ret"] > best_ret:
+                best, best_ret = name, stat["avg_ret"]
+        if best:
+            wins[best] += 1
+            valid += 1
+    return sorted(
+        ({"name": k, "win_rate": round(v / valid * 100, 1) if valid else 0.0,
+          "wins": v, "trials": valid} for k, v in wins.items()),
+        key=lambda r: r["win_rate"], reverse=True)
+
+
+def format_stability(baselines: dict, boot: list[dict]) -> str:
+    """조건별 기준선 대비 위치 + 1위 유지율."""
+    lines = ["🧪 안정성 검사 — 조건이 '아무 때나 사기'보다 나은가",
+             "   ※ 시점을 섞은 기준선(종목·진입 빈도 동일, 위치만 무작위)과 대조합니다.",
+             "   ※ 백분위 95 미만이면 **우연으로 설명되는 범위**입니다."]
+    for name, b in baselines.items():
+        if not b or b.get("percentile_of_actual") is None:
+            lines.append(f"• {name}: 표본 부족 — 판정 불가")
+            continue
+        verdict = "✅ 기준선 초과" if b["percentile_of_actual"] >= 95 else "❌ 우연 범위"
+        lines.append(
+            f"• {name}: 실제 {b['actual']*100:+.2f}% (n={b['n']}) vs "
+            f"기준선 평균 {b['avg_of_avgs']*100:+.2f}% · 상위 5% 경계 {b['p95']*100:+.2f}% "
+            f"→ 백분위 {b['percentile_of_actual']:.0f} {verdict}")
+    if boot:
+        lines.append("")
+        lines.append("종목 리샘플링에서 1위를 지킨 비율 (낮으면 표본 몇 개가 떠받친 것)")
+        for r in boot:
+            lines.append(f"  {r['name']}: {r['win_rate']}% ({r['wins']}/{r['trials']})")
+    return "\n".join(lines)
+
+
 def run_conditions(series_list: list[dict], horizon: int = DEFAULT_HORIZON,
                    cost: float = 0.003) -> list[dict]:
     """전 조건 × (전체/전반/후반) 성과표(순수). avg_ret 내림차순."""
@@ -390,3 +546,9 @@ if __name__ == "__main__":
         if not series:
             sys.exit("❌ 유니버스 0종목 — 조회 실패. 위 오류 로그 확인.")
         print(format_conditions(run_conditions(series)))
+        if "--stability" in sys.argv:
+            print()
+            base = {name: permuted_baseline(series, fn)
+                    for name, fn in CONDITIONS.items()}
+            boot = bootstrap_conditions(series, trials=100)
+            print(format_stability(base, boot))
