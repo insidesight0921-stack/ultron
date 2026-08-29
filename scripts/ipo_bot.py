@@ -1853,6 +1853,18 @@ _GRADE_EMOJI = {
 }
 
 
+def score_label(score, grade: str = "") -> str:
+    """점수 표시 문구(순수).
+
+    **"산출불가"와 "채점 제외"를 구분한다.** 앞은 값이 없어 **못 낸** 것이고
+    뒤는 채점 대상이 아니라 **안 낸** 것이다. 등급을 `?`와 `SPAC`으로 나눠 놓고
+    표시에서 다시 합치면 구분한 의미가 없어진다.
+    """
+    if grade == GRADE_SPAC:
+        return "채점 제외"
+    return f"{score:.0f}점" if score is not None else "산출불가"
+
+
 def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
     """스캔 결과 → 텔레그램·웹 UI용 텍스트."""
     if not results:
@@ -1875,7 +1887,7 @@ def format_result(results: list[dict], top_n: Optional[int] = None) -> str:
         emoji = _GRADE_EMOJI.get(grade, "❓")
         name = r.get("corp_name", "")
         score = r.get("total_score")
-        score_str = f"{score:.0f}점" if score is not None else "산출불가"
+        score_str = score_label(score, grade)
         sub_s = r.get("sub_start") or "?"
         sub_e = r.get("sub_end") or "?"
         listing = r.get("listing_date") or "?"
@@ -1953,7 +1965,7 @@ def analyze_manual(
     result = compute_attraction_score(item)
     grade = result.grade
     emoji = _GRADE_EMOJI.get(grade, "❓")
-    score_str = f"{result.total_score:.1f}점" if result.total_score is not None else "산출불가"
+    score_str = score_label(result.total_score, result.grade)
 
     def _fmt(v):
         return f"{v:.0f}" if v is not None else "미확정"

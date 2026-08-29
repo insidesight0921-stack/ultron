@@ -1340,3 +1340,28 @@ class TestDiagnoseWithSpacs:
         d = diagnose_scan([{"corp_name": "가", "grade": GRADE_SPAC,
                             "stage": STAGE_FINAL}], self.MIN)
         assert d["hot"] == []
+
+
+class TestScoreLabel:
+    """'산출불가'와 '채점 제외'는 다르다.
+
+    앞은 값이 없어 **못 낸** 것이고 뒤는 채점 대상이 아니라 **안 낸** 것이다.
+    등급을 ?와 SPAC으로 나눠 놓고 표시에서 다시 합치면 구분한 의미가 없다.
+    """
+
+    def test_a_spac_says_excluded_not_uncomputable(self):
+        from ipo_bot import score_label
+        assert score_label(None, "SPAC") == "채점 제외"
+
+    def test_a_missing_score_says_uncomputable(self):
+        from ipo_bot import score_label
+        assert score_label(None, "?") == "산출불가"
+
+    def test_a_real_score_is_shown(self):
+        from ipo_bot import score_label
+        assert score_label(85.0, "A") == "85점"
+
+    def test_a_spac_with_a_score_is_still_excluded(self):
+        """스팩은 요소 점수를 남기지만 총점을 등급처럼 보여주면 안 된다."""
+        from ipo_bot import score_label
+        assert score_label(55.0, "SPAC") == "채점 제외"
