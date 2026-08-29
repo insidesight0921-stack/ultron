@@ -1298,9 +1298,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <span id="myquant-status" class="muted"></span>
       </div>
       <p class="muted" style="margin-top: 0.4rem;">
-        진입 조건(추세위+눌림 / 정배열 / 신고가돌파 / 과낙폭반등) 충족 종목.
-        매수하면 선택 조건이 <b>MQ[태그]</b>로 기록돼 태그별 성과가 자동 축적됩니다.
-        슬롯: 마이퀀트 · 청산은 공용 자동 손절/트레일링 적용.
+        진입 조건 충족 종목. 매수하면 선택 조건이 <b>MQ[태그]</b>로 기록돼
+        태그별 성과가 자동 축적됩니다. 슬롯: 마이퀀트 · 청산은 공용 자동 손절/트레일링.
+      </p>
+      <p class="muted" style="margin-top:0.4rem;border-left:3px solid #888;padding-left:0.6rem;">
+        🔵 <b>관찰</b> · ⚪ 보류 · 🚫 기각 — 조건 이름 위에 마우스를 올리면 근거가 보입니다.<br>
+        <b>채택이 아니라 관찰입니다.</b> 2026-08-29 백테스트(199종목 × 291일)에서
+        <b>신고가돌파</b>만 세 검사를 통과했습니다 — 무작위 기준선 초과(백분위 100),
+        종목 리샘플링 1위 유지 41%, 전후반 일관(+1.24%→+1.27%).
+        다만 <b>효과는 얇습니다</b>(무작위 대비 +0.32%p). 기간이 14개월 한 국면뿐이고
+        부트스트랩 41%는 과반이 아닙니다.<br>
+        실거래로 검증하려면 <b>880건</b>이 필요하고 현재 속도(월 17건)로 4.4년입니다.
+        그때까지 이 표는 <b>후보를 좁히는 용도</b>이지 근거가 아닙니다.
       </p>
       <table style="margin-top: 1rem;">
         <thead><tr>
@@ -2524,7 +2533,13 @@ async function runMyquantScan() {
         return `<tr>
           <td>${it.name} <span class="muted">${it.ticker}</span></td>
           <td class="num">${Number(it.price).toLocaleString()}</td>
-          <td>${it.matched.join(", ")}</td>
+          <td>${it.matched.map(c => {
+              const st = (it.review && it.review[c]) || "미심사";
+              const mark = st.startsWith("관찰") ? "🔵" :
+                           st.startsWith("보류") ? "⚪" :
+                           st.startsWith("기각") ? "🚫" : "·";
+              return `<span title="${st}">${mark} ${c}</span>`;
+            }).join("<br>")}</td>
           <td class="num">${pct(f.ma20_gap)}</td>
           <td class="num">${pct(f.dd20)}</td>
           <td class="num">${pct(f.ret5)}</td>

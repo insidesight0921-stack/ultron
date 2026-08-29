@@ -78,6 +78,68 @@ CONDITIONS: dict[str, Callable[[dict], bool]] = {
 }
 
 
+# ─── 조건 심사 결과 (2026-08-29 실측) ────────────────
+#
+# 로컬 일봉 캐시 **199종목 × 291일**, 거래비용 0.3%p 차감. 세 가지를 봤다.
+#
+#   percentile  진입 빈도만 같고 시점은 무작위인 기준선 대비 백분위(95 미만 = 우연 범위)
+#   bootstrap   종목 리샘플링 100회에서 1위를 지킨 비율
+#   halves      전반 → 후반 평균수익 (뒤집히면 조건이 아니라 국면을 탄 것)
+#
+# **"채택"이 아니라 "관찰"이다.** 통과한 조건도 효과가 얇다(신고가돌파 +1.36% vs
+# 무작위 +1.04% = 0.31%p). 기간이 14개월 한 국면뿐이고, 7개를 검사했으므로
+# 다중비교를 감안하면 백분위 99.3 이상만 남는다. 부트스트랩 41%도 과반이 아니다.
+#
+# 실거래로 검증하려면 표본이 훨씬 필요하다 — 승률 39.3%→55%를 조건 4종에서
+# 구분하려면 다중비교 보정 후 880건, 현재 속도(월 17건)로 4.4년이다. 그때까지는
+# 백테스트가 후보를 좁히고 실거래는 **반증**에 쓴다.
+#
+# 조건 정의나 기간이 바뀌면 `--stability`로 다시 재고, 이 표도 같이 고친다.
+CONDITION_REVIEW = {
+    "신고가돌파":   {"status": "관찰", "percentile": 100, "bootstrap": 41.0,
+                     "actual": 0.0136, "baseline": 0.0104,
+                     "halves": (0.0124, 0.0127)},
+    "추세위+눌림":  {"status": "보류", "percentile": 99, "bootstrap": 30.0,
+                     "actual": 0.0128, "baseline": 0.0101,
+                     "halves": (0.0322, -0.0010)},
+    "정배열":       {"status": "보류", "percentile": 99, "bootstrap": 14.0,
+                     "actual": 0.0124, "baseline": 0.0106,
+                     "halves": (0.0197, 0.0058)},
+    "과낙폭반등":   {"status": "기각", "percentile": 0, "bootstrap": 0.0,
+                     "actual": -0.0091, "baseline": 0.0103,
+                     "halves": (0.0220, -0.0197)},
+}
+REVIEWED_AT = "2026-08-29"
+REVIEW_SAMPLE = "199종목 × 291일"
+
+
+def condition_status(name: str) -> str:
+    """조건의 심사 상태. 심사하지 않은 조건은 '미심사'."""
+    return (CONDITION_REVIEW.get(name) or {}).get("status", "미심사")
+
+
+_STATUS_ORDER = {"관찰": 0, "보류": 1, "미심사": 2, "기각": 3}
+
+
+def condition_rank(name: str) -> int:
+    """표시 우선순위(작을수록 앞). 기각된 조건은 맨 뒤로 민다."""
+    return _STATUS_ORDER.get(condition_status(name), 2)
+
+
+def review_note(name: str) -> str:
+    """조건 옆에 붙일 한 줄. **근거의 얇음을 숨기지 않는다.**"""
+    r = CONDITION_REVIEW.get(name)
+    if not r:
+        return "미심사"
+    if r["status"] == "기각":
+        return f"기각 — 무작위보다 나쁨({r['actual']*100:+.2f}% vs {r['baseline']*100:+.2f}%)"
+    edge = (r["actual"] - r["baseline"]) * 100
+    h1, h2 = r["halves"]
+    flip = " · 전후반 뒤집힘" if (h1 > 0) != (h2 > 0) or h2 < h1 * 0.5 else ""
+    return (f"{r['status']} — 무작위 대비 {edge:+.2f}%p · 백분위 {r['percentile']} · "
+            f"1위유지 {r['bootstrap']:.0f}%{flip}")
+
+
 # 스캔용 진입 후보 조건(대조군·베이스라인 제외) — 마이퀀트 탭에서 사용
 SCAN_CONDITIONS = ("추세위+눌림", "정배열", "신고가돌파", "과낙폭반등")
 
@@ -96,14 +158,22 @@ def scan_signals(series_list: list[dict],
         if not f:
             continue
         matched = [c for c in conditions if CONDITIONS[c](f)]
+        # 심사 상태 순으로 정렬 — 화면에서 관찰 대상이 먼저 보이게.
+        matched.sort(key=lambda c: (condition_rank(c), c))
         if matched:
             out.append({
                 "ticker": s.get("ticker"), "name": s.get("name") or s.get("ticker"),
                 "price": closes[-1], "matched": matched,
+                # 근거의 얇음을 화면까지 들고 간다. 조건 이름만 보이면
+                # "검증된 전략"으로 읽힌다.
+                "review": {c: review_note(c) for c in matched},
+                "best_status": condition_status(matched[0]),
                 "features": {k: (round(v, 4) if isinstance(v, float) else v)
                              for k, v in f.items()},
             })
-    return sorted(out, key=lambda r: -len(r["matched"]))
+    # 관찰 대상을 먼저, 그 안에서 충족 조건 수 많은 순.
+    return sorted(out, key=lambda r: (condition_rank(r["matched"][0]),
+                                      -len(r["matched"])))
 
 
 def scan_current(market_code: str = "1028", days: int = 140,
