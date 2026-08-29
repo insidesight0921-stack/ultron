@@ -1302,6 +1302,12 @@ def fetch_ipo_schedule_kind_progcom(days_ahead: int = 30, *,
 _DART_CACHE_FILE = CACHE_DIR / "dart_metrics_cache.json"
 _DART_CACHE_TTL_DAYS = 1  # 하루 지나면 재시도
 
+# 캐시 무시 스위치. 빈 결과("오늘 시도했고 결과 없음")도 하루 동안 재조회를 막기
+# 때문에, **파서를 고쳐도 그날은 반영되지 않는다.** 2026-08-28 스팩 이름 대조를
+# 고쳤는데 캐시가 가려서 확인이 하루 밀렸다. 운영에서는 캐시가 맞고, 고친 직후
+# 확인할 때만 끈다.
+DART_CACHE_ENABLED = True
+
 
 def _load_dart_cache() -> dict:
     """캐시 파일 로드. 없거나 손상 시 빈 dict."""
@@ -1556,7 +1562,7 @@ def fetch_dart_metrics(
     # 캐시 확인 (corp_name 기준)
     today_str = date.today().isoformat()
     cache = _load_dart_cache()
-    cached = cache.get(corp_name)
+    cached = cache.get(corp_name) if DART_CACHE_ENABLED else None
     if cached:
         cache_date = cached.get("date", "")
         cache_age = (
@@ -2082,6 +2088,8 @@ def _cli() -> None:
     p_scan.add_argument("--days", type=int, default=30)
     p_scan.add_argument("--top",  type=int, default=10)
     p_scan.add_argument("--json", action="store_true", help="JSON 출력 (paper_ui용)")
+    p_scan.add_argument("--fresh", action="store_true",
+                        help="DART 캐시를 무시하고 다시 조회 (파서 수정 후 확인용)")
 
     p_dbg = sub.add_parser("debug-html", help="38/KIND raw HTML 저장 (파서 개발용)")
     p_dbg.add_argument("--source", choices=["38", "kind", "progcom"], default="38")
@@ -2103,6 +2111,10 @@ def _cli() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     if args.cmd == "scan" or args.cmd is None:
+        if getattr(args, "fresh", False):
+            global DART_CACHE_ENABLED
+            DART_CACHE_ENABLED = False
+            log.info("DART 캐시 무시 — 전부 다시 조회합니다")
         days = getattr(args, "days", 30)
         top  = getattr(args, "top",  10)
         use_json = getattr(args, "json", False)

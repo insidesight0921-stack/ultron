@@ -1262,3 +1262,27 @@ class TestSpacLookupWiring:
         i = body.index("spac_key(dart_name) == query_spac")
         j = body.index("norm_query in norm_dart")
         assert "continue" in body[i:j]
+
+
+class TestDartCacheSwitch:
+    """빈 결과도 하루 재조회를 막기 때문에, 파서를 고쳐도 그날은 반영되지 않는다.
+
+    2026-08-28 스팩 이름 대조를 고쳤는데 캐시({} 저장분)가 가려서 확인이 밀렸다.
+    운영에서는 캐시가 맞고, 고친 직후 확인할 때만 끈다.
+    """
+
+    def test_the_switch_exists_and_defaults_to_on(self):
+        import ipo_bot
+        assert ipo_bot.DART_CACHE_ENABLED is True
+
+    def test_the_lookup_respects_the_switch(self):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def fetch_dart_metrics("):]
+        body = body[:body.index("\ndef ", 10)]
+        assert "if DART_CACHE_ENABLED else None" in body
+
+    def test_the_cli_exposes_fresh(self):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
+            encoding="utf-8")
+        assert '"--fresh"' in src and "DART_CACHE_ENABLED = False" in src
