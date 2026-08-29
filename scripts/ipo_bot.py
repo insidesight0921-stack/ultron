@@ -388,6 +388,29 @@ def compute_attraction_score(item: IpoItem) -> AttractionResult:
     n = len(confirmed)
 
     stage = demand_stage(item)
+
+    # 스팩은 채점하지 않는다(2026-08-28 결정, 실측 근거).
+    #
+    #   경쟁률   — 스팩은 기관 수요예측을 하지 않는다. 영원히 없다
+    #   밴드위치 — 항상 2,000원 단일가라 위치라는 개념이 없다
+    #   유통물량 — 발기주주 지분이 작아 **구조적으로** 90%대다(실측 97.45·93.92%).
+    #              40% 초과를 최저점으로 보는 기준을 그대로 대면 모든 스팩이 최저점
+    #   공모금액 — 확정 후에만 나온다
+    #
+    # 남는 것은 주관사 하나뿐이고, 그것으로 낸 등급은 "IPO 매력도"가 아니라
+    # "주관사 등급"이다. 게다가 잘못된 등급이 A 필터를 통과하면 **자동 구독까지**
+    # 간다. 스팩의 실제 관건은 합병 성공 여부인데 이 5요소는 그걸 전혀 보지 않는다.
+    if is_spac(item):
+        return AttractionResult(
+            corp_name=item.corp_name,
+            demand_score=d, band_score=b, float_score=f,
+            underwriter_score=u, offer_size_score=s,
+            total_score=None, grade=GRADE_SPAC, stage=stage,
+            confirmed_factors=len([v for v in (d, b, f, u, s) if v is not None]),
+            note=("🅢 스팩 — 매력지수 채점 대상이 아닙니다. 5요소 중 셋(경쟁률·밴드위치·"
+                  "유통물량)이 스팩에는 의미가 없어 등급을 내지 않습니다"),
+        )
+
     required = MIN_CONFIRMED_FINAL if stage == STAGE_FINAL else MIN_CONFIRMED_PRE
 
     total = None
@@ -1684,6 +1707,7 @@ def enrich_with_dart(item: IpoItem) -> IpoItem:
 
 
 UNGRADED = "?"
+GRADE_SPAC = "SPAC"      # 채점 대상 아님(등급 불가와 구분한다)
 
 
 def diagnose_scan(results: list[dict], min_grade: set) -> dict:
@@ -1709,7 +1733,10 @@ def diagnose_scan(results: list[dict], min_grade: set) -> dict:
         return {"verdict": "no_results", "n": 0, "n_ungraded": 0,
                 "grades": [], "hot": [], "preview": []}
     grades = sorted({(r.get("grade") or UNGRADED) for r in results})
-    ungraded = [r for r in results if (r.get("grade") or UNGRADED) == UNGRADED]
+    # 스팩은 **채점 대상이 아니다** — 등급을 못 낸 것이 아니라 안 내는 것이다.
+    # 산출불가로 세면 "전원 등급 불가" 경고가 스팩 때문에 잘못 발동한다.
+    scored = [r for r in results if r.get("grade") != GRADE_SPAC]
+    ungraded = [r for r in scored if (r.get("grade") or UNGRADED) == UNGRADED]
 
     # **자동 구독은 확정 단계에서만.** 사전등급은 요소 2개로 낸 값이라 확정 등급과
     # 같은 임계값으로 다루면 정보가 거의 없는 종목이 A++로 올라온다.
@@ -1731,15 +1758,18 @@ def diagnose_scan(results: list[dict], min_grade: set) -> dict:
 
     if hot:
         verdict = "hot"
-    elif len(ungraded) == len(results) and pre_only:
+    elif not scored:
+        verdict = "spac_only"          # 스팩만 있음 — 판단할 것이 없다
+    elif len(ungraded) == len(scored) and pre_only:
         verdict = "pre_stage_only"
-    elif len(ungraded) == len(results):
+    elif len(ungraded) == len(scored):
         verdict = "all_ungraded"
     elif preview:
         verdict = "preview_only"      # 사전등급 후보만 있음 — 알리되 구독은 안 함
     else:
         verdict = "no_hot"
     return {"verdict": verdict, "n": len(results), "n_ungraded": len(ungraded),
+            "n_spac": len(results) - len(scored),
             "grades": grades, "hot": hot, "preview": preview}
 
 
@@ -1819,6 +1849,7 @@ def scan_upcoming(
 
 _GRADE_EMOJI = {
     "A++": "🏆", "A+": "🥇", "A": "🥈", "B": "🥉", "C": "📉", "?": "❓",
+    "SPAC": "🅢",
 }
 
 

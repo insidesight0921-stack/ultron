@@ -1286,3 +1286,57 @@ class TestDartCacheSwitch:
         src = (Path(__file__).resolve().parents[1] / "scripts" / "ipo_bot.py").read_text(
             encoding="utf-8")
         assert '"--fresh"' in src and "DART_CACHE_ENABLED = False" in src
+
+
+class TestSpacExcludedFromScoring:
+    """스팩은 채점 대상이 아니다(2026-08-28 결정, 실측 근거).
+
+    5요소 중 셋이 스팩에 의미가 없다 — 경쟁률은 수요예측을 안 하니 영원히 없고,
+    밴드위치는 2,000원 단일가라 개념이 없으며, 유통물량은 발기주주 지분이 작아
+    구조적으로 90%대다(실측 97.45·93.92%). 남는 주관사 하나로 낸 등급은
+    "IPO 매력도"가 아니라 "주관사 등급"이고, A필터를 통과하면 자동 구독까지 간다.
+    """
+
+    def test_a_spac_gets_no_grade(self):
+        res = compute_attraction_score(_item(corp_name="KB스팩34호",
+                                             underwriter="KB증권", float_ratio=95.0))
+        assert res.grade == "SPAC" and res.total_score is None
+
+    def test_the_reason_is_stated(self):
+        res = compute_attraction_score(_item(corp_name="한국스팩17호",
+                                             underwriter="한국투자증권"))
+        assert "채점 대상이 아닙니다" in res.note
+
+    def test_the_element_scores_are_still_kept(self):
+        """왜 제외했는지 나중에 되짚을 수 있어야 한다 — 원자료는 남긴다."""
+        res = compute_attraction_score(_item(corp_name="KB스팩34호",
+                                             underwriter="KB증권", float_ratio=95.0))
+        assert res.underwriter_score == 20.0 and res.float_score == 2.0
+
+    def test_an_operating_company_is_unaffected(self):
+        res = compute_attraction_score(_item(corp_name="엘리스그룹",
+                                             underwriter="미래에셋증권", float_ratio=20.81))
+        assert res.grade != "SPAC" and res.total_score is not None
+
+
+class TestDiagnoseWithSpacs:
+    MIN = {"A++", "A+", "A"}
+
+    def test_spacs_do_not_count_as_ungraded(self):
+        """산출불가로 세면 '전원 등급 불가' 경고가 스팩 때문에 잘못 발동한다."""
+        from ipo_bot import GRADE_SPAC
+        rows = [{"corp_name": "가", "grade": GRADE_SPAC},
+                {"corp_name": "나", "grade": "A", "stage": STAGE_FINAL}]
+        d = diagnose_scan(rows, self.MIN)
+        assert d["verdict"] == "hot" and d["n_spac"] == 1
+
+    def test_only_spacs_is_its_own_verdict(self):
+        from ipo_bot import GRADE_SPAC
+        d = diagnose_scan([{"corp_name": "가", "grade": GRADE_SPAC}], self.MIN)
+        assert d["verdict"] == "spac_only"
+
+    def test_a_spac_never_reaches_the_hot_list(self):
+        from ipo_bot import GRADE_SPAC
+        d = diagnose_scan([{"corp_name": "가", "grade": GRADE_SPAC,
+                            "stage": STAGE_FINAL}], self.MIN)
+        assert d["hot"] == []
