@@ -58,6 +58,18 @@ PAPER_DIRECT_WRITER_INVENTORY = (
         target_mode="private-client",
     ),
     PaperDirectWriterPolicy(
+        # 2026-08-29 추가. IPO 슬롯 유휴 자본 파킹(단기통안채 매수/매도).
+        # 사람 승인 없이 도는 자동 경로이므로 목록에 명시한다.
+        key="telegram-idle-cash",
+        module="telegram_bot.py",
+        function="idle_cash_job",
+        operations=PAPER_TRADE_OPERATIONS,
+        current_owner="telegram-idle-cash-direct",
+        target_owner="private-data-api",
+        approval_mode="policy-auto-park-only",
+        target_mode="private-client",
+    ),
+    PaperDirectWriterPolicy(
         # 2026-08-28 추가. 장외 신호 대기 큐가 개장 후 체결할 때도 직접 쓴다.
         # 목록에서 빠져 있었는데, 탐지기가 **호출만** 세고 있어서 드러나지 않았다
         # (`asyncio.to_thread(_pdb.record_buy, ...)`는 호출이 아니라 참조다).

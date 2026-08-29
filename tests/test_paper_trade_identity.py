@@ -151,7 +151,8 @@ def test_inventory_assigns_single_future_db_writer_and_retires_cli_direct_path()
     # 6번째는 2026-08-28에 드러난 대기 큐 체결(`_drain_pending_orders`)이다.
     # 목록에 없었던 것이 아니라 **탐지기가 못 보고 있었다** — 참조로 넘기는
     # `asyncio.to_thread(_pdb.record_buy, ...)` 형태였기 때문이다.
-    assert len(operational) == 6
+    # 7번째는 2026-08-29에 추가한 IPO 슬롯 유휴 자본 파킹이다.
+    assert len(operational) == 7
     assert {policy.target_owner for policy in operational} == {"private-data-api"}
     pending = next(
         policy for policy in PAPER_DIRECT_WRITER_INVENTORY

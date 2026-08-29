@@ -86,12 +86,14 @@ from quant_bot import (
     snapshot as quant_snapshot,
 )  # noqa: E402  # v3.22 콴텍봇
 from ipo_bot import (
+    fetch_ipo_schedule,
     run as ipo_run,
     scan_upcoming as ipo_scan,
     diagnose_scan as ipo_diagnose_scan,       # v3.56 침묵 실패 구분
     missing_factors as ipo_missing_factors,   # v3.56 무엇이 비었는지
 )  # noqa: E402  # v3.26 IPO봇
 import signal_bot  # noqa: E402  # v3.40 기술적 신호 봇
+import idle_cash  # noqa: E402  # v3.57 유휴 슬롯 자본 파킹
 from news_bot import run as news_run  # noqa: E402  # v3.41 뉴스봇
 import agent_bot  # noqa: E402  # v3.42 범용 에이전트
 import action_scheduler as _asch  # noqa: E402  # v3.43 봇작업 예약
@@ -1585,6 +1587,109 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
     await asyncio.to_thread(po.clear)
     text = po.format_results(results)
     return [text] if text else []
+
+
+IDLE_CASH_SLOT = "IPO"
+IDLE_CASH_INTERVAL_SEC = 60 * 60 * 4     # 장중 4시간 간격(하루 2회 남짓)
+
+
+async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """IPO 슬롯 유휴 자본을 단기통안채로 파킹/현금화 (평일 09:30~15:00).
+
+    2026-08-29 실측: IPO 슬롯 2,000만원이 개설(05-10) 이후 **3.5개월간 거래 0건**
+    이었다. 슬롯 자본은 성과 집계에 잡히는데 수익은 0이라, 유휴 자본이 전체
+    수익률을 구조적으로 끌어내린다. IPO는 간헐적이므로 이 상태가 기본값이 된다.
+
+    판단은 `idle_cash`(순수)가 하고 여기서는 상태를 모아 넘기고 결과를 실행만
+    한다. 청약 일정은 **DART 보강 없이** 38·KIND 목록만 쓴다 — 필요한 것은
+    날짜뿐이라 종목당 문서 3건을 받을 이유가 없다.
+    """
+    now = _now_kst()
+    if now.weekday() >= 5:
+        return
+    start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    end = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    if not (start <= now <= end):
+        return
+
+    try:
+        slots = await asyncio.to_thread(_pdb.list_slots)
+        slot = next((s for s in slots if s.get("name") == IDLE_CASH_SLOT), None)
+        if slot is None:
+            return
+        positions = await asyncio.to_thread(_pdb.list_positions, slot["id"])
+        parked = next((p for p in positions
+                       if str(p.get("ticker")) == idle_cash.PARK_TICKER), None)
+        parked_qty = int(parked["quantity"]) if parked else 0
+
+        items = await asyncio.to_thread(fetch_ipo_schedule, 30)
+        subs = [it.sub_start for it in items]
+
+        price = None
+        if parked_qty == 0:
+            price = await asyncio.to_thread(
+                _get_execution_price, idle_cash.PARK_TICKER)
+
+        plan = idle_cash.plan_idle_action(
+            parked_qty=parked_qty,
+            cash=float(slot.get("current_capital") or 0),
+            subscriptions=subs,
+            today=now.date(),
+            price=price,
+        )
+    except Exception:
+        log.warning("유휴 자본 판단 실패", exc_info=True)
+        return
+
+    if plan["action"] == "hold":
+        log.debug("유휴 자본: %s", plan["reason"])
+        return
+
+    # 매도 시점의 체결가는 따로 받는다(판단은 수량만 정한다).
+    exec_price = price
+    if plan["action"] == "sell":
+        exec_price = await asyncio.to_thread(
+            _get_realtime_price, idle_cash.PARK_TICKER)
+    if not exec_price or exec_price <= 0:
+        log.warning("유휴 자본: %s 시세 미확보 — 실행 보류", idle_cash.PARK_TICKER)
+        return
+
+    notes = f"[AUTO] 유휴자본 {plan['action']} — {plan['reason']}"
+    try:
+        if _PRIVATE_PAPER_WRITE_EXECUTOR is None:
+            fn = _pdb.record_buy if plan["action"] == "buy" else _pdb.record_sell
+            args = ((int(slot["id"]), idle_cash.PARK_TICKER, idle_cash.PARK_NAME,
+                     plan["qty"], float(exec_price))
+                    if plan["action"] == "buy"
+                    else (int(slot["id"]), idle_cash.PARK_TICKER,
+                          plan["qty"], float(exec_price)))
+            await asyncio.to_thread(_direct_paper_write, fn, *args, notes=notes)
+        else:
+            await _execute_private_paper_write(
+                caller="telegram-idle-cash",
+                action=plan["action"],
+                slot_id=int(slot["id"]),
+                ticker=idle_cash.PARK_TICKER,
+                name=idle_cash.PARK_NAME,
+                quantity=plan["qty"],
+                price=float(exec_price),
+                notes=notes,
+                user_approved=False,
+                policy_approved=True,
+            )
+    except Exception:
+        log.warning("유휴 자본 실행 실패", exc_info=True)
+        return
+
+    text = idle_cash.format_plan(plan, slot=IDLE_CASH_SLOT)
+    log.info("유휴 자본: %s @ %s원", text, f"{exec_price:,.0f}")
+    for uid in ALLOWED_IDS:
+        try:
+            await ctx.bot.send_message(
+                chat_id=int(uid),
+                text=f"💤 {text}\n체결가 {exec_price:,.0f}원")
+        except Exception:
+            pass
 
 
 async def intraday_monitor_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3592,6 +3697,17 @@ def main() -> None:
             f"🔍 장 중 손절·익절 모니터 등록 ({INTRADAY_MONITOR_INTERVAL_SEC//60}분 간격 "
             "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)"
         )
+        # v3.57 — IPO 슬롯 유휴 자본 파킹 (평일 09:30~15:00)
+        app.job_queue.run_repeating(
+            idle_cash_job,
+            interval=IDLE_CASH_INTERVAL_SEC,
+            first=300,
+            name="idle_cash",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 120},
+        )
+        log.info("💤 유휴 자본 파킹 등록 (IPO 슬롯 · 평일 09:30~15:00 · "
+                 f"{idle_cash.PARK_NAME})")
+
         # v3.40 — 기술적 신호 봇 (1시간 간격 · 평일 09:00~15:30 · 워치리스트 1시간봉)
         app.job_queue.run_repeating(
             technical_signal_job,
