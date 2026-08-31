@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 import random
 from statistics import NormalDist
-from typing import Callable, Iterable, Optional
+from typing import Iterable
 
 TRIALS = 2000
 SEED = 20260831

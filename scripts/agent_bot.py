@@ -251,13 +251,35 @@ def is_compound_command(text: str) -> bool:
     return verbs >= 2 and bool(_CONJ_RE.search(text))
 
 
-def run(task: str, max_steps: int = MAX_STEPS, llm: Callable[[str], str] = None) -> str:
-    """에이전트 루프. 최종 답(문자열) 반환."""
+def _notify(on_step, step: int, total: int, label: str) -> None:
+    """진행 콜백 호출. **진행 표시가 작업을 깨뜨리면 안 된다** — 실패는 삼킨다.
+
+    (이 프로젝트에서 예외를 삼키는 것은 원칙적으로 금물이지만, 여기는 예외가
+    맞는 자리다: 콜백은 표시 전용이고, 표시가 죽어도 에이전트는 끝까지 가서
+    답을 내야 한다. 대신 debug로 남긴다.)
+    """
+    if on_step is None:
+        return
+    try:
+        on_step(step, total, label)
+    except Exception as e:  # noqa: BLE001 — 표시 실패로 작업을 중단하지 않는다
+        log.debug("진행 콜백 실패(무시): %s", e)
+
+
+def run(task: str, max_steps: int = MAX_STEPS, llm: Callable[[str], str] = None,
+        on_step: Optional[Callable[[int, int, str], None]] = None) -> str:
+    """에이전트 루프. 최종 답(문자열) 반환.
+
+    `on_step(단계, 전체, 라벨)` — 진행 표시용 콜백(v3.63). 복합 명령은 로컬 LLM을
+    단계마다 부르므로 수십 초~수 분 걸리는데, 그동안 "처리 중..." 한 줄만 떠
+    있으면 **멈춘 것과 구분되지 않는다.** 계획서 4단계 "복합 명령 UX" 항목.
+    """
     llm = llm or _chat
     if not task or not task.strip():
         return "명령이 비어 있습니다."
     history: list[tuple] = []
     for step in range(max_steps):
+        _notify(on_step, step + 1, max_steps, "다음 행동 판단 중")
         try:
             raw = llm(_build_prompt(task, history))
         except Exception as e:
@@ -276,6 +298,7 @@ def run(task: str, max_steps: int = MAX_STEPS, llm: Callable[[str], str] = None)
         if tool is None:
             obs = f"오류: '{tool_name}'는 사용 가능한 도구가 아님. 사용 가능: {', '.join(_TOOLS)}"
         else:
+            _notify(on_step, step + 1, max_steps, f"{tool_name} 실행 중")
             try:
                 obs = str(tool.func(args))
             except Exception as e:

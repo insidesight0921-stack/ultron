@@ -27,8 +27,6 @@
 """
 from __future__ import annotations
 
-from typing import Optional
-
 # 목표 ±이 폭 안이면 '정상'으로 본다. 없으면 시세가 조금만 움직여도 상태가 바뀐다.
 NORMAL_BAND = 0.05
 

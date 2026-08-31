@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 import unicodedata
-from datetime import time as dtime
+from datetime import datetime as _DT
 
 try:
     from zoneinfo import ZoneInfo
@@ -1035,8 +1035,32 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if agent_bot.is_compound_command(text):
         log.info("🤖 복합 명령 감지 → 에이전트 자동 위임")
         notice = await update.message.reply_text("🤖 복합 명령 — 에이전트가 처리 중...")
+
+        # v3.63 — 단계별 진행 표시(계획서 "복합 명령 UX"). 로컬 LLM을 단계마다
+        # 부르므로 수십 초~수 분 걸리는데, 한 줄만 떠 있으면 멈춘 것과 구분되지
+        # 않는다. 에이전트는 워커 스레드에서 돌므로 이벤트 루프로 넘겨서 편집한다.
+        _loop = asyncio.get_running_loop()
+
+        def _progress(step: int, total: int, label: str) -> None:
+            async def _edit():
+                try:
+                    await notice.edit_text(
+                        f"🤖 복합 명령 처리 중... [{step}/{total}] {label}")
+                except Exception:  # noqa: BLE001 — 같은 문구 재편집 등. 표시 실패는 무시
+                    pass
+            future = asyncio.run_coroutine_threadsafe(_edit(), _loop)
+            try:
+                # 편집이 끝날 때까지 잠깐 기다린다 — 안 기다리면 마지막 단계
+                # 표시가 **최종 답 편집보다 늦게 도착해 답을 덮어쓸 수 있다.**
+                future.result(timeout=5)
+            except Exception:  # noqa: BLE001
+                # 타임아웃이면 **취소까지 해야 한다.** 대기만 포기하면 밀린
+                # 편집이 나중에 도착해 최종 답을 덮어쓴다 — 위 주석이 막으려던
+                # 바로 그 사고가 타임아웃 경로로 되살아난다.
+                future.cancel()
+
         try:
-            ans = await asyncio.to_thread(agent_bot.run, text)
+            ans = await asyncio.to_thread(agent_bot.run, text, on_step=_progress)
             memory.add(chat_id, "user", text)
             memory.add(chat_id, "assistant", ans)
             await notice.edit_text((ans or "(빈 응답)")[:4000])
@@ -1729,8 +1753,6 @@ def _fill_price_stale_block(resolved: dict) -> str:
     if len(fills) < _ps.MIN_BATCH_HITS:
         return ""
     try:
-        from datetime import datetime as _dt
-
         verdict = _ps.check_batch(fills, _now_kst().strftime("%Y%m%d"))
     except Exception:
         log.warning("체결가 스테일 점검 실패 — 통과시킴", exc_info=True)
@@ -2558,7 +2580,7 @@ async def notify_due_events(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ─── 콴텍봇 월간 리밸런싱 자동 푸시 (v3.23) ─────────
 
 
-def _first_business_day_passed(today: "datetime") -> bool:
+def _first_business_day_passed(today: _DT) -> bool:
     """이번 달 첫 영업일이 (오늘 이전에) 이미 지났는지 — catch-up 판정용."""
     try:
         from pykrx import stock
@@ -2578,7 +2600,7 @@ def _first_business_day_passed(today: "datetime") -> bool:
         return today.day > 7
 
 
-def is_first_business_day(today: "datetime") -> bool:
+def is_first_business_day(today: _DT) -> bool:
     """오늘이 KRX 첫 영업일인지 — pykrx 영업일 캘린더 기반 (없으면 weekday fallback)."""
     try:
         from pykrx import stock

@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import random
-import statistics
 from typing import Callable, Iterable, Optional
 
 # 라벨 유의성 판정에 쓰는 무작위 재배치 횟수. 결정적(시드 고정).

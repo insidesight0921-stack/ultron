@@ -229,3 +229,58 @@ def test_register_inbox_tool():
     assert "write_inbox" in [t.name for t in ab.list_tools()]
     ab.clear_tools()
     ab.register_builtin_tools()
+
+
+# ─── 단계별 진행 표시 (2026-08-31, 복합 명령 UX) ─────
+
+
+def _scripted_llm(responses):
+    it = iter(responses)
+
+    def fake(prompt):
+        return next(it)
+    return fake
+
+
+def test_progress_is_reported_per_step():
+    """수십 초짜리 루프가 한 줄 알림만 띄우면 멈춘 것과 구분되지 않는다."""
+    ab.clear_tools()
+    ab.register_tool(ab.Tool("echo", "메아리", {}, lambda a: "메아리 결과"))
+    calls = []
+    ans = ab.run("복합 작업", llm=_scripted_llm([
+        '{"action": {"tool": "echo", "args": {}}}',
+        '{"final": "끝"}',
+    ]), on_step=lambda s, t, label: calls.append((s, t, label)))
+    assert ans == "끝"
+    assert (1, ab.MAX_STEPS, "다음 행동 판단 중") in calls
+    assert (1, ab.MAX_STEPS, "echo 실행 중") in calls
+    assert (2, ab.MAX_STEPS, "다음 행동 판단 중") in calls
+
+
+def test_a_broken_progress_callback_does_not_break_the_work():
+    """진행 표시는 부가물이다 — 표시가 죽어도 답은 나와야 한다."""
+    ab.clear_tools()
+
+    def boom(*a):
+        raise RuntimeError("표시 실패")
+
+    ans = ab.run("작업", llm=_scripted_llm(['{"final": "정상 답"}']), on_step=boom)
+    assert ans == "정상 답"
+
+
+def test_no_callback_means_no_change():
+    """콜백 없이 부르는 기존 호출부가 그대로 동작해야 한다."""
+    ab.clear_tools()
+    assert ab.run("작업", llm=_scripted_llm(['{"final": "답"}'])) == "답"
+
+
+def test_the_step_label_names_the_tool_being_run():
+    """'처리 중'만으로는 어느 단계에서 오래 걸리는지 알 수 없다."""
+    ab.clear_tools()
+    ab.register_tool(ab.Tool("wiki_search", "검색", {}, lambda a: "결과"))
+    labels = []
+    ab.run("작업", llm=_scripted_llm([
+        '{"action": {"tool": "wiki_search", "args": {}}}',
+        '{"final": "끝"}',
+    ]), on_step=lambda s, t, label: labels.append(label))
+    assert "wiki_search 실행 중" in labels

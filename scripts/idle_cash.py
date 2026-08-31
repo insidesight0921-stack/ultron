@@ -29,7 +29,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Iterable, Optional
 
 # TIGER 단기통안채. 계획서가 지정한 종목이다.
