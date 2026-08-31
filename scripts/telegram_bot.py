@@ -1626,13 +1626,19 @@ def _equity_weight_now() -> tuple[float, str]:
     import slot_budget as _sb
     try:
         import kium_bot as _kb
-        import price_sanity as _ps
+        import proxy_indicators as _pi
 
-        closes = [c for _, c in _ps.load_series("1001", _ps.trading_calendar())]
+        # 지수 시계열은 `proxy_indicators._kospi_series`와 **같은 캐시**를 쓴다
+        # (`cache/indices/market_index_KOSPI_*.json`). 처음엔 종목 일봉 캐시에서
+        # "1001"을 찾다 0건이 나와 늘 '데이터 부족'이었다 — 지수는 거기 없다.
+        closes, as_of = _pi._kospi_series()
         rec = _kb.compute_weight_recommendation(
             kospi_close=closes if len(closes) >= 200 else None)
         w = float(rec.get("equity_weight") or _sb.DEFAULT_EQUITY_WEIGHT)
-        return w, str(rec.get("reason") or "")
+        why = str(rec.get("reason") or "")
+        if closes and as_of:
+            why = f"{why} · 지수 {as_of} 기준 {len(closes)}일"
+        return w, why
     except Exception:
         log.warning("주식 비중 권고 조회 실패 — 기본값 사용", exc_info=True)
         return _sb.DEFAULT_EQUITY_WEIGHT, "권고 조회 실패"
