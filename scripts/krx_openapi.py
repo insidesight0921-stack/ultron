@@ -305,13 +305,24 @@ def auth_diagnose(bas_dd: str, path: Optional[str] = None) -> dict:
     return out
 
 
-def auth_verdict(diag: dict) -> str:
-    """진단 판정(순수): ok | key_read | key_ignored | unknown
+# KRX가 401에 실어 보내는 두 메시지. **뜻이 다르다** — 2026-08-31 실측으로 확인.
+#
+#   "Unauthorized Key"      키 자체를 못 알아본다(키 없음·엉터리 키가 이 응답)
+#   "Unauthorized API Call" 키는 알아봤는데 **이 API 호출이 허용되지 않았다**
+#
+# 즉 후자가 나오면 키는 유효하고, 막힌 것은 **그 API에 대한 활용신청/승인**이다.
+MSG_BAD_KEY = "Unauthorized Key"
+MSG_NOT_SUBSCRIBED = "Unauthorized API Call"
 
-    ok          어떤 방식이든 200을 받았다
-    key_read    진짜 키와 엉터리 키의 응답이 다르다 → 서버가 키를 보고 있다
-    key_ignored 진짜 키·엉터리 키·키 없음이 모두 같다 → 키가 반영되지 않는다
-    unknown     네트워크 실패 등으로 비교 자체가 불가
+
+def auth_verdict(diag: dict) -> str:
+    """진단 판정(순수): ok | not_subscribed | key_read | key_ignored | unknown
+
+    ok             어떤 방식이든 200을 받았다
+    not_subscribed 키는 인식됐는데 **이 API가 허용되지 않았다**(활용신청 미승인)
+    key_read       진짜 키와 엉터리 키의 응답이 다르다 → 서버가 키를 보고 있다
+    key_ignored    진짜 키·엉터리 키·키 없음이 모두 같다 → 키가 반영되지 않는다
+    unknown        네트워크 실패 등으로 비교 자체가 불가
     """
     variants = (diag or {}).get("variants") or {}
     controls = (diag or {}).get("controls") or {}
@@ -327,7 +338,24 @@ def auth_verdict(diag: dict) -> str:
     same = (real.get("status"), real.get("body")) == \
            (garbage.get("status"), garbage.get("body")) == \
            (none.get("status"), none.get("body"))
-    return "key_ignored" if same else "key_read"
+    if same:
+        return "key_ignored"
+    # 키는 읽혔다. 메시지가 '이 API 호출이 허용되지 않음'이면 원인이 특정된다.
+    if (MSG_NOT_SUBSCRIBED in str(real.get("body") or "")
+            and MSG_BAD_KEY in str(garbage.get("body") or "")):
+        return "not_subscribed"
+    return "key_read"
+
+
+def working_auth_styles(diag: dict) -> list[str]:
+    """키가 인식된 인증 방식들(순수). 대조군과 다른 응답을 낸 것들.
+
+    어느 헤더가 맞는지 **실측으로** 알 수 있다 — 문서를 다시 뒤질 필요가 없다.
+    """
+    controls = (diag or {}).get("controls") or {}
+    bad = {(c.get("status"), c.get("body")) for c in controls.values()}
+    return [label for label, r in ((diag or {}).get("variants") or {}).items()
+            if (r.get("status"), r.get("body")) not in bad]
 
 
 def format_auth_diagnose(diag: dict) -> str:
@@ -348,9 +376,24 @@ def format_auth_diagnose(diag: dict) -> str:
     if verdict == "ok":
         ok = [l for l, r in diag["variants"].items() if r.get("status") == 200]
         lines.append(f"→ ✅ 성공한 방식: {', '.join(ok)}")
+    elif verdict == "not_subscribed":
+        styles = working_auth_styles(diag)
+        lines.append("→ **키는 유효합니다. 이 API에 대한 권한만 없습니다.**")
+        lines.append(f"  키를 보냈을 때: \"{MSG_NOT_SUBSCRIBED}\" (호출이 허용되지 않음)")
+        lines.append(f"  키가 없거나 틀릴 때: \"{MSG_BAD_KEY}\" (키를 못 알아봄)")
+        lines.append("  **두 메시지가 다르다는 것이 키가 인식됐다는 증거입니다.**")
+        if styles:
+            lines.append(f"  키가 전달된 방식: {', '.join(styles)}")
+        lines.append("")
+        lines.append("  → 남은 것은 **API별 활용신청**입니다. openapi.krx.co.kr →")
+        lines.append("    서비스 이용 → 지수 → 쓰려는 API마다 '활용신청' → 승인 대기.")
+        lines.append("    인증키 발급과 활용신청은 별개이고, 승인까지 시간이 걸립니다.")
     elif verdict == "key_read":
+        styles = working_auth_styles(diag)
         lines.append("→ **서버가 키를 읽고 있습니다.** 진짜 키와 엉터리 키의 응답이")
         lines.append("  다릅니다. 헤더 이름 문제가 아니라 **키 또는 권한** 문제입니다.")
+        if styles:
+            lines.append(f"  키가 전달된 방식: {', '.join(styles)}")
         lines.append("  → 인증키 승인 상태와 **API별 활용신청** 승인을 확인하세요.")
     elif verdict == "key_ignored":
         lines.append("→ **키가 응답에 아무 영향을 주지 않습니다.**")

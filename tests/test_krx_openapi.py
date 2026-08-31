@@ -235,3 +235,65 @@ def test_the_controls_include_no_key_and_a_bad_key():
 def test_a_missing_key_is_reported_before_calling(monkeypatch):
     monkeypatch.setattr(k, "_auth_key", lambda: "")
     assert "미설정" in k.auth_diagnose("20260828")["error"]
+
+
+# ─── 두 401 메시지의 뜻이 다르다 (2026-08-31 실측) ───
+
+API_CALL = {"status": 401,
+            "body": '{"respMsg":"Unauthorized API Call","respCode":"401"}'}
+BAD_KEY = {"status": 401,
+           "body": '{"respMsg":"Unauthorized Key","respCode":"401"}'}
+
+
+def _real_diag():
+    """2026-08-31 맥에서 실제로 나온 응답."""
+    return {
+        "path": "/svc/apis/idx/kospi_dd_trd",
+        "variants": {
+            "헤더 AUTH_KEY": API_CALL, "헤더 auth_key": API_CALL,
+            "헤더 authKey": BAD_KEY, "헤더 apiKey": BAD_KEY,
+            "헤더 Authorization: Bearer": API_CALL, "쿼리 AUTH_KEY": API_CALL,
+        },
+        "controls": {"키 없음": BAD_KEY, "엉터리 키": BAD_KEY},
+    }
+
+
+def test_the_two_401_messages_mean_different_things():
+    """'Unauthorized Key'는 키를 못 알아본 것, 'Unauthorized API Call'은
+    키는 알아봤는데 그 API가 허용되지 않은 것이다. 둘을 합치면 원인을 못 좁힌다."""
+    assert k.auth_verdict(_real_diag()) == "not_subscribed"
+
+
+def test_the_report_says_the_key_itself_is_fine():
+    text = k.format_auth_diagnose(_real_diag())
+    assert "키는 유효합니다" in text
+    assert "활용신청" in text
+
+
+def test_the_report_shows_which_auth_styles_carried_the_key():
+    """어느 헤더가 맞는지 실측으로 안다 — 문서를 다시 뒤질 필요가 없다."""
+    styles = k.working_auth_styles(_real_diag())
+    assert "헤더 AUTH_KEY" in styles
+    assert "헤더 authKey" not in styles      # 대조군과 같은 응답 → 안 읽힘
+    assert "헤더 apiKey" not in styles
+
+
+def test_an_unrecognised_key_is_not_reported_as_a_subscription_problem():
+    """키가 진짜 틀린 경우까지 '활용신청 하세요'로 보내면 엉뚱한 데를 고친다."""
+    diag = {"variants": {"헤더 AUTH_KEY": BAD_KEY},
+            "controls": {"키 없음": BAD_KEY, "엉터리 키": BAD_KEY}}
+    assert k.auth_verdict(diag) == "key_ignored"
+
+
+def test_a_different_but_unnamed_error_stays_generic():
+    """메시지 규격이 바뀌면 특정 원인을 단정하지 않고 일반 판정으로 물러난다."""
+    other = {"status": 401, "body": '{"respMsg":"뭔가 다른 오류"}'}
+    diag = {"variants": {"헤더 AUTH_KEY": other},
+            "controls": {"키 없음": BAD_KEY, "엉터리 키": BAD_KEY}}
+    assert k.auth_verdict(diag) == "key_read"
+
+
+def test_working_styles_is_empty_when_nothing_carried_the_key():
+    diag = {"variants": {"헤더 AUTH_KEY": BAD_KEY},
+            "controls": {"키 없음": BAD_KEY, "엉터리 키": BAD_KEY}}
+    assert k.working_auth_styles(diag) == []
