@@ -758,20 +758,51 @@ def _watchlist_target(query: str, action_re: re.Pattern) -> str:
     return " ".join(text.split())
 
 
+# 종목명이 아니라 **문장 조각**임을 드러내는 표지. 2026-08-31 실측:
+# "관심 종목을 제외한 기술적 신호 대상 종목들을 리스트에서 삭제해줘"가
+# remove("제외한 기술적 신호 대상 종목들을 리스트에서")로 잘려 KRX 조회까지 갔다.
+_WATCHLIST_NOT_A_NAME_RE = re.compile(
+    r"제외|대상|리스트|목록|전부|모두|종목들|들을|에서\b|나머지|말고")
+
+
+def _plausible_stock_name(target: str) -> bool:
+    """추출된 대상이 종목명으로 그럴듯한가(순수).
+
+    결정론 분기는 **명백한 발화만** 가로채야 한다. 특히 remove는 파괴적 동작이라,
+    문장을 종목명으로 오해한 채 실행 경로에 태우면 안 된다. 그럴듯하지 않으면
+    분기를 포기하고 LLM 라우터로 넘긴다 — 그쪽은 최소한 의도를 물을 수 있다.
+
+    기준은 실제 KRX 종목명 분포에서 잡았다: 가장 긴 축인
+    "TIGER 미국필라델피아반도체나스닥"이 17자·2어절이다.
+    """
+    if not target or len(target) > 25:
+        return False
+    if _WATCHLIST_NOT_A_NAME_RE.search(target):
+        return False
+    if len(target.split()) > 4:
+        return False
+    return True
+
+
 def _detect_watchlist(query: str) -> dict | None:
     """명백한 관심종목 CRUD 발화만 LLM 전에 결정론적으로 분기."""
     if not query or not _WATCHLIST_CUE_RE.search(query):
         return None
+    # **빈 대상과 문장 조각은 다르다.** "관심종목에 추가해줘"(대상 없음)는
+    # 종목명을 묻는 기존 경로가 맞고, "…종목들을 리스트에서 삭제해줘"(문장 조각)는
+    # 단일 종목 CRUD가 아니므로 LLM 라우터로 넘긴다.
     if _WATCHLIST_REMOVE_END_RE.search(query):
-        return {
-            "action": "remove",
-            "ticker_or_name": _watchlist_target(query, _WATCHLIST_REMOVE_END_RE),
-        }
+        target = _watchlist_target(query, _WATCHLIST_REMOVE_END_RE)
+        if target and not _plausible_stock_name(target):
+            log.info("관심종목 결정론 분기 포기(종목명 아님): %r", target)
+            return None
+        return {"action": "remove", "ticker_or_name": target}
     if _WATCHLIST_ADD_END_RE.search(query):
-        return {
-            "action": "add",
-            "ticker_or_name": _watchlist_target(query, _WATCHLIST_ADD_END_RE),
-        }
+        target = _watchlist_target(query, _WATCHLIST_ADD_END_RE)
+        if target and not _plausible_stock_name(target):
+            log.info("관심종목 결정론 분기 포기(종목명 아님): %r", target)
+            return None
+        return {"action": "add", "ticker_or_name": target}
     if _WATCHLIST_LIST_RE.search(query):
         return {"action": "list"}
     return None

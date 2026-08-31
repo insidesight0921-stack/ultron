@@ -744,9 +744,16 @@ def format_signals(signals: list[Signal]) -> str:
 
 
 def format_watchlist(items: Optional[list] = None) -> str:
-    """현재 신호 대상 종목 목록(순수). '어떤 종목 보고 있어?'에 답하는 텍스트."""
+    """현재 신호 대상 종목 목록. '어떤 종목 보고 있어?'에 답하는 텍스트.
+
+    **2026-08-31 정정: 기본값이 `load_watchlist()`(전체 28종목)였다.** 신호
+    범위를 관심종목으로 좁힌(v3.57) 뒤에도 이 화면은 옛 전체 목록을 보여줘,
+    사용자가 "저 종목들을 신호 목록에서 지워 달라"고 요청하는 일이 실제로
+    생겼다 — 지울 것이 없는데 목록이 있다고 말한 것이다. 표시는 **실제로
+    신호를 보내는 목록**(`signal_watchlist`)과 같아야 한다.
+    """
     if items is None:
-        items = load_watchlist()
+        items = signal_watchlist()
     if not items:
         return "신호 대상 종목이 없습니다."
     groups: dict[str, list] = {}
@@ -760,8 +767,8 @@ def format_watchlist(items: Optional[list] = None) -> str:
             tag = "관심" if not it.weight else f"{it.weight:.0f}%"
             lines.append(f"  • {it.name} ({code}) · {tag} · {it.strategy}")
         lines.append("")
-    lines.append("_자산배분 종목은 `핵심_자산배분_포트폴리오.md`, "
-                 "관심종목은 `종목 추가/삭제`로 관리합니다._")
+    lines.append("_신호는 개인 관심종목에만 갑니다(`종목 추가/삭제`로 관리)._")
+    lines.append("_자산배분 종목(`핵심_자산배분_포트폴리오.md`)은 신호 대상이 아닙니다._")
     return "\n".join(lines).strip()
 
 

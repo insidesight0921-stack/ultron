@@ -655,3 +655,50 @@ def test_ipo_size_keyword_is_offer_amount_not_market_cap():
     """
     assert router._extract_ipo_fields_from_query("시총 800억") == {}
     assert router._extract_ipo_fields_from_query("공모규모 800억")["offer_amount"] == 800.0
+
+
+# ─── 결정론 분기가 문장을 종목명으로 오해하지 않기 (2026-08-31) ─
+
+
+def test_a_sentence_about_the_signal_list_is_not_a_remove_command():
+    """실측 사고: "관심 종목을 제외한 기술적 신호 대상 종목들을 리스트에서
+    삭제해줘"가 remove("제외한 기술적 신호 대상 종목들을 리스트에서")로 잘려
+    KRX 조회까지 갔다. '관심종목'이라는 낱말과 '삭제해줘'라는 어미만 보고
+    문장 전체를 가로챈 것이다."""
+    q = "관심 종목을 제외한 기술적 신호 대상 종목들을 리스트에서 삭제해줘"
+    assert router._detect_watchlist(q) is None
+
+
+def test_bulk_phrases_are_not_short_circuited():
+    """복수·전체를 가리키는 발화는 종목 하나짜리 CRUD가 아니다."""
+    for q in ("관심종목 전부 삭제해줘",
+              "관심종목 목록에 있는 종목들 모두 빼줘",
+              "관심종목 말고 나머지 삭제해줘"):
+        assert router._detect_watchlist(q) is None, q
+
+
+def test_plain_single_name_utterances_still_short_circuit():
+    """게이트를 넣다가 정상 발화까지 LLM으로 보내면 라우팅이 느려진다."""
+    assert router._detect_watchlist("삼성전자 관심종목에서 빼줘") == \
+        {"action": "remove", "ticker_or_name": "삼성전자"}
+    assert router._detect_watchlist("LS ELECTRIC 관심종목에 추가해줘") == \
+        {"action": "add", "ticker_or_name": "LS ELECTRIC"}
+
+
+def test_the_longest_real_etf_name_still_passes_the_gate():
+    """기준을 실제 종목명 분포에서 잡았는지 고정한다(17자·2어절)."""
+    q = "TIGER 미국필라델피아반도체나스닥 관심종목에 추가해줘"
+    got = router._detect_watchlist(q)
+    assert got == {"action": "add",
+                   "ticker_or_name": "TIGER 미국필라델피아반도체나스닥"}
+
+
+def test_the_gate_rejects_leftover_sentence_fragments():
+    assert router._plausible_stock_name("제외한 기술적 신호 대상 종목들을 리스트에서") is False
+    assert router._plausible_stock_name("") is False
+    assert router._plausible_stock_name("가나다 " * 10) is False
+
+
+def test_the_gate_accepts_ordinary_names():
+    for name in ("삼성전자", "LS ELECTRIC", "TIGER 미국달러SOFR금리액티브(합성)"):
+        assert router._plausible_stock_name(name) is True, name

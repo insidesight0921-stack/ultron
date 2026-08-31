@@ -556,3 +556,34 @@ class TestSignalScope:
     def test_browsing_the_full_watchlist_is_unaffected(self):
         """`/watchlist`로 전체를 보는 것과 신호를 어디에 보낼지는 다른 질문이다."""
         assert len(sb.load_watchlist(include_personal=False)) == 15
+
+
+# ─── 표시 = 실제 신호 대상 (2026-08-31) ──────────────
+
+
+def test_the_default_display_shows_what_is_actually_scanned():
+    """v3.57에서 신호 범위를 관심종목으로 좁혔는데 표시는 전체 28종목을 보여줬다.
+
+    사용자가 "저 종목들을 신호 목록에서 지워 달라"고 실제로 요청했다 — 지울
+    것이 없는데 목록이 있다고 말한 것이다. 표시는 실제 발송 대상과 같아야 한다.
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "scripts"
+           / "signal_bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "format_watchlist")
+    body = ast.get_source_segment(src, fn)
+    assert "items = signal_watchlist()" in body
+    assert "items = load_watchlist()" not in body
+
+
+def test_the_display_says_allocation_items_are_not_targets():
+    """목록에 없는 이유를 안 적으면 '사라졌다'는 문의가 온다."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "scripts"
+           / "signal_bot.py").read_text(encoding="utf-8")
+    assert "신호 대상이 아닙니다" in src
