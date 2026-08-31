@@ -711,9 +711,26 @@ def _default_llm(prompt: str) -> str:
         return json.loads(r.read().decode("utf-8"))["message"]["content"].strip()
 
 
+#: LLM에게 주는 규칙. **수치를 지어내는 것이 이 총평의 유일한 실패 모드다.**
+#: 표본 63건짜리 통계를 놓고 모델이 "3분기 들어" 같은 없는 구간이나 반올림하지
+#: 않은 숫자를 만들어 내면, 사람은 그것이 계산된 값인지 생성된 값인지 구분할 수
+#: 없다. 그래서 **주어진 숫자만 쓰라고 명시하고, 화면에는 원자료를 함께 싣는다.**
+_LLM_RULES = (
+    "규칙:\n"
+    "1) **아래 제공된 숫자만 사용하라.** 새로운 수치·비율·기간을 만들어 내지 말 것.\n"
+    "2) 제공되지 않은 것은 '자료 없음'이라고 쓰라. 추정하지 말 것.\n"
+    "3) 표본이 적으면 단정하지 말고 '표본이 적어 단정하기 어렵다'고 쓰라.\n"
+    "4) 투자 권유·종목 추천을 하지 말 것.\n"
+)
+
+
 def llm_summary(rts: list[dict], llm_fn: Optional[Callable[[str], str]] = None,
-                trades: Optional[list] = None) -> str:
-    """수치 분석 → 로컬 LLM 한국어 총평. 실패 시 빈 문자열(graceful)."""
+                trades: Optional[list] = None, n_excluded: int = 0) -> str:
+    """수치 분석 → 로컬 LLM 한국어 총평. 실패 시 빈 문자열(graceful).
+
+    `n_excluded`를 함께 넘긴다. 품질 규칙으로 뺀 건수를 모델이 모르면 "손실이
+    크다"는 진단을 남은 표본에 대해 내리는데, 실제로 그 손실은 뺀 쪽에 있었다.
+    """
     if not rts:
         return ""
     h = habit_stats(rts)
@@ -721,9 +738,12 @@ def llm_summary(rts: list[dict], llm_fn: Optional[Callable[[str], str]] = None,
     sl = stop_loss_diagnosis(rts)
     lc = loss_concentration(rts)
     wh = whipsaw(trades, rts) if trades else []
+    scope = (f"- 표본: 완결 {h['n_closed']}건. 가격 오류 등 품질 규칙으로 "
+             f"{n_excluded}건을 집계에서 제외한 뒤의 수치다\n" if n_excluded else "")
     prompt = (
         "다음은 한 개인 투자자의 모의(paper) 매매 통계다. 한국어로 4~6줄, 과장 없이 "
-        "무엇이 잘/못 되고 있는지 진단하고 구체적 개선점 1~2개를 제시하라. 투자 권유는 하지 말 것.\n\n"
+        "무엇이 잘/못 되고 있는지 진단하고 구체적 개선점 1~2개를 제시하라.\n\n"
+        + _LLM_RULES + "\n" + scope +
         f"- 완결 {h['n_closed']}건, 승률 {h['win_rate']}%, 손익비(PF) {h['profit_factor']}, "
         f"평균이익 {h['avg_win']} / 평균손실 {h['avg_loss']}\n"
         f"- 청산사유: {h['reason_counts']}, 평균 보유일 {h['avg_hold_days']}\n"
@@ -750,7 +770,18 @@ def llm_summary(rts: list[dict], llm_fn: Optional[Callable[[str], str]] = None,
 
 def deep_report(db_path=None, include_llm: bool = True,
                 llm_fn: Optional[Callable[[str], str]] = None) -> str:
-    """실제 paper.db 거래 → 심화 분석 리포트(+정밀 진단 +선택 LLM 총평)."""
+    """실제 paper.db 거래 → 심화 분석 리포트(+정밀 진단 +선택 LLM 총평).
+
+    **2026-08-31: 여기서 `compute_roundtrips`(원본)를 쓰고 있었다.** 성과 분석인데
+    품질 규칙을 적용하지 않아 스테일 시세 16건이 그대로 섞였다. 차이가 작지 않다.
+
+        원본 79건   PF 0.76   누적 −5,923,267원
+        필터 63건   PF 0.97   누적 −535,292원   (제외분 합계 −5,387,975원)
+
+    제외분이 손실의 90%를 차지한다. 그 상태로 LLM 총평을 만들면 **시장이 낸 손실이
+    아니라 가격 오류가 낸 손실을 놓고 전략을 진단한다.** 그래서 성과 경로는
+    `roundtrips_for_analysis`를 쓰고, 무엇을 뺐는지 리포트에 함께 적는다.
+    """
     try:
         import paper_db
         trades = (paper_db.list_trades(limit=100000, db_path=db_path) if db_path
@@ -758,7 +789,7 @@ def deep_report(db_path=None, include_llm: bool = True,
     except Exception as e:
         log.exception("거래 조회 실패")
         return f"🔬 매매 분석 조회 실패: {e}"
-    rts = compute_roundtrips(trades)
+    rts, dropped = roundtrips_for_analysis(trades)
     history = None
     try:
         import paper_analytics
@@ -766,8 +797,16 @@ def deep_report(db_path=None, include_llm: bool = True,
     except Exception:
         pass
     report = format_deep(rts, history, trades, phase_map=merged_phase_map())
+    if dropped:
+        try:
+            import data_quality
+            note = data_quality.format_summary(data_quality.summary(dropped))
+            if note:
+                report += "\n\n" + note
+        except Exception as e:  # noqa: BLE001
+            log.warning("제외 요약 생성 실패: %s", e)
     if include_llm and rts:
-        narrative = llm_summary(rts, llm_fn, trades)
+        narrative = llm_summary(rts, llm_fn, trades, n_excluded=len(dropped))
         if narrative:
             report += "\n\n🧠 총평\n" + narrative
     return report

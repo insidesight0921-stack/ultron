@@ -236,7 +236,10 @@ def _get_myquant_tags() -> dict:
             log.warning("Private API myquant-tags fallback: %s", type(exc).__name__)
     import trade_analytics as ta
 
-    roundtrips = ta.compute_roundtrips(pdb.list_trades(limit=100000))
+    # 성과 집계이므로 **품질 규칙을 적용한 표본**을 쓴다(2026-08-31). 원본을 쓰면
+    # 가격 오류로 강제 청산된 건이 태그 성과에 섞인다 — 지금은 태그가 붙은 거래가
+    # 없어 결과가 같지만, 태깅이 쌓이기 시작하면 조용히 오염된다.
+    roundtrips, _ = ta.roundtrips_for_analysis(pdb.list_trades(limit=100000))
     return {
         "tags": ta.tag_performance(roundtrips),
         "text": ta.format_tag_performance(roundtrips),
@@ -859,6 +862,65 @@ async def api_benchmark(rf: float = 0.0):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/failure-analysis")
+async def api_failure_analysis(llm: int = 0):
+    """v3.58: 실패 원인 분석(탭 D).
+
+    **원인을 지목해 주지 않는다.** 축별로 갈라 본 뒤, 각 칸이 라벨을 무작위로
+    섞었을 때와 구분되는지를 함께 낸다. 63건짜리 표본에서는 무작위로 갈라도
+    그럴듯한 차이가 나오기 때문이다(2026-08-29 실측: 무작위 4분할의 '최고 그룹'
+    승률 중앙값 50.0%).
+
+    LLM 총평은 기본으로 끄고(`llm=1`) 켠다 — 로컬 모델 호출이 수십 초 걸리고,
+    총평이 없어도 수치는 그대로 나와야 한다.
+    """
+    try:
+        import failure_analysis as fa
+        import trade_analytics as ta
+
+        trades = pdb.list_trades(limit=100000)
+        rts, dropped = ta.roundtrips_for_analysis(trades)
+        phase_map = ta.merged_phase_map()
+        result = fa.findings(
+            rts, trades,
+            axes={
+                "섹터": ("cross", ta.sector_label),
+                "슬롯": ("cross", lambda r: r.get("slot") or "?"),
+                "보유기간": ("outcome", _hold_bucket),
+                "국면": ("time", lambda r: ta.phase_label(r, phase_map)),
+                "청산사유": ("tauto", lambda r: r.get("reason") or "?"),
+            },
+            stop_fn=ta.stop_loss_diagnosis,
+            whipsaw_fn=ta.whipsaw,
+            concentration_fn=ta.loss_concentration,
+            slippage_fn=ta.slippage_comparison)
+        result["excluded"] = len(dropped)
+        result["text"] = fa.format_findings(result)
+        result["narrative"] = ""
+        if llm and rts:
+            # 실패해도 수치는 유지한다 — 총평은 부가물이지 본체가 아니다.
+            result["narrative"] = ta.llm_summary(rts, None, trades,
+                                                 n_excluded=len(dropped))
+        return JSONResponse(result)
+    except Exception as e:
+        log.exception("실패 원인 분석 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _hold_bucket(r: dict) -> str:
+    """보유기간 구간. 못 읽은 값을 0일로 넣지 않는다."""
+    d = r.get("hold_days")
+    if d is None:
+        return "미상"
+    if d <= 1:
+        return "1일 이하"
+    if d <= 5:
+        return "2~5일"
+    if d <= 20:
+        return "6~20일"
+    return "21일 이상"
+
+
 # ─── HTML 페이지 ────────────────────────────────────
 
 
@@ -1075,6 +1137,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-perf">성과</button>
     <button class="tab" data-tab="tab-bench">벤치마크</button>
+    <button class="tab" data-tab="tab-failure">실패 원인</button>
   </div>
 
   <!-- 탭 1: 주문 -->
@@ -1416,6 +1479,40 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <tr><td colspan="4" class="muted">아직 평가할 거래일이 없습니다.</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- 탭 D: 실패 원인 분석 (v3.58) -->
+  <div id="tab-failure" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-failure-refresh">새로고침</button>
+        <label class="field" style="grid-auto-flow:column; align-items:center; gap:8px;">
+          <input type="checkbox" id="failure-llm"> <span>LLM 총평 포함(수십 초)</span>
+        </label>
+        <span id="failure-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:0.4rem;border-left:3px solid #888;padding-left:0.6rem;">
+        <b>이 화면은 원인을 지목해 주지 않습니다.</b> 축별로 갈라 본 뒤, 각 칸이
+        <b>라벨을 무작위로 섞었을 때와 구분되는지</b>를 함께 냅니다. 표본이 적으면
+        무작위로 갈라도 그럴듯한 차이가 나오기 때문입니다 —
+        2026-08-29 실측에서 완결 거래를 아무 의미 없이 4분할했더니
+        <b>'가장 좋은 그룹'의 승률 중앙값이 50.0%</b>였습니다(전체 36.5%).<br>
+        <b>시간축(국면)과 순환 정의(청산사유)는 발견에서 뺍니다.</b> 같은 시기 거래는
+        같은 시장을 겪으므로 시간축은 무엇이든 유의해 보이고, 손절은 정의상 손실입니다.
+        둘은 <b>검정이 살아 있는지 보는 대조군</b>으로만 씁니다.
+      </p>
+    </div>
+    <div id="failure-summary" class="card" style="margin-bottom:20px;">
+      <pre id="failure-text" style="white-space:pre-wrap;margin:0;font:inherit;"
+           class="muted">불러오는 중…</pre>
+    </div>
+    <div id="failure-axes"></div>
+    <div class="card" id="failure-narrative-card" style="display:none;">
+      <h3>🧠 LLM 총평</h3>
+      <p class="muted">아래 문장은 <b>위 표의 숫자만</b> 쓰도록 지시된 로컬 모델의
+        요약입니다. 새로운 수치가 보이면 그것은 생성된 값이므로 믿지 마십시오.</p>
+      <pre id="failure-narrative" style="white-space:pre-wrap;margin:0;font:inherit;"></pre>
     </div>
   </div>
 
@@ -2457,6 +2554,71 @@ async function loadBenchmark() {
 document.getElementById("btn-bench-refresh").addEventListener("click", loadBenchmark);
 document.getElementById("bench-rf").addEventListener("change", loadBenchmark);
 document.querySelector(".tab[data-tab='tab-bench']").addEventListener("click", loadBenchmark);
+
+// ── 탭 D: 실패 원인 분석 (v3.58) ────────────────────────────────────────────
+const FAILURE_KIND_NOTE = {
+  time: "시간축 — 같은 시기 거래는 같은 시장을 겪습니다. 이 차이는 대부분 시장 방향이며 전략 성과와 분리되지 않습니다.",
+  tauto: "순환 정의 — 결과가 라벨을 정합니다. 발견이 아니라 검정이 살아 있는지 보는 대조군입니다.",
+  outcome: "결과가 라벨에 딸려 옵니다 — 청산 규칙이 보유기간을 정합니다(손절 −7%는 빨리, 익절 +20%는 늦게 끝납니다). 실제로 6~20일 칸은 익절 비중 52%인데 나머지 칸은 29%입니다. '오래 들면 좋다'가 아니라 '익절까지 간 거래가 거기 모여 있다'에 가깝습니다.",
+};
+
+function failureVerdictCell(c) {
+  if (c.verdict === "표본 부족") return '<span class="muted">표본 부족</span>';
+  if (c.verdict === "우연 범위") return '<span class="muted">우연 범위</span>';
+  const cls = c.verdict === "유의하게 좋음" ? "up" : "down";
+  return `<span class="delta ${cls}">${c.verdict}</span>`;
+}
+
+async function loadFailureAnalysis() {
+  const status = document.getElementById("failure-status");
+  const text = document.getElementById("failure-text");
+  const axes = document.getElementById("failure-axes");
+  const card = document.getElementById("failure-narrative-card");
+  const narr = document.getElementById("failure-narrative");
+  const withLlm = document.getElementById("failure-llm").checked ? 1 : 0;
+  status.textContent = withLlm ? "로딩 중... (LLM 총평은 수십 초 걸립니다)" : "로딩 중...";
+  try {
+    const d = await (await fetch(`/api/failure-analysis?llm=${withLlm}`)).json();
+    if (d.error) throw new Error(d.error);
+    text.textContent = d.text || "";
+    text.className = "";
+
+    axes.innerHTML = Object.entries(d.axes || {}).map(([name, cells]) => {
+      const kind = (d.axis_kinds || {})[name] || "cross";
+      const note = FAILURE_KIND_NOTE[kind];
+      const badge = kind === "cross" ? "" :
+        ` <span class="muted" style="font-weight:400;">· 대조군</span>`;
+      return `<div class="card" style="margin-bottom:20px;">
+        <h3>${name}${badge}</h3>
+        ${note ? `<p class="muted">${note}</p>` : ""}
+        <table>
+          <thead><tr><th>${name}</th><th class="num">건수</th><th class="num">실현손익</th>
+            <th class="num">평균</th><th class="num">승률</th><th class="num">백분위</th><th>판정</th></tr></thead>
+          <tbody>${cells.map(c => `<tr>
+            <td>${c.label}</td>
+            <td class="num">${c.n}</td>
+            <td class="num ${c.pnl > 0 ? "up" : (c.pnl < 0 ? "down" : "")}">${c.pnl.toLocaleString()}원</td>
+            <td class="num">${c.mean_ret > 0 ? "+" : ""}${c.mean_ret}%</td>
+            <td class="num">${c.win_rate}%</td>
+            <td class="num muted">${c.percentile === null ? "—" : c.percentile}</td>
+            <td>${failureVerdictCell(c)}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>`;
+    }).join("");
+
+    if (d.narrative) { narr.textContent = d.narrative; card.style.display = ""; }
+    else { card.style.display = "none"; }
+
+    const bits = [`업데이트: ${new Date().toLocaleTimeString()}`];
+    if (d.excluded) bits.push(`품질 규칙으로 ${d.excluded}건 제외`);
+    status.textContent = bits.join(" · ");
+  } catch(e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+document.getElementById("btn-failure-refresh").addEventListener("click", loadFailureAnalysis);
+document.querySelector(".tab[data-tab='tab-failure']").addEventListener("click", loadFailureAnalysis);
 
 // ── 성과 탭 (v3.31) ──────────────────────────────────────────────────────────
 async function loadPerformance() {

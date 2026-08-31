@@ -727,12 +727,14 @@ def get_paper_myquant_tags(
     _, trades, _, _ = _paper_analysis_inputs(db_path=db_path)
     try:
         from trade_analytics import (
-            compute_roundtrips,
             format_tag_performance,
+            roundtrips_for_analysis,
             tag_performance,
         )
 
-        roundtrips = compute_roundtrips(trades)
+        # 성과 집계 — 품질 규칙 적용분을 쓴다(2026-08-31). 원본은 "오늘의 실제
+        # 위험"을 보는 곳(슬롯 일일 한도)에서만 쓴다.
+        roundtrips, _ = roundtrips_for_analysis(trades)
         return {
             "tags": tag_performance(roundtrips),
             "text": format_tag_performance(roundtrips),
