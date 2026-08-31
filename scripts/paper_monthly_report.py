@@ -354,7 +354,7 @@ def load_inputs(db_path=None):
 
     kwargs = {"db_path": db_path} if db_path else {}
     kept, dropped = ta.roundtrips_for_analysis(paper_db.list_trades(limit=100000, **kwargs))
-    trades, calendar, seeds, series, bench = ec.load_inputs(db_path)
+    trades, calendar, seeds, series, bench, _alloc = ec.load_inputs(db_path)
     curve = ec.build(trades, calendar, seeds, series)
     return kept, dropped, curve, bench
 

@@ -80,12 +80,10 @@ def _configure_paper_write_runtime(runtime_bundle) -> None:
 # 앱 시작 시 시드
 pdb.ensure_seed()
 
-# v3.47 — 나만의 퀀트 슬롯 보장(초기 자본 1,000만 · 필요시 DB에서 조정)
+# v3.47 — 나만의 퀀트 슬롯. 2026-08-29부터 SLOT_DEFINITIONS(합계 100%)에
+# 정식으로 들어가 있으므로 여기서는 이름만 잡는다. 예전처럼 ensure_slot으로
+# 따로 만들면 비중 합계가 넘쳐 성과 지표가 왜곡된다.
 MYQUANT_SLOT = "마이퀀트"
-try:
-    pdb.ensure_slot(MYQUANT_SLOT)
-except Exception:
-    log.exception("마이퀀트 슬롯 생성 실패")
 
 
 app = FastAPI(title="Paper Trading UI")

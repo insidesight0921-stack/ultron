@@ -44,10 +44,18 @@ def compute_performance_stats(
     for trade in trades:
         by_slot[int(trade["slot_id"])].append(trade)
 
+    try:
+        import slot_allocation
+        alloc_ok = slot_allocation.check(slots)["ok"]
+    except ImportError:
+        alloc_ok = True
+
     results = []
     for slot in slots:
         slot_id = int(slot["id"])
         slot_name = slot["name"]
+        # 비중 합계가 어긋나 있으면 이 분모가 실제 자본과 다르다(2026-08-29:
+        # 합계 110%, 시드가 1.1억). 결과에 그 사실을 실어 화면이 알 수 있게 한다.
         slot_seed = float(slot["allocation_pct"]) * float(seed_capital)
         slot_trades = sorted(
             by_slot.get(slot_id, []),
@@ -171,6 +179,9 @@ def compute_performance_stats(
                 "trade_sharpe": trade_sharpe,
                 "n_open_positions": int(open_info["n"]),
                 "open_cost": round(float(open_info["open_cost"])),
+                # 분모(시드)를 믿을 수 있는지. 어긋났으면 total_return_pct가
+                # 실제와 다르다 — 조용히 내보내면 그 값을 믿게 된다.
+                "seed_trusted": alloc_ok,
             }
         )
     return results

@@ -123,7 +123,7 @@ def test_buy_mutates_only_after_approval_and_increments_slot_version(stack):
         "total_cost": 800_000.0,
     }
     capital, positions, trades = _state(db, slot_id)
-    assert capital == 39_200_000
+    assert capital == 34_200_000        # 2026-08-29: 콴텍 시드 4,000만 → 3,500만
     assert positions == [("005930", 10, 80_000.0)]
     assert trades == [("buy", "005930", 10, 80_000.0, 0.0)]
     assert store.current_version(slot_id) == 1
@@ -211,7 +211,7 @@ def test_partial_then_full_sell_updates_position_capital_and_version(stack):
 
     assert second.result["proceeds"] == 540_000.0
     assert positions == []
-    assert capital == 40_100_000
+    assert capital == 35_100_000     # 콴텍 시드 4,000만 → 3,500만(2026-08-29)
     assert [row[0] for row in trades] == ["buy", "sell", "sell"]
     assert store.current_version(slot_id) == 3
 

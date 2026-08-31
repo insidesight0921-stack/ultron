@@ -329,6 +329,7 @@ def load_inputs(db_path=None) -> tuple[list[dict], list[str], dict, dict, dict]:
 
     import paper_db
     import price_sanity as ps
+    import slot_allocation
 
     kwargs = {"db_path": db_path} if db_path else {}
     trades = paper_db.list_trades(limit=100000, **kwargs)
@@ -343,6 +344,12 @@ def load_inputs(db_path=None) -> tuple[list[dict], list[str], dict, dict, dict]:
         seed_total = float(row[0]) if row else 0.0
     except Exception as e:  # noqa: BLE001
         log.warning("시드 자본 조회 실패: %s", e)
+    # 비중 합계가 어긋나면 시드가 실제 자본과 달라져 수익률·MDD·초과수익이
+    # 전부 왜곡된다. 계산은 하되 **어긋났다는 사실을 결과에 싣는다** — 화면을
+    # 죽이면 아무것도 못 보게 되고, 조용히 계산하면 틀린 값을 믿게 된다.
+    alloc = slot_allocation.check(slots)
+    if not alloc["ok"]:
+        log.warning("%s", alloc["detail"])
     seeds = {s["name"]: float(s.get("allocation_pct") or 0) * seed_total for s in slots}
 
     tickers = {str(t.get("ticker")) for t in trades}
@@ -355,13 +362,15 @@ def load_inputs(db_path=None) -> tuple[list[dict], list[str], dict, dict, dict]:
         bench = dict(zip(payload["series"]["date"], payload["series"]["close"]))
     except Exception as e:  # noqa: BLE001
         log.warning("벤치마크 로드 실패: %s", e)
-    return trades, calendar, seeds, series, bench
+    return trades, calendar, seeds, series, bench, alloc
 
 
 def report(db_path=None, *, rf_annual: float = 0.0) -> dict:
-    trades, calendar, seeds, series, bench = load_inputs(db_path)
+    trades, calendar, seeds, series, bench, alloc = load_inputs(db_path)
     curve = build(trades, calendar, seeds, series)
-    return evaluate(curve, bench, rf_annual=rf_annual)
+    out = evaluate(curve, bench, rf_annual=rf_annual)
+    out["allocation"] = alloc          # 어긋났으면 화면이 그대로 보여준다
+    return out
 
 
 def _cli() -> int:

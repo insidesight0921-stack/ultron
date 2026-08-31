@@ -37,18 +37,19 @@ def seeded(db: Path) -> Path:
 def test_ensure_seed_creates_portfolio_and_slots(db):
     out = pdb.ensure_seed(db_path=db)
     assert out["portfolio"]["seed_capital"] == pdb.DEFAULT_SEED_KRW
-    assert len(out["slots"]) == 3
+    assert len(out["slots"]) == 4          # 2026-08-29: 마이퀀트가 정식 정의에 포함
     names = {s["name"] for s in out["slots"]}
-    assert names == {"콴텍", "키움", "IPO"}
+    assert names == {"콴텍", "키움", "IPO", "마이퀀트"}
 
 
 def test_ensure_seed_slot_allocations(db):
     out = pdb.ensure_seed(db_path=db, seed_capital=100_000_000)
     by_name = {s["name"]: s for s in out["slots"]}
-    assert by_name["콴텍"]["current_capital"] == 40_000_000
-    assert by_name["키움"]["current_capital"] == 40_000_000
+    # 2026-08-29: 합계 110% → 100%로 정정. 마이퀀트 10%를 콴텍·키움에서 5%p씩 뗐다.
+    assert by_name["콴텍"]["current_capital"] == 35_000_000
+    assert by_name["키움"]["current_capital"] == 35_000_000
     assert by_name["IPO"]["current_capital"] == 20_000_000
-    assert by_name["콴텍"]["allocation_pct"] == 0.40
+    assert by_name["콴텍"]["allocation_pct"] == 0.35
     assert by_name["IPO"]["allocation_pct"] == 0.20
 
 
@@ -58,13 +59,13 @@ def test_ensure_seed_idempotent(db):
     out2 = pdb.ensure_seed(db_path=db, seed_capital=999_999_999)  # 다른 값
     # 첫 시드 보존 (UNIQUE name → 두 번째는 무시)
     assert out2["portfolio"]["seed_capital"] == 100_000_000
-    assert len(out2["slots"]) == 3
+    assert len(out2["slots"]) == 4
 
 
 def test_ensure_seed_custom_capital(db):
     out = pdb.ensure_seed(db_path=db, seed_capital=10_000_000)
     by_name = {s["name"]: s for s in out["slots"]}
-    assert by_name["콴텍"]["current_capital"] == 4_000_000
+    assert by_name["콴텍"]["current_capital"] == 3_500_000
 
 
 # ─── 슬롯 식별 ──────────────────────────────────────
@@ -108,7 +109,7 @@ def test_record_buy_decreases_slot_capital(seeded):
                    quantity=10, price=80_000, fees=0,
                    db_path=seeded)
     summary = pdb.slot_summary("콴텍", db_path=seeded)
-    assert summary["current_capital"] == 40_000_000 - 800_000
+    assert summary["current_capital"] == 35_000_000 - 800_000
 
 
 def test_record_buy_includes_fees_in_cost(seeded):
@@ -116,7 +117,7 @@ def test_record_buy_includes_fees_in_cost(seeded):
                    quantity=10, price=80_000, fees=1_000,
                    db_path=seeded)
     summary = pdb.slot_summary("콴텍", db_path=seeded)
-    assert summary["current_capital"] == 40_000_000 - 800_000 - 1_000
+    assert summary["current_capital"] == 35_000_000 - 800_000 - 1_000
 
 
 def test_record_buy_default_fee_15bps(seeded):
@@ -200,8 +201,8 @@ def test_record_sell_increases_capital(seeded):
     pdb.record_sell("콴텍", "005930", quantity=10, price=90_000, fees=0,
                     db_path=seeded)
     summary = pdb.slot_summary("콴텍", db_path=seeded)
-    # 4천만 - 80만 + 90만 = 4천 + 10만 = 40,100,000
-    assert summary["current_capital"] == 40_000_000 + 100_000
+    # 3,500만 - 80만 + 90만 = 3,510만
+    assert summary["current_capital"] == 35_000_000 + 100_000
 
 
 def test_record_sell_exceeds_holdings_raises(seeded):
@@ -316,18 +317,18 @@ def test_indices_created(seeded):
 
 def test_full_buy_sell_pnl_scenario(seeded):
     """매수 → 가격 상승 → 매도 → 자본 + 손익 계산."""
-    # 콴텍 4천만에서 시작
+    # 콴텍 3,500만에서 시작
     pdb.record_buy("콴텍", "005930", "삼성전자",
                    quantity=100, price=80_000, fees=0, db_path=seeded)
-    # 자본 = 4천만 - 800만 = 3,200만
+    # 자본 = 3,500만 - 800만 = 2,700만
     summary = pdb.slot_summary("콴텍", db_path=seeded)
-    assert summary["current_capital"] == 32_000_000
+    assert summary["current_capital"] == 27_000_000
 
     pdb.record_sell("콴텍", "005930", quantity=100, price=100_000, fees=0,
                     db_path=seeded)
     # 자본 = 3,200만 + 1,000만 = 4,200만 (이익 +200만)
     summary = pdb.slot_summary("콴텍", db_path=seeded)
-    assert summary["current_capital"] == 42_000_000
+    assert summary["current_capital"] == 37_000_000
     assert summary["n_positions"] == 0
 
 
@@ -339,7 +340,7 @@ class TestPerformanceStats:
 
     def test_no_trades_returns_zero_stats(self, seeded):
         stats = pdb.performance_stats(db_path=seeded)
-        assert len(stats) == 3  # 슬롯 3개 모두 반환
+        assert len(stats) == 4  # 슬롯 4개 모두 반환
         for s in stats:
             assert s["n_closed"] == 0
             assert s["win_rate"] is None

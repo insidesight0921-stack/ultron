@@ -54,11 +54,17 @@ _LOCK = Lock()
 DEFAULT_SEED_KRW = int(os.getenv("PAPER_SEED_CAPITAL_KRW", "100000000"))  # 1억
 DEFAULT_FEE_BPS = float(os.getenv("PAPER_FEE_BPS", "15"))  # 15 bp = 0.15%
 
-# 슬롯 정의 — plan §5 분산 슬롯 구조
+# 슬롯 정의 — plan §5 분산 슬롯 구조. **합계는 반드시 100%.**
+#
+# 2026-08-29 정정: 마이퀀트 슬롯이 여기 없이 `ensure_slot`으로 따로 추가되면서
+# 합계가 110%가 됐다. 시드를 `비중 × 포트폴리오 시드`로 계산하므로 넣지 않은
+# 1,000만원 위에서 수익률을 재고 있었다(초과수익 +2.09%p → 실제 −0.12%p).
+# 마이퀀트는 콴텍·키움 운용 데이터에서 파생된 전략이라 그 두 슬롯에서 5%p씩 뗐다.
 SLOT_DEFINITIONS: tuple[tuple[str, float], ...] = (
-    ("콴텍", 0.40),
-    ("키움", 0.40),
+    ("콴텍", 0.35),
+    ("키움", 0.35),
     ("IPO", 0.20),
+    ("마이퀀트", 0.10),
 )
 
 
@@ -254,6 +260,23 @@ def ensure_slot(name: str, allocation_pct: float = 0.1,
         sid = _resolve_slot_id(con, name)
         if sid is not None:
             return sid
+        # 비중 합계가 100%를 넘으면 **추가 시점에 막는다.** 이미 거래가 쌓인 뒤에
+        # 비중을 바꾸면 과거 수익률이 소급해서 달라져 되돌리기 어렵다.
+        # 마이퀀트 슬롯이 정확히 그렇게 들어와 합계를 110%로 만들었다(2026-08-29).
+        try:
+            import slot_allocation
+            existing = [_row_to_dict(r) for r in
+                        con.execute("SELECT * FROM slots WHERE portfolio_id = ?",
+                                    (portfolio_id,)).fetchall()]
+            if slot_allocation.would_exceed(existing, allocation_pct):
+                total = slot_allocation.total_allocation(existing)
+                raise ValueError(
+                    f"슬롯 '{name}' 추가 거부 — 비중 합계가 "
+                    f"{(total + allocation_pct) * 100:.1f}%가 됩니다"
+                    f"(현재 {total * 100:.1f}% + {allocation_pct * 100:.1f}%). "
+                    f"기존 슬롯 비중을 먼저 조정하세요.")
+        except ImportError:
+            log.warning("slot_allocation 미로딩 — 비중 합계 검증 생략")
         cur = con.execute(
             "INSERT INTO slots (portfolio_id, name, allocation_pct, current_capital) "
             "VALUES (?, ?, ?, ?)",

@@ -263,7 +263,7 @@ def test_http_buy_then_sell_mutates_only_after_apply_and_replays(paper_write_api
     assert sold.json()["resource_version"] == 2
     assert sold.json()["result"]["proceeds"] == 900_000.0
     capital, positions, trades = _paper_state(writer.db_path, slot_id)
-    assert capital == 40_100_000
+    assert capital == 35_100_000     # 콴텍 시드 4,000만 → 3,500만(2026-08-29)
     assert positions == []
     assert [item[0] for item in trades] == ["buy", "sell"]
 
