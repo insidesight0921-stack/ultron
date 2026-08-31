@@ -158,30 +158,54 @@ def trading_calendar() -> list[str]:
         return []
 
 
+def _series_from_payload(payload: dict, calendar: list[str],
+                         as_of: str) -> list[tuple[str, float]]:
+    """캐시 한 건 → [(YYYYMMDD, 종가)](순수).
+
+    **날짜가 캐시에 있으면 그것을 쓴다.** 예전 캐시에는 종가 배열만 있어 파일명의
+    기준일에서 거래일 달력을 거꾸로 붙여 복원했는데, 그 방식은 달력이 캐시보다
+    오래되면 통째로 실패한다 — 2026-08-31 실측에서 OHLCV는 08-31까지, 지수 캐시
+    (달력의 출처)는 08-28까지라 **전 종목이 0건**이었고 자산곡선 커버리지가
+    18%로 떨어졌다.
+    """
+    closes = payload.get("close") or []
+    if not closes:
+        return []
+    dates = payload.get("date")
+    if isinstance(dates, list) and len(dates) == len(closes):
+        return [(str(d), c) for d, c in zip(dates, closes) if c]
+    # 옛 형식 — 달력 역산(호환용)
+    if not calendar or as_of not in calendar:
+        return []
+    end = calendar.index(as_of)
+    if end + 1 < len(closes):
+        return []
+    return list(zip(calendar[end - len(closes) + 1: end + 1], closes))
+
+
 def load_series(ticker: str, calendar: list[str]) -> list[tuple[str, float]]:
     """종목 일봉 캐시 → [(YYYYMMDD, 종가)].
 
-    캐시 파일에는 종가 배열만 있고 날짜가 없다. 파일명의 기준일이 마지막 값이라는
-    전제로 거래일 달력을 거꾸로 붙인다. 길이가 달력을 넘으면 정렬을 신뢰할 수 없으므로
-    빈 목록을 돌려준다 — **어긋난 정렬로 판정하느니 판정하지 않는 편이 낫다.**
+    최신 파일이 읽히지 않으면 **이전 파일로 물러난다.** 예전에는 최신 하나만 보고
+    실패하면 빈 목록이었는데, 파일이 19개 있어도 마지막 하나 때문에 전부 못 쓰는
+    상태가 됐다(위 참고).
     """
     d = _cache_root() / "ohlcv"
     try:
         files = sorted(d.glob(f"{ticker}_*.json"))
-        if not files or not calendar:
-            return []
-        path = files[-1]
-        as_of = path.stem.split("_")[-1]
-        if as_of not in calendar:
-            return []
-        closes = json.loads(path.read_text(encoding="utf-8")).get("close") or []
-        end = calendar.index(as_of)
-        if not closes or end + 1 < len(closes):
-            return []
-        return list(zip(calendar[end - len(closes) + 1: end + 1], closes))
-    except Exception as e:  # noqa: BLE001
-        log.debug("일봉 캐시 로드 실패 %s: %s", ticker, e)
+    except OSError as e:
+        log.debug("일봉 캐시 목록 실패 %s: %s", ticker, e)
         return []
+    for path in reversed(files):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.debug("일봉 캐시 로드 실패 %s: %s", path.name, e)
+            continue
+        series = _series_from_payload(payload, calendar, path.stem.split("_")[-1])
+        if series:
+            return series
+    return []
 
 
 def check_batch(items: list[dict], today: str, **kw) -> dict:

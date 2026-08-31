@@ -201,3 +201,68 @@ def test_sell_paths_are_not_blocked():
     sell_idx = [i for i in range(len(src)) if src.startswith("record_sell", i)]
     for i in sell_idx:
         assert "check_batch" not in src[max(0, i - 600):i]
+
+
+# ─── 일봉 캐시 로드 (2026-08-31) ─────────────────────
+#
+# 캐시 형식이 바뀌어 `date` 배열이 생겼는데 로더는 "종가만 있고 날짜가 없다"는
+# 옛 전제로 파일명 기준일 + 거래일 달력을 역산하고 있었다. 달력의 출처(지수 캐시)가
+# 08-28까지인데 OHLCV는 08-31까지 받아, **전 종목이 0건**이 되고 자산곡선
+# 커버리지가 18%로 떨어졌다. 최신 파일 하나만 보고 실패하면 그대로 포기하는
+# 구조라 파일이 19개 있어도 소용없었다.
+
+import json as _json
+
+
+def _write_cache(tmp_path, ticker, as_of, closes, dates=None):
+    d = tmp_path / "ohlcv"
+    d.mkdir(exist_ok=True)
+    payload = {"close": closes}
+    if dates is not None:
+        payload["date"] = dates
+    (d / f"{ticker}_{as_of}.json").write_text(
+        _json.dumps(payload), encoding="utf-8")
+
+
+class TestLoadSeriesDates:
+    def test_dates_in_the_cache_are_used_directly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        _write_cache(tmp_path, "005930", "20260831",
+                     [100.0, 110.0], ["20260828", "20260831"])
+        # 달력에 20260831이 없어도 읽혀야 한다
+        assert ps.load_series("005930", ["20260827", "20260828"]) == [
+            ("20260828", 100.0), ("20260831", 110.0)]
+
+    def test_the_old_format_still_works(self, tmp_path, monkeypatch):
+        """날짜 없는 옛 캐시는 달력 역산으로 계속 읽는다."""
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        _write_cache(tmp_path, "005930", "20260828", [100.0, 110.0])
+        assert ps.load_series("005930", ["20260827", "20260828"]) == [
+            ("20260827", 100.0), ("20260828", 110.0)]
+
+    def test_it_falls_back_to_an_earlier_file(self, tmp_path, monkeypatch):
+        """최신 파일 하나가 안 읽힌다고 19개를 다 버리면 안 된다."""
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        _write_cache(tmp_path, "005930", "20260828", [100.0, 110.0])   # 옛 형식·달력 안
+        _write_cache(tmp_path, "005930", "20260831", [1.0, 2.0, 3.0])  # 달력 밖·날짜 없음
+        got = ps.load_series("005930", ["20260827", "20260828"])
+        assert got == [("20260827", 100.0), ("20260828", 110.0)]
+
+    def test_a_broken_file_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        (tmp_path / "ohlcv").mkdir()
+        (tmp_path / "ohlcv" / "005930_20260831.json").write_text("{망가짐", encoding="utf-8")
+        _write_cache(tmp_path, "005930", "20260828", [100.0], ["20260828"])
+        assert ps.load_series("005930", ["20260828"]) == [("20260828", 100.0)]
+
+    def test_a_length_mismatch_falls_back_to_the_calendar(self, tmp_path, monkeypatch):
+        """date와 close 길이가 다르면 짝이 어긋난 것 — 그 배열을 믿지 않는다."""
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        _write_cache(tmp_path, "005930", "20260828", [100.0, 110.0], ["20260828"])
+        assert ps.load_series("005930", ["20260827", "20260828"]) == [
+            ("20260827", 100.0), ("20260828", 110.0)]
+
+    def test_no_cache_is_an_empty_series(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+        (tmp_path / "ohlcv").mkdir()
+        assert ps.load_series("005930", ["20260828"]) == []
