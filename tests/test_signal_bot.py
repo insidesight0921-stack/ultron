@@ -587,3 +587,80 @@ def test_the_display_says_allocation_items_are_not_targets():
     src = (Path(__file__).resolve().parents[1] / "scripts"
            / "signal_bot.py").read_text(encoding="utf-8")
     assert "신호 대상이 아닙니다" in src
+
+
+# ─── 3지표 병행 기록 (2026-08-31 결정) ───────────────
+
+
+def _personal_item(strategy="stochrsi"):
+    return sb.WatchItem(name="삼성전자", weight=0.0, strategy=strategy,
+                        asset_class=sb.PERSONAL_ASSET_CLASS, code="005930")
+
+
+def test_shadow_records_are_marked_and_suppressed():
+    """병행 기록은 발송용이 아니라 측정용이다 — 표시 없이 섞이면
+    MTF 억제 평가가 오염된다."""
+    sig = sb.Signal("삼성전자", "005930", "macd", "매수", "🟢", "이유", 100.0, 0.0)
+    row = sb.build_shadow_record(sig, at="2026-08-31 10:00:00", asset_class="관심종목")
+    assert row["shadow"] is True and row["suppressed"] is True
+    assert row["strategy"] == "macd"
+
+
+def test_the_sent_strategy_stays_single(monkeypatch, tmp_path):
+    """발송은 기본 지표 하나다 — 병행 지표가 반환 목록에 섞이면 알림이 3배가 된다."""
+    calls = []
+    monkeypatch.setattr(sb, "signal_watchlist", lambda: [_personal_item()])
+    monkeypatch.setattr(sb, "_fetch_intraday_raw",
+                        lambda sym: {"closes": [100.0] * 40, "volumes": [1.0] * 40})
+    monkeypatch.setattr(sb, "MTF_ENABLED", False)
+
+    def fake_eval(item, candles, ticker):
+        calls.append(item.strategy)
+        return sb.Signal(item.name, ticker, item.strategy, "매수", "🟢",
+                         "이유", 100.0, item.weight)
+
+    monkeypatch.setattr(sb, "evaluate", fake_eval)
+    log_path = tmp_path / "log.jsonl"
+    out = sb.scan(log_path=log_path)
+    # 반환(발송)은 기본 지표 1건뿐
+    assert [s.strategy for s in out] == ["stochrsi"]
+    # 평가는 3지표 전부
+    assert sorted(calls) == ["bollinger", "macd", "stochrsi"]
+    # 기록: 기본 1 + 병행 2
+    import json
+    rows = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 3
+    assert sorted(r["strategy"] for r in rows) == ["bollinger", "macd", "stochrsi"]
+    assert [r["strategy"] for r in rows if r.get("shadow")] != []
+
+
+def test_allocation_items_get_no_shadow_scan(monkeypatch, tmp_path):
+    """자산배분 종목은 신호 대상이 아니다 — 병행 기록도 만들지 않는다."""
+    item = sb.WatchItem(name="TIGER 200", weight=20.0, strategy="bollinger",
+                        asset_class="국내주식_지수", code="102110")
+    calls = []
+    monkeypatch.setattr(sb, "signal_watchlist", lambda: [item])
+    monkeypatch.setattr(sb, "_fetch_intraday_raw",
+                        lambda sym: {"closes": [100.0] * 40, "volumes": [1.0] * 40})
+    monkeypatch.setattr(sb, "MTF_ENABLED", False)
+
+    def fake_eval(it, candles, ticker):
+        calls.append(it.strategy)
+        return None
+
+    monkeypatch.setattr(sb, "evaluate", fake_eval)
+    sb.scan(log_path=tmp_path / "log.jsonl")
+    assert calls == ["bollinger"]
+
+
+def test_no_log_path_means_no_shadow_evaluation(monkeypatch):
+    """기록할 곳이 없으면 병행 평가도 하지 않는다(테스트 오염 방지 원칙 유지)."""
+    calls = []
+    monkeypatch.setattr(sb, "signal_watchlist", lambda: [_personal_item()])
+    monkeypatch.setattr(sb, "_fetch_intraday_raw",
+                        lambda sym: {"closes": [100.0] * 40, "volumes": [1.0] * 40})
+    monkeypatch.setattr(sb, "MTF_ENABLED", False)
+    monkeypatch.setattr(sb, "evaluate",
+                        lambda it, c, t: calls.append(it.strategy) or None)
+    sb.scan(log_path=None)
+    assert calls == ["stochrsi"]

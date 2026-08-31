@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -91,6 +91,15 @@ BAND_WALK_BARS = 2           # 연속 N봉 하단 이탈 시 Band Walk
 # 개인 관심종목(assistant.db) 병합 — "종목 추가해줘"로 넣은 종목도 신호 대상이 된다.
 # 자산배분 15종은 비중이 있는 포트폴리오, 관심종목은 비중 없이 관찰만 하므로 weight=0.
 PERSONAL_STRATEGY = "stochrsi"      # 개별 종목 기본 지표(과매도 + 거래량 골든크로스)
+
+# 병행 기록 지표(2026-08-31 결정). **발송은 여전히 PERSONAL_STRATEGY 하나다.**
+#
+# stochrsi를 전 종목에 쓰는 것은 근거 없이 정한 하드코딩이었다. LLM에게 종목별
+# 선택을 맡기는 안도 검토했으나 기각 — 선택이 재현되지 않고 근거를 측정할 수
+# 없다(이 프로젝트에서 반복된 "그럴듯한 값" 유형을 하나 더 만드는 것).
+# 대신 나머지 지표를 **기록만** 하고, 탭 B(신호 적중률)에 전략×종목 표본이
+# 쌓이면 종목별로 실제 이긴 지표를 승격한다. 하드코딩 → 측정된 기본값.
+SHADOW_STRATEGIES = ("macd", "bollinger")
 PERSONAL_ASSET_CLASS = "관심종목"
 
 # 신호 발생 기록 — 판정은 나중에 하더라도 기록은 지금부터 남긴다.
@@ -671,6 +680,20 @@ def build_log_record(sig: "Signal", *, at: str, trend: str = "neutral",
     }
 
 
+def build_shadow_record(sig: "Signal", *, at: str,
+                        asset_class: str = "") -> dict:
+    """병행 기록 전략의 신호 1건(순수). **발송용이 아니라 측정용이다.**
+
+    `shadow: True`로 표시한다 — MTF 억제(`suppressed`)와 구분해야 한다.
+    억제는 "보냈을 신호를 필터가 막았다"이고, 병행 기록은 애초에 보낼 계획이
+    없는 후보 지표다. 섞이면 MTF 필터 평가가 오염된다.
+    """
+    row = build_log_record(sig, at=at, suppressed=True,
+                           asset_class=asset_class)
+    row["shadow"] = True
+    return row
+
+
 def append_log(path, record: dict) -> None:
     """JSONL 한 줄 추가. 기록 실패가 스캔을 막지 않도록 예외를 삼킨다."""
     try:
@@ -722,6 +745,18 @@ def scan(log_path=None, now: Optional[str] = None) -> list[Signal]:
                 asset_class=item.asset_class))
         if sig:
             signals.append(sig)
+
+        # 병행 기록 — 같은 캔들로 나머지 지표도 평가해 **기록만** 한다.
+        # 반환 목록(signals)에는 절대 넣지 않는다: 발송은 기본 지표 하나다.
+        if log_path is not None and item.asset_class == PERSONAL_ASSET_CLASS:
+            for alt in SHADOW_STRATEGIES:
+                if alt == item.strategy:
+                    continue
+                alt_sig = evaluate(replace(item, strategy=alt),
+                                   candles, ticker or sym)
+                if alt_sig:
+                    append_log(log_path, build_shadow_record(
+                        alt_sig, at=stamp, asset_class=item.asset_class))
     return signals
 
 

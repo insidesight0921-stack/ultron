@@ -224,3 +224,53 @@ def test_outcome_rows_are_not_filtered_like_signals():
     rows = sr.parse_jsonl(['{"key":"k1","ret_5d":1.0}'])
     assert rows and rows[0]["key"] == "k1"
     assert sr.parse_lines(['{"key":"k1","ret_5d":1.0}']) == []
+
+
+# ─── 병행 기록과 MTF 평가의 분리 (2026-08-31) ────────
+
+
+def _outcome(strategy, *, shadow=False, suppressed=False, ret=1.0):
+    return {"key": f"k-{strategy}-{shadow}", "strategy": strategy,
+            "action": "매수", "suppressed": suppressed, "shadow": shadow,
+            "pending": False, "ret_5d": ret, "base_5d": 0.0, "edge_5d": ret}
+
+
+def test_shadow_rows_are_labelled_in_the_strategy_table():
+    """발송된 적 없는 지표의 성적이 발송 지표와 같은 얼굴로 보이면 안 된다."""
+    s = sr.summarize([_outcome("stochrsi"), _outcome("macd", shadow=True,
+                                                     suppressed=True)])
+    assert "stochrsi" in s["by_strategy"]
+    assert "macd(병행)" in s["by_strategy"]
+    assert "macd" not in s["by_strategy"]
+
+
+def test_shadow_rows_do_not_pollute_the_mtf_split():
+    """병행 기록은 suppressed=True로 저장되지만 MTF가 막은 것이 아니다.
+
+    섞이면 '억제분이 나빴다/좋았다'는 필터 평가가 후보 지표 성적으로 오염된다.
+    """
+    s = sr.summarize([
+        _outcome("stochrsi", ret=2.0),                          # 발송
+        _outcome("stochrsi2", suppressed=True, ret=-1.0),       # MTF 억제
+        _outcome("macd", shadow=True, suppressed=True, ret=9.9) # 병행
+    ])
+    assert s["mtf"]["sent"]["n"] == 1
+    assert s["mtf"]["suppressed"]["n"] == 1      # 병행이 끼면 2가 된다
+    assert s["mtf"]["suppressed"]["avg_ret"] == -1.0
+
+
+def test_old_records_without_the_shadow_field_still_summarize():
+    """기존 기록에는 shadow 필드가 없다 — 없으면 False로 읽혀야 한다."""
+    legacy = {"key": "k", "strategy": "stochrsi", "action": "매수",
+              "suppressed": False, "pending": False,
+              "ret_5d": 1.0, "base_5d": 0.0, "edge_5d": 1.0}
+    s = sr.summarize([legacy])
+    assert s["by_strategy"]["stochrsi"]["n"] == 1
+
+
+def test_evaluate_signal_carries_the_shadow_flag():
+    rec = {"at": "2026-08-31 10:00:00", "ticker": "005930", "name": "삼성전자",
+           "strategy": "macd", "action": "매수", "price": 100.0,
+           "suppressed": True, "shadow": True, "trend": "up"}
+    out = sr.evaluate_signal(rec, [])
+    assert out["shadow"] is True

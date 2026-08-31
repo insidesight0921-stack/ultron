@@ -135,6 +135,8 @@ def evaluate_signal(rec: dict, series: list[tuple[str, float]],
         "ticker": rec.get("ticker"), "name": rec.get("name"),
         "strategy": rec.get("strategy"), "action": action,
         "suppressed": bool(rec.get("suppressed")),
+        # 병행 기록(후보 지표) 표시 — v3.64. MTF 억제와 구분해 옮긴다.
+        "shadow": bool(rec.get("shadow")),
         "trend": rec.get("trend"), "entry": rec.get("price"),
     }
     pending = False
@@ -175,10 +177,16 @@ def summarize(outcomes: Iterable[dict], horizon: int = 5) -> dict:
     by_strategy: dict[str, list[dict]] = {}
     by_action: dict[str, list[dict]] = {}
     for r in rows:
-        by_strategy.setdefault(r.get("strategy") or "?", []).append(r)
+        # 병행 기록은 전략 비교에 들어가되 **전략 이름에 표시**한다 — 발송된
+        # 적 없는 지표의 성적이 발송 지표와 같은 얼굴로 보이면 안 된다.
+        label = (r.get("strategy") or "?") + ("(병행)" if r.get("shadow") else "")
+        by_strategy.setdefault(label, []).append(r)
         by_action.setdefault(r.get("action") or "?", []).append(r)
-    sent = [r for r in rows if not r["suppressed"]]
-    held = [r for r in rows if r["suppressed"]]
+    # MTF 평가에서 병행 기록은 뺀다. 억제는 "보냈을 신호를 필터가 막았다"이고
+    # 병행 기록은 애초에 보낼 계획이 없던 후보다 — 섞이면 필터 평가가 오염된다.
+    mtf_rows = [r for r in rows if not r.get("shadow")]
+    sent = [r for r in mtf_rows if not r["suppressed"]]
+    held = [r for r in mtf_rows if r["suppressed"]]
     return {
         "horizon": horizon,
         "total": _agg(rows, horizon),
