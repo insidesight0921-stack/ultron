@@ -187,8 +187,22 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def test_both_auto_buy_paths_check_price_sanity():
+    """스캔가 관문 2곳(키움·콴텍) + 체결가 관문 1곳(공용 헬퍼) = 3.
+
+    v3.61에서 **체결가**를 따로 보는 관문을 더했다. 스캔가 관문은 "신호가 언제
+    것인가"를 보고, 체결가 관문은 **실제로 기록될 가격**을 본다. 2026-06-08
+    사고에서 손실을 만든 것은 스캔가가 아니라 체결가였다.
+    """
+    import ast
+
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
-    assert src.count("check_batch") == 2
+    tree = ast.parse(src)
+    # 속성 참조(`_ps.check_batch`)와 이름 참조(`_fill_price_stale_block`)를 센다.
+    # 문자열로 세면 **독스트링에 걸린다** — 실제로 두 번 그렇게 틀렸다.
+    attrs = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    names = [n.id for n in ast.walk(tree) if isinstance(n, ast.Name)]
+    assert attrs.count("check_batch") == 3, attrs.count("check_batch")
+    assert names.count("_fill_price_stale_block") == 2   # 호출 2(정의는 Name이 아니다)
 
 
 def test_sell_paths_are_not_blocked():
@@ -266,3 +280,62 @@ class TestLoadSeriesDates:
         monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
         (tmp_path / "ohlcv").mkdir()
         assert ps.load_series("005930", ["20260828"]) == []
+
+
+# ─── 직전 종가는 스테일이 아니다 (2026-08-31) ────────
+
+
+def _series(*pairs):
+    return list(pairs)
+
+
+def test_the_previous_close_is_not_stale():
+    """일봉 스캔은 직전 종가를 들고 온다 — 그게 정상이다.
+
+    2026-08-31: 월요일 콴텍 리밸런싱에서 7종목이 금요일(20260828) 종가와
+    일치한다고 배치 전체가 막혔다. 스캔이 일봉으로 도는 한 **항상** 그렇다.
+    """
+    s = _series(("20260826", 100.0), ("20260827", 110.0), ("20260828", 120.0))
+    assert ps.exact_match_dates(120.0, s, today="20260831") == []
+
+
+def test_an_older_close_is_still_stale():
+    """2026-06-08 사고는 5거래일 전 종가였다 — 이건 계속 잡아야 한다."""
+    s = _series(("20260601", 100.0), ("20260602", 110.0), ("20260605", 120.0))
+    assert ps.exact_match_dates(100.0, s, today="20260608") == ["20260601"]
+
+
+def test_two_days_back_is_still_stale():
+    """2026-07-22 사고는 2거래일 전(20260720)이었다."""
+    s = _series(("20260720", 100.0), ("20260721", 110.0))
+    assert ps.exact_match_dates(100.0, s, today="20260722") == ["20260720"]
+
+
+def test_today_is_still_excluded():
+    s = _series(("20260828", 120.0), ("20260831", 130.0))
+    assert ps.exact_match_dates(130.0, s, today="20260831") == []
+
+
+def test_the_previous_trading_day_is_the_latest_one_before_today():
+    s = _series(("20260826", 1.0), ("20260827", 2.0), ("20260828", 3.0))
+    assert ps.previous_trading_day(s, "20260831") == "20260828"
+    assert ps.previous_trading_day(s, "20260827") == "20260826"
+
+
+def test_no_history_yields_no_previous_day():
+    assert ps.previous_trading_day([], "20260831") is None
+    assert ps.previous_trading_day([("20260831", 1.0)], "20260831") is None
+
+
+def test_the_skip_can_be_turned_off_for_forensics():
+    """소급 점검에서는 직전 종가까지 보고 싶을 수 있다."""
+    s = _series(("20260828", 120.0))
+    assert ps.exact_match_dates(120.0, s, today="20260831",
+                                skip_previous_close=False) == ["20260828"]
+
+
+def test_a_gap_over_a_weekend_still_skips_only_one_day():
+    """금요일 종가는 직전 거래일이다 — 주말이 끼어도 하루만 건너뛴다."""
+    s = _series(("20260827", 100.0), ("20260828", 120.0))
+    assert ps.exact_match_dates(120.0, s, today="20260831") == []
+    assert ps.exact_match_dates(100.0, s, today="20260831") == ["20260827"]

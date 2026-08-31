@@ -1709,6 +1709,37 @@ EQUITY_DRIFT_INTERVAL_SEC = 60 * 60 * 6      # 6시간마다 검사(알림은 �
 EQUITY_DRIFT_STATE_FILE = REBALANCE_FLAG_DIR / "equity_drift_state.json"
 
 
+def _fill_price_stale_block(resolved: dict) -> str:
+    """**체결가**가 오래된 종가인지 본다. 아니면 빈 문자열.
+
+    스캔가 관문(`check_batch`)은 "신호가 언제 것인가"를 보고, 이쪽은 **실제로
+    기록될 가격**을 본다. 2026-06-08 사고에서 손실을 만든 것은 스캔가가 아니라
+    체결가였다.
+
+    체결가는 `_get_execution_price`(네이버 실시간 전용, 폴백 없음)에서 온다.
+    그래도 한 번 더 보는 이유는, 실시간 소스가 장 시작 전 값을 그대로 돌려주는
+    경우를 코드로는 구분할 수 없기 때문이다. **한 배치의 여러 종목이 같은 과거
+    날짜 종가와 원 단위까지 일치하면** 그건 우연이 아니다.
+    """
+    import price_sanity as _ps
+
+    fills = [{"ticker": t, "name": v.get("name") or t,
+              "price": float(v.get("price") or 0)}
+             for t, v in (resolved or {}).items() if v.get("price")]
+    if len(fills) < _ps.MIN_BATCH_HITS:
+        return ""
+    try:
+        from datetime import datetime as _dt
+
+        verdict = _ps.check_batch(fills, _now_kst().strftime("%Y%m%d"))
+    except Exception:
+        log.warning("체결가 스테일 점검 실패 — 통과시킴", exc_info=True)
+        return ""
+    if not verdict.get("stale"):
+        return ""
+    return _ps.format_block(verdict)
+
+
 def _equity_drift_snapshot() -> tuple[dict, float, str]:
     """콴텍·키움의 현재 비중 판정. (결과, 목표비중, 근거)"""
     import equity_drift as _ed
@@ -2988,6 +3019,12 @@ async def handle_kium_paper_callback(
             if _queued:
                 await asyncio.to_thread(_po.enqueue, _queued)
         _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
+        # 체결가 자체가 오래된 종가면 여기서 막는다(스캔가 관문과 별개다 —
+        # 손실을 만드는 것은 기록되는 가격이다).
+        _fill_stale = _fill_price_stale_block(_resolved)
+        if _fill_stale:
+            lines_result.append(_fill_stale)
+            _resolved = {}
         new_results = [r for r in new_results if r["ticker"] in _resolved]
         _apply_second_pass(_resolved, alloc_per, _budget,
                            source=f"{week_key} 키움봇")
@@ -3308,6 +3345,10 @@ async def handle_quant_paper_callback(
                 if _queued:
                     await asyncio.to_thread(_po.enqueue, _queued)
             _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
+            _fill_stale = _fill_price_stale_block(_resolved)
+            if _fill_stale:
+                lines_result.append(_fill_stale)
+                _resolved = {}
             new_recs = [r for r in new_recs
                         if _rec_attr(r, "ticker", "") in _resolved]
             _apply_second_pass(_resolved, alloc_per, _budget,

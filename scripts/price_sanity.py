@@ -43,13 +43,34 @@ DEVIATION_WARN_PCT = float(os.getenv("PRICE_DEVIATION_WARN_PCT", "25"))
 # ─── 탐지 (순수) ─────────────────────────────────────
 
 
+def previous_trading_day(series: list[tuple[str, float]], today: str) -> Optional[str]:
+    """`today` 직전 거래일. 없으면 None(순수)."""
+    past = [d for d, _ in (series or []) if d < today]
+    return max(past) if past else None
+
+
 def exact_match_dates(price: float, series: list[tuple[str, float]],
-                      *, today: str, eps: float = EXACT_EPS) -> list[str]:
-    """가격과 원 단위까지 같은 **과거** 거래일들. 당일은 제외한다(정상이므로)."""
+                      *, today: str, eps: float = EXACT_EPS,
+                      skip_previous_close: bool = True) -> list[str]:
+    """가격과 원 단위까지 같은 **과거** 거래일들.
+
+    당일은 제외한다(정상이므로). 그리고 **직전 거래일도 제외한다.**
+
+    **2026-08-31 정정.** 직전 거래일을 세는 바람에 정상 매수가 막혔다. 콴텍·키움
+    스캔은 일봉으로 돈다 — 월요일 09시에 스캔하면 최신 일봉은 금요일 종가이므로
+    **스캔가가 직전 종가와 일치하는 것은 당연하다.** 7종목이 20260828 종가와
+    일치한다고 배치 전체가 차단됐다.
+
+    이 관문이 잡으려던 것은 그게 아니다. 2026-06-08 사고는 진입가가 **5거래일 전**
+    (20260601) 종가였고, 07-22 사고는 **2거래일 전**(20260720)이었다. 직전 하루만
+    빼면 두 사고는 그대로 잡힌다.
+    """
     if not price or price <= 0:
         return []
+    prev = previous_trading_day(series, today) if skip_previous_close else None
     return [d for d, close in (series or [])
-            if d < today and close is not None and abs(float(close) - price) <= eps]
+            if d < today and d != prev
+            and close is not None and abs(float(close) - price) <= eps]
 
 
 def deviation_pct(price: float, latest_close: Optional[float]) -> Optional[float]:
