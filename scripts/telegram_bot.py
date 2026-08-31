@@ -1360,8 +1360,12 @@ REBALANCE_MINUTE = 30
 REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
+# v3.59 — **디스크에도 저장한다.** 메모리에만 두면 재시작으로 사라지고,
+# 사용자가 버튼을 눌러도 "저장된 추천 종목이 없습니다"가 뜬다. 2026-07이 그렇게
+# 통째로 넘어갔다(푸시 07-05 → 다음 재시작 07-08 → 실행 0건).
 _PENDING_REBALANCE: dict[int, list] = {}
 _PENDING_REBALANCE_MONTH: dict[int, str] = {}  # user_id → month_key
+REBALANCE_PENDING_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_pending.json"
 # 키움봇 주간 스캔 승인 대기 (v3.29)
 KIUM_FLAG_FILE = REBALANCE_FLAG_DIR / "kium_weekly_last.json"
 _PENDING_KIUM: dict[int, list] = {}  # user_id → list[dict]
@@ -2239,12 +2243,18 @@ def is_first_business_day(today: "datetime") -> bool:
 
 
 def _load_rebalance_flag() -> dict:
-    """{"YYYY-MM": chat_ids_pushed[]} 영속화."""
+    """{"YYYY-MM": {"pushed": [], "executed": [], "pushes": {}}} 영속화.
+
+    v3.59: 옛 형식 `{"YYYY-MM": [uid]}`도 읽어 올린다. **옛 항목은 "푸시됨"까지만
+    아는 것**이므로 실행 여부는 비워 둔다 — 모르는 것을 안다고 적지 않는다.
+    """
+    import rebalance_pending as _rp
     try:
         if REBALANCE_FLAG_FILE.exists():
             import json as _json
 
-            return _json.loads(REBALANCE_FLAG_FILE.read_text(encoding="utf-8"))
+            return _rp.normalize_flag(
+                _json.loads(REBALANCE_FLAG_FILE.read_text(encoding="utf-8")))
     except Exception as e:
         log.warning(f"리밸런싱 플래그 읽기 실패 — fresh start: {e}")
     return {}
@@ -2272,13 +2282,24 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     now = _dt.now()
 
+    import rebalance_pending as _rp
+
     month_key = now.strftime("%Y-%m")
     flag = _load_rebalance_flag()
-    pushed = set(flag.get(month_key, []))
 
-    pending = [uid for uid in ALLOWED_IDS if uid not in pushed]
+    # v3.59: "푸시했다"가 아니라 **"실행됐다"**를 기준으로 본다. 2026-07은 푸시만
+    # 되고 아무도 버튼을 누르지 않았는데 플래그가 처리된 달로 보여 다시 알리지
+    # 않았고, 그 달 진입이 통째로 사라졌다(그동안 자동청산은 계속 돌았다).
+    pending = [uid for uid in ALLOWED_IDS
+               if _rp.needs_push(flag, month_key, uid, now.date())]
     if not pending:
         return
+
+    for uid in ALLOWED_IDS:
+        stuck = [m for m in _rp.unexecuted_months(flag, uid) if m != month_key]
+        if stuck:
+            log.warning("콴텍 리밸런싱 미실행 월 %s (user=%s) — 추천만 나가고 "
+                        "실행되지 않았다", ", ".join(stuck), uid)
 
     # v3.46 — catch-up: 첫 영업일 당일이면 09:30 이후, 그 이후 날짜면 켜진 즉시 발화.
     # (기존엔 첫 영업일 정시 tick에만 발화 → 재시작 시 영영 안 떠 콴텍 슬롯이 멈췄음)
@@ -2394,14 +2415,16 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             _PENDING_REBALANCE[uid] = recs
             _PENDING_REBALANCE_MONTH[uid] = month_key
-            pushed.add(uid)
+            # 재시작에도 살아남게 디스크에 남긴다(v3.59)
+            _rp.save_pending(REBALANCE_PENDING_FILE, uid, month_key, recs)
+            _rp.mark_pushed(flag, month_key, uid, now.date())
             log.info(
                 f"  → user_id={uid} 발송 완료 (청산 {len(_q_exit)} / 신규 {len(_q_enter)})"
             )
         except Exception as e:
             log.error(f"리밸런싱 발송 실패 user_id={uid}: {e}")
 
-    flag[month_key] = sorted(pushed)
+    # (푸시 기록은 위에서 uid별로 mark_pushed 했다 — v3.59)
     # 오래된 키 정리 (12개월 초과)
     if len(flag) > 12:
         for k in sorted(flag.keys())[:-12]:
@@ -2844,9 +2867,23 @@ async def handle_quant_paper_callback(
         await query.message.reply_text("다른 사용자의 버튼입니다.")
         return
 
+    import rebalance_pending as _rp
+
+    def _record_decision() -> None:
+        """실행·건너뜀을 플래그에 남긴다. **둘 다 '사람이 판단했다'이므로
+        다시 조르지 않는다.** 이 기록이 없어서 2026-07이 통째로 넘어갔다."""
+        try:
+            flag = _load_rebalance_flag()
+            _rp.mark_executed(flag, month_key, uid)
+            _save_rebalance_flag(flag)
+        except Exception:
+            log.warning("리밸런싱 실행 기록 실패", exc_info=True)
+
     if cb_action == "skip":
         _PENDING_REBALANCE.pop(uid, None)
         _PENDING_REBALANCE_MONTH.pop(uid, None)
+        _rp.clear_pending(REBALANCE_PENDING_FILE)
+        _record_decision()
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(f"⏭ {month_key} 리밸런싱 건너닙니다.")
         log.info(f"콴텍봇 paper 리밸런싱 거부 — user={uid}, month={month_key}")
@@ -2854,11 +2891,20 @@ async def handle_quant_paper_callback(
 
     recs = _PENDING_REBALANCE.pop(uid, [])
     _PENDING_REBALANCE_MONTH.pop(uid, None)
+    if not recs:
+        # v3.59 — 메모리에 없으면 디스크에서 되살린다. 봇 재시작으로 추천이
+        # 사라져 그 달이 통째로 넘어가는 일이 2026-07에 실제로 있었다.
+        recs = _rp.load_pending(REBALANCE_PENDING_FILE, uid, month_key)
+        if recs:
+            log.info("콴텍 승인 대기 %d건을 디스크에서 복원 — user=%s, month=%s",
+                     len(recs), uid, month_key)
     await query.edit_message_reply_markup(reply_markup=None)
 
     if not recs:
         await query.message.reply_text(
-            "저장된 추천 종목이 없습니다. 봇이 재시작됐거나 이미 처리됩니다."
+            f"저장된 {month_key} 추천 종목이 없습니다. "
+            "봇 재시작 전에 발송된 알림이거나 이미 처리된 달입니다.\n"
+            "`/콴텍 추천`으로 다시 받으실 수 있습니다."
         )
         return
 
@@ -3114,6 +3160,8 @@ async def handle_quant_paper_callback(
     )
     for part in split_for_telegram(result_msg):
         await query.message.reply_text(part, disable_web_page_preview=True)
+    _record_decision()
+    _rp.clear_pending(REBALANCE_PENDING_FILE)
     log.info(f"콴텍봇 paper 리밸런싱 완료 — {len(lines_result)}건, month={month_key}")
 
 
