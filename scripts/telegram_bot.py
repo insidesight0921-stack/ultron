@@ -1652,13 +1652,19 @@ def _equity_budget(cash, positions, new_names, *, source: str = "") -> tuple[flo
         hv = _sb.holdings_value(positions or [])
         w, why = _equity_weight_now()
         plan = _sb.budget_for_new(float(cash or 0), hv["value"], n, equity_weight=w)
+        # **초과 상태를 이름으로 부른다.** 예산이 0이면 수량도 0이 되어 매수가
+        # 조용히 사라지고, 화면에는 "배정금액 부족"으로 뜬다 — 원인이 아니라
+        # 증상이다. 목표를 넘어서 안 사는 것과 돈이 모자라 못 사는 것은 다르다.
+        import equity_drift as _ed
+
+        drift = _ed.assess(float(cash or 0), hv["value"], w)
         log.info(
             f"{source} 예산: 슬롯총액 "
             f"{_sb.slot_total(float(cash or 0), hv['value']):,.0f}원 "
             f"(현금 {float(cash or 0):,.0f} + 보유 {hv['value']:,.0f} · {hv['basis']}) · "
             f"목표 주식 {w * 100:.0f}%"
             f"{f'({why})' if why else ''} → 신규 {n}종목 × {plan['per_name']:,.0f}원")
-        return plan["per_name"], {"plan": plan, "holdings": hv,
+        return plan["per_name"], {"plan": plan, "holdings": hv, "drift": drift,
                                   "weight": w, "reason": why}
     except Exception:
         log.warning("예산 산정 실패 — 옛 방식으로 진행", exc_info=True)
@@ -1695,6 +1701,108 @@ def _apply_second_pass(resolved: dict, alloc_per: float, budget: dict,
                  + f" — {top['spent']:,.0f}원 추가 집행")
     except Exception:
         log.warning("2차 배분 실패 — 1차 결과로 진행", exc_info=True)
+
+
+# v3.60 — 목표 주식 비중 추종 점검 (콴텍·키움)
+EQUITY_DRIFT_SLOTS = ("콴텍", "키움")
+EQUITY_DRIFT_INTERVAL_SEC = 60 * 60 * 6      # 6시간마다 검사(알림은 상태가 바뀔 때만)
+EQUITY_DRIFT_STATE_FILE = REBALANCE_FLAG_DIR / "equity_drift_state.json"
+
+
+def _equity_drift_snapshot() -> tuple[dict, float, str]:
+    """콴텍·키움의 현재 비중 판정. (결과, 목표비중, 근거)"""
+    import equity_drift as _ed
+    import slot_budget as _sb
+
+    weight, why = _equity_weight_now()
+    out: dict = {}
+    slots = _pdb.list_slots()
+    for slot in slots:
+        name = str(slot.get("name") or "")
+        if name not in EQUITY_DRIFT_SLOTS:
+            continue
+        positions = _pdb.list_positions(slot["id"])
+        prices = {}
+        for pos in positions:
+            px = _get_execution_price(str(pos.get("ticker")))
+            if px:
+                prices[str(pos.get("ticker"))] = float(px)
+        hv = _sb.holdings_value(positions, prices)
+        out[name] = _ed.assess(float(slot.get("current_capital") or 0),
+                               hv["value"], weight)
+        out[name]["basis"] = hv["basis"]
+    return out, weight, why
+
+
+async def equity_drift_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """목표 주식 비중을 계속 따라가는지 점검한다(콴텍·키움).
+
+    **매매하지 않는다.** 상태만 보고 사람에게 알린다. 초과여도 강제 매도하지
+    않는다 — 되돌릴 수 없는 조치는 사람 판단에 남긴다(슬롯 일일 손실 한도와
+    같은 원칙). 초과 상태의 신규 매수 차단은 리밸런싱 경로에서 이미 걸린다.
+
+    **상태가 바뀔 때만 보낸다.** 매일 같은 말을 보내면 사람은 그 알림을 안 보게
+    되고, 정작 바뀌었을 때도 놓친다.
+    """
+    import json as _json
+
+    import equity_drift as _ed
+
+    now = _now_kst()
+    if now.weekday() >= 5:
+        return
+    try:
+        results, weight, why = await asyncio.to_thread(_equity_drift_snapshot)
+    except Exception:
+        log.warning("목표 비중 점검 실패", exc_info=True)
+        return
+    if not results:
+        return
+
+    key = _ed.state_key(results, weight)
+    previous = None
+    try:
+        previous = _json.loads(
+            EQUITY_DRIFT_STATE_FILE.read_text(encoding="utf-8")).get("key")
+    except (OSError, ValueError):
+        pass
+
+    for name, r in sorted(results.items()):
+        log.info("목표 비중 점검 %s: %s (%s)", name, r["detail"], r.get("basis", ""))
+    if key == previous:
+        return
+
+    try:
+        EQUITY_DRIFT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        EQUITY_DRIFT_STATE_FILE.write_text(
+            _json.dumps({"key": key, "at": now.isoformat(timespec="seconds")},
+                        ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.warning("목표 비중 상태 저장 실패 — 다음에 또 알릴 수 있다: %s", e)
+
+    text = _ed.format_report(results, weight, why)
+    for uid in ALLOWED_IDS:
+        try:
+            await ctx.bot.send_message(chat_id=int(uid), text=text,
+                                       parse_mode="Markdown")
+        except Exception:
+            log.warning("목표 비중 알림 발송 실패 user=%s", uid, exc_info=True)
+
+
+def _equity_block_line(budget: dict) -> str:
+    """목표 비중 초과로 신규 매수를 막을 때의 한 줄. 아니면 빈 문자열.
+
+    **초과와 현금 부족은 다르다.** 예산이 0이면 수량이 0이 되어 매수가 조용히
+    사라지고 화면에는 "배정금액 부족"으로 뜬다 — 증상이지 원인이 아니다.
+    """
+    import equity_drift as _ed
+
+    drift = (budget or {}).get("drift")
+    if not drift or not _ed.blocks_new_buys(drift):
+        return ""
+    return (f"⚖️ 주식 비중 {drift['current']*100:.1f}% > 목표 "
+            f"{drift['target']*100:.0f}% — 신규 매수를 건너뜁니다"
+            f"(기존 보유는 그대로 둡니다)")
 
 
 IDLE_CASH_SLOT = "IPO"
@@ -2792,6 +2900,10 @@ async def handle_kium_paper_callback(
     if hard_stop:
         new_results = []          # 매도·교체는 이미 위에서 끝났고, 신규 진입만 막는다
         lines_result.append(f"  🛑 {hard_stop}")
+    _over = _equity_block_line(_budget)
+    if _over:
+        new_results = []          # 강제 매도는 하지 않는다 — 신규 진입만 막는다
+        lines_result.append(f"  {_over}")
 
     # v3.49: 진입 근거 태그 — 스캔 순위는 필터 전 원본 목록 기준이라야 의미가 있다
     _rank_of = {r.get("ticker"): i + 1 for i, r in enumerate(results)}
@@ -3114,6 +3226,10 @@ async def handle_quant_paper_callback(
             available_cap = slot_cap
         alloc_per, _budget = _equity_budget(
             available_cap, existing, new_recs, source=f"{month_key} 콴텍봇")
+        _over = _equity_block_line(_budget)
+        if _over:
+            new_recs = []         # 강제 매도는 하지 않는다 — 신규 진입만 막는다
+            lines_result.append(f"  {_over}")
 
         # v3.51: 진입가 스테일 관문 (키움 경로와 같은 이유)
         if new_recs:
@@ -3876,6 +3992,18 @@ def main() -> None:
             f"🔍 장 중 손절·익절 모니터 등록 ({INTRADAY_MONITOR_INTERVAL_SEC//60}분 간격 "
             "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)"
         )
+        # v3.60 — 목표 주식 비중 추종 점검 (콴텍·키움 · 상태가 바뀔 때만 알림)
+        app.job_queue.run_repeating(
+            equity_drift_job,
+            interval=EQUITY_DRIFT_INTERVAL_SEC,
+            first=420,
+            name="equity_drift",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 300},
+        )
+        log.info("⚖️ 목표 주식 비중 점검 등록 "
+                 f"({EQUITY_DRIFT_INTERVAL_SEC // 3600}시간 간격 · "
+                 f"{'·'.join(EQUITY_DRIFT_SLOTS)} · 강제 매도 없음)")
+
         # v3.57 — IPO 슬롯 유휴 자본 파킹 (평일 09:30~15:00)
         app.job_queue.run_repeating(
             idle_cash_job,
