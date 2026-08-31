@@ -1895,7 +1895,10 @@ async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if idle_cash.unreadable_subscriptions(subs):
             log.warning("유휴 자본 보류(데이터 문제): %s", plan["reason"])
         else:
-            log.debug("유휴 자본: %s", plan["reason"])
+            # 4시간마다 도는 잡이라 장중 2회다 — INFO로 남겨도 소음이 아니고,
+            # **왜 계속 현금인지**를 로그만 보고 알 수 있어야 한다(2026-08-31:
+            # 파킹이 안 되는 이유를 debug 때문에 확인할 수 없었다).
+            log.info("유휴 자본 보류: %s", plan["reason"])
         return
 
     # 매도 시점의 체결가는 따로 받는다(판단은 수량만 정한다).
