@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 import asyncio
+import json
 import logging
 from typing import Optional
 import os
@@ -2406,9 +2407,20 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _load_kium_flag() -> dict:
+    """주간 중복 푸시 방지 플래그.
+
+    2026-08-31: 모듈 레벨 `json` import가 없어 여기서 NameError가 났는데,
+    `except Exception`이 그것을 삼켜 **항상 빈 dict를 돌려주고 있었다.**
+    저장도 같은 이유로 실패했다(그쪽은 try가 없어 로그에 드러났다).
+    플래그가 늘 비면 "이번 주 이미 처리했는가"를 판정할 수 없어 6시간마다
+    같은 주에 다시 푸시·매수할 수 있다.
+
+    파일 오류만 조용히 넘긴다 — 넓은 except는 코딩 오류를 '파일 없음'으로
+    위장시킨다. 이 프로젝트에서 `.env` 로딩 때 똑같이 겪었다.
+    """
     try:
         return json.loads(KIUM_FLAG_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return {}
 
 
