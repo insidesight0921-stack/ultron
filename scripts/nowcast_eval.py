@@ -1,0 +1,296 @@
+"""nowcast_eval.py — 지표가 다음 날 시장 방향을 맞히는가 (순수 코어)
+
+**왜 이 파일이 생겼나.** 나우캐스팅 가중치를 정하려면 "각 지표가 국면을 앞서
+맞히는가"를 재야 하는데, 2026-08-31 점검 결과 **정답을 월 단위 국면으로 두는
+한 필요 표본이 23년**이었다(적중률 60% 판정, 지표 4종, 본페로니 보정).
+
+    적중률 60% 판정에 필요한 관측 276건
+      월 단위 → 23.0년 · 주 단위 → 5.3년 · **일 단위 → 1.1년**
+
+그래서 정답을 **다음 거래일 코스피 방향**으로 바꾼다(2026-08-31 결정). 일 단위는
+표본이 빨리 쌓이고, 무엇보다 **정답 시계열을 지금 만들 수 있다** — 코스피 종가
+캐시가 이미 있다.
+
+━━━ 이 도구가 조심하는 것 ━━━
+
+**① 미래를 보지 않는다.** t일 지표는 t일까지의 데이터로만 계산하고, t→t+1
+방향을 맞히는지 본다. 하루라도 밀리면 적중률이 가짜로 올라간다.
+
+**② 무작위와 대조한다.** 방향 예측은 원래 50% 근처다. 지표가 55%를 냈다고
+"맞힌다"고 하면 안 된다 — 같은 예측 빈도로 **무작위로 찍었을 때**의 분포와
+대조해야 한다. 이 프로젝트에서 순열검정이 검사 자체의 결함을 세 번 잡았다.
+
+**③ 상승 편향을 대조군에 넣는다.** 시장이 오른 날이 많으면 "항상 상승"이라고
+찍는 것만으로 적중률이 50%를 넘는다. 그래서 `항상 상승`·`항상 하락`을 음성
+대조로 함께 낸다 — 지표가 그 둘을 못 이기면 아무것도 아니다.
+
+**④ 판정하지 않는 것을 판정으로 세지 않는다.** 지표가 `unknown`·`neutral`인
+날은 예측을 안 한 것이다. 그런 날을 맞힌 것으로 세면 적중률이 부풀려진다.
+"""
+from __future__ import annotations
+
+import math
+import random
+from statistics import NormalDist
+from typing import Callable, Iterable, Optional
+
+TRIALS = 2000
+SEED = 20260831
+
+UP, DOWN, NONE = "up", "down", None
+
+
+# ─── 정답 시계열 ─────────────────────────────────────
+
+
+def direction_series(dates: list[str], closes: list[float]) -> list[tuple]:
+    """[(예측기준일, 다음날 방향)] (순수).
+
+    t일 종가와 t+1일 종가를 비교한다. **t일에 알 수 있는 정보로 t+1을 맞히는가**를
+    보려는 것이므로, 정답은 t일에 붙이되 값은 t+1에서 온다.
+    보합(변화 0)은 방향이 없으므로 제외한다 — 억지로 한쪽에 넣으면 편향이 생긴다.
+    """
+    out = []
+    for i in range(len(closes) - 1):
+        a, b = closes[i], closes[i + 1]
+        if not a or not b:
+            continue
+        if b > a:
+            out.append((str(dates[i]), UP))
+        elif b < a:
+            out.append((str(dates[i]), DOWN))
+    return out
+
+
+# ─── 예측 평가 ───────────────────────────────────────
+
+
+def score(predictions: Iterable[tuple], truth: dict) -> dict:
+    """예측 [(day, 'up'|'down'|None)] vs 정답 {day: 방향} (순수).
+
+    반환: {n, hits, rate, skipped, covered}
+      n        **실제로 예측한** 날 수(판정 안 한 날은 빼고 센다)
+      skipped  지표가 방향을 내지 않은 날
+      covered  정답이 있는 날 중 예측한 비율
+    """
+    n = hits = skipped = 0
+    available = 0
+    for day, pred in predictions or []:
+        want = truth.get(str(day))
+        if want is None:
+            continue
+        available += 1
+        if pred not in (UP, DOWN):
+            skipped += 1
+            continue
+        n += 1
+        if pred == want:
+            hits += 1
+    return {"n": n, "hits": hits, "skipped": skipped,
+            "rate": round(hits / n * 100, 1) if n else None,
+            "covered": round(n / available * 100, 1) if available else None}
+
+
+def always(direction: str, days: Iterable[str]) -> list[tuple]:
+    """음성 대조 — 늘 한 방향으로 찍는다(순수)."""
+    return [(str(d), direction) for d in days]
+
+
+def permuted(predictions: list[tuple], *, trials: int = TRIALS,
+             seed: int = SEED) -> list[list[tuple]]:
+    """예측 **빈도와 방향 구성은 그대로 두고 날짜만 섞은** 대조군(순수).
+
+    상승 예측 개수를 보존하는 것이 핵심이다 — 안 그러면 상승장에서 '상승을 많이
+    찍는 지표'가 유리해진 것을 실력으로 오독한다.
+    """
+    rng = random.Random(seed)
+    days = [d for d, _ in predictions]
+    labels = [p for _, p in predictions]
+    out = []
+    for _ in range(trials):
+        shuffled = labels[:]
+        rng.shuffle(shuffled)
+        out.append(list(zip(days, shuffled)))
+    return out
+
+
+def is_constant(predictions: Iterable[tuple]) -> bool:
+    """늘 같은 방향만 찍는가(순수).
+
+    **순열검정으로는 상수 예측을 잡을 수 없다.** 라벨 구성을 보존한 채 날짜만
+    섞으므로, 라벨이 전부 같으면 섞어도 결과가 그대로다 → 백분위가 항상 50이
+    나온다. 2026-08-31 실측에서 200일선 기울기가 평가 구간 100일 내내
+    `risk_on`이라 '항상 상승'과 **완전히 같은 예측**이었는데, 순열검정은
+    "우연 범위"라고만 했다. 잡아낸 것은 `항상 상승` 음성 대조였다.
+    """
+    labels = {p for _, p in (predictions or []) if p in (UP, DOWN)}
+    return len(labels) == 1
+
+
+def evaluate(predictions: list[tuple], truth: dict, *,
+             trials: int = TRIALS, seed: int = SEED) -> dict:
+    """적중률 + 무작위 대조 백분위(순수).
+
+    반환: {actual, baseline_mean, percentile, verdict, constant, ...}
+    """
+    actual = score(predictions, truth)
+    constant = is_constant(predictions)
+    if not actual["n"]:
+        return {**actual, "percentile": None, "verdict": "예측 없음",
+                "baseline_mean": None, "constant": constant}
+    if constant:
+        # 상수 예측은 시장 편향을 그대로 되풀이할 뿐이다 — 순열검정에 태우지 않는다.
+        return {**actual, "percentile": None, "baseline_mean": None,
+                "constant": True,
+                "verdict": "상수 예측 — 방향 정보 없음"}
+    sims = [score(p, truth)["rate"] for p in permuted(predictions, trials=trials,
+                                                      seed=seed)]
+    sims = [s for s in sims if s is not None]
+    if not sims:
+        return {**actual, "percentile": None, "verdict": "판정 불가",
+                "baseline_mean": None}
+    below = sum(1 for s in sims if s < actual["rate"])
+    ties = sum(1 for s in sims if s == actual["rate"])
+    pct = (below + ties / 2) / len(sims) * 100
+    return {
+        **actual, "constant": False,
+        "baseline_mean": round(sum(sims) / len(sims), 1),
+        "percentile": round(pct, 1),
+        "verdict": ("우연 범위" if pct < 95 else "기준선 초과"),
+    }
+
+
+# ─── 표본 계산 ───────────────────────────────────────
+
+
+def required_n(rate: float, base: float = 0.5, *, alpha: float = 0.05,
+               k: int = 1, power: float = 0.8) -> int:
+    """이 정도 적중률을 우연과 가르려면 몇 건이 필요한가(순수)."""
+    h = 2 * math.asin(math.sqrt(rate)) - 2 * math.asin(math.sqrt(base))
+    if h == 0:
+        return 0
+    za = NormalDist().inv_cdf(1 - alpha / (2 * k))
+    zb = NormalDist().inv_cdf(power)
+    return math.ceil(((za + zb) / h) ** 2)
+
+
+def progress(n: int, rate: float = 0.60, k: int = 4) -> dict:
+    """지금 표본이 목표의 몇 %인가(순수). **아직 멀었다는 것을 숨기지 않는다.**"""
+    need = required_n(rate, k=k)
+    return {"have": n, "need": need,
+            "pct": round(n / need * 100, 1) if need else None,
+            "trading_days_left": max(0, need - n),
+            "years_left": round(max(0, need - n) / 252, 1)}
+
+
+# ─── 표시 ────────────────────────────────────────────
+
+
+def format_report(results: dict, truth: dict, *, target: str = "다음 거래일 코스피 방향") -> str:
+    """지표별 결과(순수). **음성 대조를 먼저 보여준다** — 기준을 모르면 숫자가 커 보인다."""
+    up = sum(1 for v in truth.values() if v == UP)
+    total = len(truth)
+    lines = [f"📈 나우캐스팅 — 정답: {target}",
+             f"   정답 표본 {total}일 · 상승 {up}일({up/total*100:.1f}%)" if total else
+             "   정답 표본 없음", ""]
+    if not total:
+        return "\n".join(lines)
+    lines.append(f"{'지표':22}{'예측':>6}{'적중률':>8}{'무작위':>8}{'백분위':>8}  판정")
+    for name, r in results.items():
+        if not r.get("n"):
+            lines.append(f"{name:22}{'—':>6}{'—':>8}{'—':>8}{'—':>8}  {r.get('verdict','')}")
+            continue
+        base = "—" if r.get("baseline_mean") is None else f"{r['baseline_mean']:.1f}%"
+        pctl = "—" if r.get("percentile") is None else f"{r['percentile']:.1f}"
+        lines.append(f"{name:22}{r['n']:>6}{r['rate']:>7.1f}%"
+                     f"{base:>8}{pctl:>8}  {r['verdict']}")
+    lines.append("")
+    best = max((r.get("n") or 0) for r in results.values()) if results else 0
+    p = progress(best)
+    lines.append(f"표본 진행: {p['have']}/{p['need']}건 ({p['pct']}%) — "
+                 f"적중률 60%를 우연과 가르는 기준(지표 4종 보정)")
+    if p["trading_days_left"]:
+        lines.append(f"   남은 거래일 약 {p['trading_days_left']}일 (~{p['years_left']}년)")
+    lines.append("")
+    lines.append("_백분위 95 미만은 우연으로 설명되는 범위입니다._")
+    lines.append("_'항상 상승'을 못 이기는 지표는 방향 정보를 담고 있지 않습니다._")
+    lines.append("_상수 예측(늘 한 방향)은 순열검정으로 잡히지 않습니다 — 음성 대조가 잡습니다._")
+    return "\n".join(lines)
+
+
+# ─── CLI (소급 평가) ─────────────────────────────────
+
+
+def _kospi_truth():
+    import json
+    import price_sanity as ps
+    files = sorted((ps._cache_root() / "indices").glob("market_index_KOSPI_*.json"))
+    if not files:
+        return {}, [], []
+    payload = json.loads(files[-1].read_text(encoding="utf-8"))
+    dates = [str(d) for d in payload["series"]["date"]]
+    closes = [float(c) for c in payload["series"]["close"]]
+    return dict(direction_series(dates, closes)), dates, closes
+
+
+def _slope_predictions(dates, closes):
+    """200일선 기울기는 **캐시로 소급 계산된다** — 유일하게 오늘 잴 수 있는 지표다.
+
+    t일까지의 종가만 써서 t일 예측을 만든다(미래를 보지 않는다).
+    """
+    import proxy_indicators as pi
+    out = []
+    for i in range(len(closes)):
+        slope = pi.ma_slope_pct(closes[:i + 1], pi.MA_WINDOW, pi.SLOPE_LOOKBACK)
+        if slope is None:
+            continue
+        state = pi.slope_state(slope)
+        out.append((dates[i], UP if state == "risk_on"
+                    else (DOWN if state == "risk_off" else None)))
+    return out
+
+
+def _logged_predictions(name: str, state_to_dir=None):
+    """적재된 지표 로그에서 예측을 만든다(지표별 시계열이 쌓인 뒤에 쓴다)."""
+    import indicator_log as il
+    rows = il.load()
+    out = []
+    for row in rows:
+        for it in row.get("indicators", []) or []:
+            if it.get("name") != name:
+                continue
+            state = it.get("state")
+            out.append((str(row.get("day")),
+                        UP if state == "risk_on"
+                        else (DOWN if state == "risk_off" else None)))
+            break
+    return out
+
+
+def _cli() -> int:
+    truth, dates, closes = _kospi_truth()
+    if not truth:
+        print("코스피 지수 캐시가 없어 정답 시계열을 만들 수 없습니다.")
+        return 1
+    results = {}
+    slope = _slope_predictions(dates, closes)
+    results["코스피 200일선 기울기"] = evaluate(slope, truth)
+    days = [d for d, _ in slope]
+    results["대조: 항상 상승"] = evaluate(always(UP, days), truth)
+    results["대조: 항상 하락"] = evaluate(always(DOWN, days), truth)
+
+    try:
+        import indicator_log as il
+        logged = il.load()
+    except ImportError:
+        logged = []
+    for name in ("외국인 순매수(5일)", "원/달러 환율", "VIX"):
+        preds = _logged_predictions(name)
+        results[name] = (evaluate(preds, truth) if preds
+                         else {"n": 0, "verdict": f"로그 {len(logged)}일 — 적재 대기"})
+    print(format_report(results, truth))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
