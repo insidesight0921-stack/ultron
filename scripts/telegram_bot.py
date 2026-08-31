@@ -302,11 +302,29 @@ _PRIVATE_WRITE_LOCK_REASON = ""
 #   executor 없음 + 잠금      → **거부**
 
 
+# 잠금이 막는 것은 **새 위험을 만드는 쓰기**다(2026-08-31 정정).
+#
+# 처음엔 매수·청산을 가리지 않고 전부 막았다. 그 결과 실제로 이런 로그가 남았다.
+#
+#   09:08:50 익절 기록 실패 010120: Private write 잠금 — 직접 쓰기 거부
+#
+# **청산까지 막으면 안 된다.** 이 프로젝트의 기존 원칙이 그렇다 — 매수는
+# fail-closed(모르면 사지 않는다), 청산은 fail-open(못 팔면 손실이 커진다).
+# 잠금의 목적은 "복구 가능한 백업 없이 **새 포지션을 만들지 않는 것**"이지
+# 이미 가진 포지션을 정리하지 못하게 하는 것이 아니다. 게이트가 막으려던 위험보다
+# 게이트가 만든 위험이 커지는 순간이다(같은 이유로 봇 기동 자체는 막지 않는다).
+_EXIT_WRITERS = ("record_sell",)
+
+
 def _direct_paper_write(fn, *args, **kwargs):
-    """executor가 없을 때의 직접 쓰기. 잠겨 있으면 거부한다."""
+    """executor가 없을 때의 직접 쓰기. 잠금 상태에서 **매수만** 거부한다."""
+    is_exit = getattr(fn, "__name__", "") in _EXIT_WRITERS
     if _PRIVATE_WRITE_LOCKED:
-        raise PrivateWriteLocked(
-            f"Private write 잠금 — 직접 쓰기 거부 ({_PRIVATE_WRITE_LOCK_REASON})")
+        if not is_exit:
+            raise PrivateWriteLocked(
+                f"Private write 잠금 — 신규 매수 거부 ({_PRIVATE_WRITE_LOCK_REASON})")
+        log.warning("Private write 잠금 중이나 **청산은 기록한다** — "
+                    "막으면 손실이 커진다 (사유: %s)", _PRIVATE_WRITE_LOCK_REASON)
     return fn(*args, **kwargs)
 
 
@@ -330,8 +348,8 @@ def _start_private_write_runtime() -> None:
                 "🔒 Private write 잠금\n"
                 f"사유: {exc}\n\n"
                 "봇은 정상 기동했고 조회·알림·장중 손절 모니터는 그대로 돕니다.\n"
-                "paper 매수·매도 기록만 막혀 있습니다.\n"
-                "복구: python3 scripts/private_write_reissue.py --check")
+                "**청산(손절·익절)은 계속 기록됩니다.** 신규 매수만 막힙니다.\n"
+                "복구: python3 scripts/private_data_security.py all → 서비스 재시작")
         except Exception:  # noqa: BLE001
             log.warning("잠금 알림 발송 실패", exc_info=True)
         return

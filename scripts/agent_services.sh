@@ -459,15 +459,25 @@ write_plist_private_backup() {
         <string>${SCRIPTS}/private_data_security.py</string>
         <string>all</string>
     </array>
+    <!-- 2026-08-31: 주 1회 -> 하루 2회. 신선도 한도가 24시간인데 백업이 주 1회라,
+         백업 다음 날이면 반드시 잠겼다. 일요일 03:41 백업이 월요일 09:08에
+         29.6시간으로 만료돼 장중 매수가 전부 막혔다. 03:30/15:30이면 최대
+         경과가 15시간이라 여유가 생긴다. -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Weekday</key>
-        <integer>0</integer>
-        <key>Hour</key>
-        <integer>3</integer>
-        <key>Minute</key>
-        <integer>30</integer>
-    </dict>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>3</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>15</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
     <key>Umask</key>
     <integer>63</integer>
     <key>WorkingDirectory</key>
@@ -756,7 +766,7 @@ cmd_install() {
     echo "  ✅ plist 생성: $PLIST_LOG_ROTATE (매일 03:10)"
 
     write_plist_private_backup
-    echo "  ✅ plist 생성: $PLIST_PRIVATE_BACKUP (매주 일 03:30)"
+    echo "  ✅ plist 생성: $PLIST_PRIVATE_BACKUP (매일 03:30·15:30)"
 
     cmd_start
     echo ""
@@ -820,7 +830,7 @@ cmd_start() {
     fi
     if [ -f "$PLIST_PRIVATE_BACKUP" ]; then
         launchctl load "$PLIST_PRIVATE_BACKUP"
-        echo "  ✅ Private 백업 스케줄 등록 (매주 일 03:30)"
+        echo "  ✅ Private 백업 스케줄 등록 (매일 03:30·15:30)"
     fi
     if [ -f "$PLIST_PAPER_WEEKLY" ]; then
         launchctl load "$PLIST_PAPER_WEEKLY"
