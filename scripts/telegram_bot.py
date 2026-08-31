@@ -1932,6 +1932,47 @@ def _load_ohlcv_payload(ticker: str) -> dict:
     return {}
 
 
+# v3.62 — 대리 지표 시계열 적재 (나우캐스팅 가중치를 나중에 정하기 위한 원자료)
+INDICATOR_LOG_INTERVAL_SEC = 60 * 60 * 2      # 2시간마다 검사(적재는 하루 1회)
+INDICATOR_LOG_HOUR = 16                        # 장 마감 후에 찍는다
+
+
+async def indicator_log_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """대리 지표 스냅샷을 하루 한 줄씩 쌓는다.
+
+    **가중치를 정하지 않는다.** 2026-08-31 점검에서 나우캐스팅 가중치를 실증으로
+    정하려면 지표 시계열·국면 정답·전환 횟수 셋이 필요한데 전부 없었다. 특히
+    지표는 **저장조차 하지 않아 시계가 안 돌고 있었다.** 이 잡은 그 시계를
+    시작할 뿐이다.
+
+    장 마감(16시) 뒤에 찍어 하루 한 값으로 고정한다. 봇이 하루에 여러 번
+    재시작해도 `indicator_log.append`가 같은 날을 건너뛴다.
+    """
+    import indicator_log as _il
+
+    now = _now_kst()
+    if now.weekday() >= 5 or now.hour < INDICATOR_LOG_HOUR:
+        return
+    day = now.strftime("%Y%m%d")
+    try:
+        # `record`는 키워드 전용 인자다 — 위치로 넘기면 TypeError가 난다.
+        row = await asyncio.to_thread(
+            _il.record, day, recorded_at=now.isoformat(timespec="seconds"))
+    except Exception:
+        log.warning("지표 시계열 적재 실패", exc_info=True)
+        return
+    if row is None:
+        return
+    got, total = row.get("n_available"), row.get("n_total")
+    if row.get("missing"):
+        # **미확보를 조용히 넘기지 않는다.** 특정 지표가 계속 비면 그 지표에
+        # 가중치를 줄 수 없고, 그 사실을 나중이 아니라 지금 알아야 한다.
+        log.warning("지표 시계열 %s — %s/%s 확보 · 미확보 %s",
+                    day, got, total, ", ".join(row["missing"]))
+    else:
+        log.info("지표 시계열 %s — %s/%s 확보", day, got, total)
+
+
 IDLE_CASH_SLOT = "IPO"
 IDLE_CASH_INTERVAL_SEC = 60 * 60 * 4     # 장중 4시간 간격(하루 2회 남짓)
 
@@ -4137,6 +4178,17 @@ def main() -> None:
             f"🔍 장 중 손절·익절 모니터 등록 ({INTRADAY_MONITOR_INTERVAL_SEC//60}분 간격 "
             "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)"
         )
+        # v3.62 — 대리 지표 시계열 적재 (가중치는 정하지 않는다 — 원자료만)
+        app.job_queue.run_repeating(
+            indicator_log_job,
+            interval=INDICATOR_LOG_INTERVAL_SEC,
+            first=660,
+            name="indicator_log",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 600},
+        )
+        log.info(f"📉 지표 시계열 적재 등록 (평일 {INDICATOR_LOG_HOUR}시 이후 "
+                 f"하루 1회 · 미확보도 기록)")
+
         # v3.61 — IPO 상장일 결과 정산 (배정수량 없이도 수익률은 잰다)
         app.job_queue.run_repeating(
             ipo_settle_job,
