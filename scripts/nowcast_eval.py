@@ -250,7 +250,7 @@ def _slope_predictions(dates, closes):
     return out
 
 
-def _logged_predictions(name: str, state_to_dir=None):
+def _logged_predictions(name: str):
     """적재된 지표 로그에서 예측을 만든다(지표별 시계열이 쌓인 뒤에 쓴다)."""
     import indicator_log as il
     rows = il.load()

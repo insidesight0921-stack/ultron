@@ -248,6 +248,15 @@ def due_for_close(records, today: str, strategy: str = DEFAULT_STRATEGY,
             continue
         if (rec or {}).get("return_pct") is not None:
             continue
+        if (rec or {}).get("listing_price"):
+            # **상장가는 있는데 수익률이 비어 있다** — 정산은 됐지만 공모가를
+            # 몰라 수익률을 못 낸 기록이다. 여기서 다시 정산 대상에 넣으면
+            # 12시간마다 같은 정산·같은 알림을 영원히 반복한다(점검에서 재현).
+            # 재시도해도 결과가 달라질 수 없으므로 로그로 알리고 빼야 한다.
+            log.warning("IPO %s: 상장가 %s는 있는데 수익률이 비어 있음 — "
+                        "기록의 확정 공모가(factors.final_price)를 확인하세요",
+                        rec.get("name"), rec.get("listing_price"))
+            continue
         if not _passed(listing, today, need, calendar):
             continue
         out.append(rec)

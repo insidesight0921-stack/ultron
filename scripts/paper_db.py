@@ -621,13 +621,21 @@ def ipo_close(name: str, listing_price: float, db_path=DEFAULT_DB_PATH) -> dict 
         row_id, factors_json = row
         return_pct = None
         if factors_json:
+            # v3.63 — 넓은 except를 좁혔다. 여기서 조용히 삼키면 수익률이 이유
+            # 없이 비고, 정산 잡이 그 기록을 영원히 재시도한다. 코딩 오류까지
+            # "factors가 이상했나 보다"로 위장된다.
             try:
                 fac = _json.loads(factors_json)
                 offer_price = fac.get("final_price") or fac.get("offer_price")
                 if offer_price and offer_price > 0:
-                    return_pct = round((listing_price - offer_price) / offer_price * 100, 2)
-            except Exception:
-                pass
+                    return_pct = round(
+                        (listing_price - offer_price) / offer_price * 100, 2)
+                else:
+                    log.warning("ipo_close(%s): factors에 확정 공모가가 없어 "
+                                "수익률을 계산하지 못함", name)
+            except (ValueError, TypeError) as e:
+                log.warning("ipo_close(%s): factors 해석 실패 — 수익률 미계산: %s",
+                            name, e)
         con.execute(
             """UPDATE ipo_records SET
                listing_price=?, return_pct=?,

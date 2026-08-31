@@ -2731,7 +2731,11 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
                 _ta.record_phase_month(phase)
             except Exception:
-                pass
+                # v3.63 — 조용히 삼키지 않는다. **탭 C(국면 판단 정확도)는 이
+                # 캐시가 쌓여야만 측정된다.** 실패가 숨으면 몇 달 뒤에야
+                # "캐시가 안 쌓였다"를 알게 된다.
+                log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
+                            exc_info=True)
         recs = await asyncio.to_thread(quant_recommend, phase) if phase else []
     except Exception:
         recs = []
@@ -3999,7 +4003,11 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
                 _ta.record_phase_month(phase)
             except Exception:
-                pass
+                # v3.63 — 조용히 삼키지 않는다. **탭 C(국면 판단 정확도)는 이
+                # 캐시가 쌓여야만 측정된다.** 실패가 숨으면 몇 달 뒤에야
+                # "캐시가 안 쌓였다"를 알게 된다.
+                log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
+                            exc_info=True)
         recs = await asyncio.to_thread(quant_recommend, phase) if phase else []
     except Exception as e:
         await update.message.reply_text(f"❌ 콴텍봇 실패: {e}")

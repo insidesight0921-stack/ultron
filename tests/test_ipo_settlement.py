@@ -172,3 +172,24 @@ def test_a_zero_price_is_not_used():
 
 def test_not_enough_days_for_strategy_c_yields_nothing():
     assert s.exit_price_from_ohlcv(PAYLOAD, "20260824", "C", wait=5)["price"] is None
+
+
+# ─── 정산 무한 반복 차단 (2026-08-31 전수 점검에서 발견) ─
+
+
+def test_a_priced_record_without_a_return_is_not_retried():
+    """상장가는 있는데 수익률이 비면 재시도해도 결과가 같다.
+
+    `ipo_close`가 확정 공모가를 못 찾으면 `return_pct`가 None으로 남는데,
+    그 기록을 다시 정산 대상에 넣으면 **12시간마다 같은 정산·같은 알림을
+    영원히 반복한다**(전수 점검에서 재현). 로그로 알리고 빼야 한다.
+    """
+    rec = {"name": "x", "listing_date": "20260820", "return_pct": None,
+           "listing_price": 24_000.0}
+    assert s.due_for_close([rec], "20260831", "A") == []
+
+
+def test_an_unpriced_record_is_still_due():
+    rec = {"name": "x", "listing_date": "20260820", "return_pct": None,
+           "listing_price": None}
+    assert [r["name"] for r in s.due_for_close([rec], "20260831", "A")] == ["x"]
