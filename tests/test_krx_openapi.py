@@ -94,6 +94,61 @@ def test_the_probe_says_plainly_when_there_is_no_volatility_index():
                              "names": ["코스피", "코스피 200"]}}
     text = k.format_probe(result, "20260828")
     assert "어느 응답에도 변동성지수가 없습니다" in text
+    assert k.probe_verdict(result) == "absent"
+
+
+# ─── 실패한 측정에서 결론 내지 않기 (2026-08-31) ─────
+
+
+ALL_401 = {label: {"ok": False, "error": "HTTP 401",
+                   "body": '{"respMsg":"Unauthorized API Call","respCode":"401"}'}
+           for label in ("KOSPI 시리즈", "KOSDAQ 시리즈", "KRX 시리즈", "채권지수")}
+
+
+def test_every_call_failing_is_not_evidence_of_absence():
+    """**이 도구의 첫 구현이 여기서 틀렸다.**
+
+    2026-08-31 실측에서 네 엔드포인트가 전부 401로 실패했는데 "변동성지수가
+    없다 → 이 API로는 받을 수 없다"고 단정했다. 호출이 실패했으면 **아무것도
+    확인하지 못한 것**이다. 실패한 측정에서 결론을 내는 것이 이 프로젝트에서
+    반복된 오류다(샤프 √252, 커버리지 18%, 전후반 원수익 비교).
+    """
+    assert k.probe_verdict(ALL_401) == "unknown"
+    text = k.format_probe(ALL_401, "20260828")
+    assert "판정 불가" in text
+    assert "아직 아무것도 확인하지 못했습니다" in text
+    assert "변동성지수가 없습니다" not in text
+
+
+def test_a_partial_success_still_judges_on_what_came_back():
+    """하나라도 응답이 오면 그 응답에 대해서는 판정할 수 있다."""
+    mixed = dict(ALL_401)
+    mixed["KOSPI 시리즈"] = {"ok": True, "n": 1, "fields": ["IDX_NM"],
+                            "name_field": "IDX_NM", "names": ["코스피 200"]}
+    assert k.probe_verdict(mixed) == "absent"
+
+
+def test_a_found_index_wins_over_failed_siblings():
+    mixed = dict(ALL_401)
+    mixed["KRX 시리즈"] = {"ok": True, "n": 1, "fields": ["IDX_NM"],
+                          "name_field": "IDX_NM", "names": ["코스피200 변동성지수"]}
+    assert k.probe_verdict(mixed) == "found"
+
+
+def test_the_401_hint_points_at_service_subscription():
+    """KRX는 키 발급과 API별 이용 신청이 따로다 — 그걸 모르면 키를 의심하게 된다."""
+    hint = k.auth_hint(ALL_401)
+    assert "이용 신청" in hint and "401" in hint
+
+
+def test_the_hint_notes_the_request_reached_the_server():
+    """respCode가 왔다는 것은 주소·헤더 문제가 아니라는 단서다."""
+    assert "서버까지 닿았습니다" in k.auth_hint(ALL_401)
+
+
+def test_no_hint_when_the_failure_is_not_authorization():
+    net = {"KOSPI 시리즈": {"ok": False, "error": "네트워크 실패: timeout", "body": ""}}
+    assert k.auth_hint(net) == ""
 
 
 def test_the_probe_highlights_a_found_volatility_index():

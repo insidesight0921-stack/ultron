@@ -154,19 +154,64 @@ def probe(bas_dd: str) -> dict:
     return out
 
 
+def probe_verdict(result: dict) -> str:
+    """탐침 결과의 판정(순수): found | absent | unknown
+
+    **`unknown`이 핵심이다.** 2026-08-31: 네 엔드포인트가 전부 401로 실패했는데
+    이 함수의 첫 구현이 "변동성지수가 없다"고 단정했다. 호출이 실패했으면
+    **아무것도 확인하지 못한 것**이다. 실패한 측정에서 결론을 내는 것이 이
+    프로젝트에서 반복된 오류다.
+    """
+    oks = [r for r in (result or {}).values() if r.get("ok")]
+    if not oks:
+        return "unknown"
+    for r in oks:
+        if any("변동성" in n or "VKOSPI" in str(n).upper()
+               for n in r.get("names", [])):
+            return "found"
+    return "absent"
+
+
+def auth_hint(result: dict) -> str:
+    """401이 무엇을 뜻하는지(순수). 아니면 빈 문자열.
+
+    KRX는 **인증키 발급과 API별 이용 신청이 따로**다. 키만 받고 서비스를
+    신청하지 않으면 호출이 401로 거절된다. 응답이 KRX 형식(respCode)으로
+    돌아온다는 것은 요청이 게이트웨이까지 닿았다는 뜻이므로, base URL·경로·
+    헤더 이름이 아니라 **권한** 쪽 문제일 가능성이 높다.
+    """
+    bodies = [str(r.get("body") or "") for r in (result or {}).values()
+              if not r.get("ok")]
+    codes = [str(r.get("error") or "") for r in (result or {}).values()
+             if not r.get("ok")]
+    if not any("401" in c for c in codes):
+        return ""
+    reached = any("respCode" in b or "respMsg" in b for b in bodies)
+    lines = ["401 Unauthorized — 키는 읽혔지만 호출이 거절됐습니다."]
+    if reached:
+        lines.append("응답이 KRX 형식(respCode)으로 왔으므로 요청은 서버까지 "
+                     "닿았습니다 — 주소·경로·헤더 이름 문제는 아닐 가능성이 높습니다.")
+    lines.append("KRX는 **인증키 발급**과 **API별 이용 신청**이 따로입니다. "
+                 "openapi.krx.co.kr 로그인 → 서비스 이용 → 지수에서 "
+                 "쓰려는 API를 각각 신청했는지 확인하세요(승인까지 시간이 걸립니다).")
+    return "\n".join(lines)
+
+
 def format_probe(result: dict, bas_dd: str) -> str:
-    """탐침 결과 요약 — **VKOSPI가 어디에 있는지(또는 없는지)를 분명히 말한다.**"""
+    """탐침 결과 요약.
+
+    **판정 세 가지를 구분한다** — 있다 / 없다 / 확인 못 했다.
+    호출이 전부 실패했는데 '없다'고 적으면, 실패한 측정에서 결론을 내는 것이다.
+    """
     lines = [f"🔎 KRX OPEN API 지수 탐침 (basDd={bas_dd})", ""]
-    found = []
     for label, r in result.items():
         if not r.get("ok"):
             lines.append(f"❌ {label}: {r.get('error')} {r.get('body','')}".rstrip())
             continue
         lines.append(f"✅ {label}: {r['n']}개 지수 · 이름필드 {r.get('name_field')}")
         hits = [n for n in r.get("names", [])
-                if "변동성" in n or "VKOSPI" in n.upper()]
+                if "변동성" in n or "VKOSPI" in str(n).upper()]
         if hits:
-            found.append((label, hits))
             lines.append(f"    🎯 변동성 관련: {', '.join(hits)}")
         if r.get("names"):
             head = ", ".join(r["names"][:8])
@@ -174,11 +219,21 @@ def format_probe(result: dict, bas_dd: str) -> str:
         if r.get("fields"):
             lines.append(f"    필드: {', '.join(r['fields'])}")
     lines.append("")
-    if found:
+
+    verdict = probe_verdict(result)
+    if verdict == "found":
         lines.append("→ 변동성지수가 있습니다. 위 서비스·지수명으로 수집기를 붙이면 됩니다.")
+    elif verdict == "absent":
+        lines.append("→ 응답은 받았지만 **어느 응답에도 변동성지수가 없습니다.**")
+        lines.append("  이 API로는 받을 수 없다는 뜻이므로 다른 소스를 찾아야 합니다.")
     else:
-        lines.append("→ **어느 응답에도 변동성지수가 없습니다.** VKOSPI는 이 API로는")
-        lines.append("  받을 수 없다는 뜻이므로, 다른 소스를 찾거나 규칙에서 빼야 합니다.")
+        lines.append("→ ⚠️ **판정 불가 — 호출이 전부 실패했습니다.**")
+        lines.append("  VKOSPI가 있는지 없는지 **아직 아무것도 확인하지 못했습니다.**")
+        hint = auth_hint(result)
+        if hint:
+            lines.append("")
+            for line in hint.splitlines():
+                lines.append(f"  {line}")
     return "\n".join(lines)
 
 
