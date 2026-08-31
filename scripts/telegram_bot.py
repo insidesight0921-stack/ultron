@@ -1836,6 +1836,102 @@ def _equity_block_line(budget: dict) -> str:
             f"(기존 보유는 그대로 둡니다)")
 
 
+# v3.61 — IPO 상장일 결과 정산 (매주 평일 1회 검사)
+IPO_SETTLE_INTERVAL_SEC = 60 * 60 * 12
+
+
+async def ipo_settle_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """상장일이 지난 IPO 기록의 수익률을 채운다.
+
+    **지금까지 아무것도 `ipo_close`를 부르지 않았다.** 상장일이 지나도 수익률이
+    비어 있어, 매력지수 등급이 맞았는지 확인할 방법이 없었다.
+
+    **이 정산에는 배정수량이 필요 없다.** 등급 검증이 묻는 것은 "등급이 높은
+    종목이 상장일에 더 올랐는가"이고, 그건 수익률만 있으면 답이 나온다.
+    배정을 몰라서 못 하는 일과 배정 없이도 할 수 있는 일을 구분한다.
+    """
+    import ipo_settlement as _is
+    import price_sanity as _ps
+
+    try:
+        records = await asyncio.to_thread(_pdb.ipo_list)
+    except Exception:
+        log.warning("IPO 기록 조회 실패", exc_info=True)
+        return
+    if not records:
+        return
+
+    strategy = _is.current_strategy()
+    today = _now_kst().strftime("%Y%m%d")
+    calendar = await asyncio.to_thread(_ps.trading_calendar)
+    due = _is.due_for_close(records, today, strategy, calendar)
+    if not due:
+        return
+
+    log.info("IPO 정산 대상 %d건 (전략 %s)", len(due), strategy)
+    lines = []
+    for rec in due:
+        name = str(rec.get("name") or "")
+        listing = str(rec.get("listing_date") or "")
+        try:
+            import invest_bot as _ib
+            hit = await asyncio.to_thread(_ib.resolve_ticker, name)
+        except Exception:
+            hit = None
+        if not hit:
+            # **상장 직후에는 종목코드가 아직 매핑에 없을 수 있다.** 다음 회차에
+            # 다시 시도한다 — 못 찾았다고 기록을 닫지 않는다.
+            log.info("IPO 정산 보류: %s 종목코드 미확인", name)
+            continue
+        ticker = hit[0] if isinstance(hit, (tuple, list)) else str(hit)
+        payload = await asyncio.to_thread(_load_ohlcv_payload, ticker)
+        picked = _is.exit_price_from_ohlcv(payload, listing, strategy)
+        if not picked.get("price"):
+            log.info("IPO 정산 보류: %s %s 기준가 미확보", name, picked.get("basis"))
+            continue
+        try:
+            closed = await asyncio.to_thread(
+                _pdb.ipo_close, name, float(picked["price"]))
+        except Exception:
+            log.warning("IPO 정산 기록 실패 %s", name, exc_info=True)
+            continue
+        if not closed:
+            continue
+        ret = closed.get("return_pct")
+        lines.append(f"🏁 [{rec.get('grade','?')}] {name} "
+                     + (f"{ret:+.1f}%" if ret is not None else "수익률 미상")
+                     + f" · {picked['basis']} {picked['price']:,.0f}원")
+        log.info("IPO 정산: %s ret=%s", name, ret)
+
+    if not lines:
+        return
+    text = (f"🏁 *IPO 상장 결과* (전략 {strategy})\n\n" + "\n".join(lines)
+            + "\n\n_배정수량과 무관한 공모가 대비 수익률입니다._")
+    for uid in ALLOWED_IDS:
+        try:
+            await ctx.bot.send_message(chat_id=int(uid), text=text,
+                                       parse_mode="Markdown")
+        except Exception:
+            log.warning("IPO 정산 알림 실패 user=%s", uid, exc_info=True)
+
+
+def _load_ohlcv_payload(ticker: str) -> dict:
+    """일봉 캐시 원본(고가까지 필요해 `load_series`로는 부족하다)."""
+    import json as _json
+
+    import price_sanity as _ps
+    try:
+        files = sorted((_ps._cache_root() / "ohlcv").glob(f"{ticker}_*.json"))
+    except OSError:
+        return {}
+    for path in reversed(files):
+        try:
+            return _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
 IDLE_CASH_SLOT = "IPO"
 IDLE_CASH_INTERVAL_SEC = 60 * 60 * 4     # 장중 4시간 간격(하루 2회 남짓)
 
@@ -3719,6 +3815,11 @@ async def handle_ipo_paper_callback(
             "underwriter_score": r.get("underwriter_score"),
             "offer_size_score": r.get("offer_size_score"),
             "band_high": band_high,
+            # **확정 공모가를 반드시 남긴다.** `ipo_close`가 수익률을 계산할 때
+            # 쓰는 값인데 지금까지 빠져 있었다 — 상장가를 채워도 return_pct가
+            # None으로 남는다(2026-08-31 발견).
+            "final_price": r.get("final_price"),
+            "competition_rate": r.get("competition_rate"),
         }
         try:
             rec = _pdb.ipo_upsert(
@@ -4036,6 +4137,17 @@ def main() -> None:
             f"🔍 장 중 손절·익절 모니터 등록 ({INTRADAY_MONITOR_INTERVAL_SEC//60}분 간격 "
             "· 네이버 실시간+pykrx 폴백 · 평일 09:05~15:30 동작)"
         )
+        # v3.61 — IPO 상장일 결과 정산 (배정수량 없이도 수익률은 잰다)
+        app.job_queue.run_repeating(
+            ipo_settle_job,
+            interval=IPO_SETTLE_INTERVAL_SEC,
+            first=540,
+            name="ipo_settle",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 600},
+        )
+        log.info("🏁 IPO 상장 결과 정산 등록 "
+                 f"({IPO_SETTLE_INTERVAL_SEC // 3600}시간 간격 · 전략은 wiki에서 읽음)")
+
         # v3.60 — 목표 주식 비중 추종 점검 (콴텍·키움 · 상태가 바뀔 때만 알림)
         app.job_queue.run_repeating(
             equity_drift_job,
