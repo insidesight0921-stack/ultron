@@ -1612,6 +1612,85 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
     return [text] if text else []
 
 
+def _equity_weight_now() -> tuple[float, str]:
+    """지금 쓸 주식 목표 비중과 그 근거(한 줄).
+
+    `kium_bot.compute_weight_recommendation`은 KOSPI 200일선·VKOSPI로 70/50%를
+    낸다. **v3.59 전에는 이 값을 매수 경로 어디에서도 읽지 않았다** — 출력
+    문구에만 쓰였다. 여기서 실제 예산으로 옮긴다.
+
+    지수 시계열이 없으면 함수가 `reason='데이터 부족'`과 함께 기본값 0.70을
+    돌려준다. **그 사실을 삼키지 않고 근거 문구에 남긴다** — '판단해서 70%'와
+    '몰라서 70%'는 다르다.
+    """
+    import slot_budget as _sb
+    try:
+        import kium_bot as _kb
+        import price_sanity as _ps
+
+        closes = [c for _, c in _ps.load_series("1001", _ps.trading_calendar())]
+        rec = _kb.compute_weight_recommendation(
+            kospi_close=closes if len(closes) >= 200 else None)
+        w = float(rec.get("equity_weight") or _sb.DEFAULT_EQUITY_WEIGHT)
+        return w, str(rec.get("reason") or "")
+    except Exception:
+        log.warning("주식 비중 권고 조회 실패 — 기본값 사용", exc_info=True)
+        return _sb.DEFAULT_EQUITY_WEIGHT, "권고 조회 실패"
+
+
+def _equity_budget(cash, positions, new_names, *, source: str = "") -> tuple[float, dict]:
+    """신규 1종목당 예산과 근거. 실패하면 옛 방식(현금 ÷ 종목수)으로 물러난다."""
+    import slot_budget as _sb
+    n = len(new_names or [])
+    try:
+        hv = _sb.holdings_value(positions or [])
+        w, why = _equity_weight_now()
+        plan = _sb.budget_for_new(float(cash or 0), hv["value"], n, equity_weight=w)
+        log.info(
+            f"{source} 예산: 슬롯총액 "
+            f"{_sb.slot_total(float(cash or 0), hv['value']):,.0f}원 "
+            f"(현금 {float(cash or 0):,.0f} + 보유 {hv['value']:,.0f} · {hv['basis']}) · "
+            f"목표 주식 {w * 100:.0f}%"
+            f"{f'({why})' if why else ''} → 신규 {n}종목 × {plan['per_name']:,.0f}원")
+        return plan["per_name"], {"plan": plan, "holdings": hv,
+                                  "weight": w, "reason": why}
+    except Exception:
+        log.warning("예산 산정 실패 — 옛 방식으로 진행", exc_info=True)
+        return (float(cash or 0) / n if n else 0.0), {}
+
+
+def _apply_second_pass(resolved: dict, alloc_per: float, budget: dict,
+                       *, source: str = "") -> None:
+    """정수 주식수 내림으로 남은 예산을 **싼 종목부터** 한 주씩 더 담는다.
+
+    비싼 종목일수록 버림이 크다 — 2026-08-31 배치에서 SK하이닉스는 1주가 예산의
+    51.7%라 나머지 48%가 그냥 남았고, 전체로 2,592,350원이 미집행됐다.
+    한 종목에 몰아 담지 않도록 **싼 순서로 한 바퀴에 한 주씩** 돌린다.
+
+    `resolved`를 제자리에서 고친다. 실패해도 1차 배분 결과는 그대로 쓴다.
+    """
+    import slot_budget as _sb
+    plan = (budget or {}).get("plan") or {}
+    spendable = float(plan.get("spendable") or 0)
+    if not resolved or spendable <= 0:
+        return
+    try:
+        qty = {t: int(v.get("qty") or 0) for t, v in resolved.items()}
+        prices = {t: float(v.get("price") or 0) for t, v in resolved.items()}
+        spent = sum(qty[t] * prices[t] for t in qty)
+        # 체결된 종목만 남았을 수 있으므로 실제 집행액 기준으로 잔액을 다시 센다.
+        top = _sb.second_pass_topup(qty, prices, max(0.0, spendable - spent))
+        if not top["added"]:
+            return
+        for ticker, extra in top["added"].items():
+            resolved[ticker]["qty"] = top["quantities"][ticker]
+        log.info(f"{source} 2차 배분: "
+                 + ", ".join(f"{t} +{n}주" for t, n in top["added"].items())
+                 + f" — {top['spent']:,.0f}원 추가 집행")
+    except Exception:
+        log.warning("2차 배분 실패 — 1차 결과로 진행", exc_info=True)
+
+
 IDLE_CASH_SLOT = "IPO"
 IDLE_CASH_INTERVAL_SEC = 60 * 60 * 4     # 장중 4시간 간격(하루 2회 남짓)
 
@@ -2696,7 +2775,12 @@ async def handle_kium_paper_callback(
     # 신규 종목 균등 매수 (이미 보유 중이면 건너뜀)
     existing_tickers = {p["ticker"] for p in existing if p.get("quantity", 0) > 0}
     new_results = [r for r in results if r["ticker"] not in existing_tickers]
-    alloc_per = slot_cap / len(results) if results else 0
+    # v3.59 — **목표 주식 비중을 실제 예산으로 옮긴다.**
+    # 예전: `slot_cap / len(results)` — 분자는 현금만, 분모는 보유분 포함.
+    # 목표라는 개념이 없어 보유/현금 구성에 따라 결과가 71~100%를 떠다녔다
+    # (2026-08-31 실측: 이번 배치는 '의도 73.1%'였는데 정수 내림으로 66.7%).
+    alloc_per, _budget = _equity_budget(
+        slot_cap, existing, new_results, source=f"{week_key} 키움봇")
 
     hard_stop = _slot_hard_stop_reason(slot_name)
     if hard_stop:
@@ -2787,6 +2871,8 @@ async def handle_kium_paper_callback(
                 await asyncio.to_thread(_po.enqueue, _queued)
         _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
         new_results = [r for r in new_results if r["ticker"] in _resolved]
+        _apply_second_pass(_resolved, alloc_per, _budget,
+                           source=f"{week_key} 키움봇")
 
     for result_index, r in enumerate(new_results):
         _fill = _resolved[r["ticker"]]
@@ -3020,7 +3106,8 @@ async def handle_quant_paper_callback(
             )
         except Exception:
             available_cap = slot_cap
-        alloc_per = available_cap / len(new_recs) if new_recs else 0
+        alloc_per, _budget = _equity_budget(
+            available_cap, existing, new_recs, source=f"{month_key} 콴텍봇")
 
         # v3.51: 진입가 스테일 관문 (키움 경로와 같은 이유)
         if new_recs:
@@ -3101,6 +3188,8 @@ async def handle_quant_paper_callback(
             _resolved = {r["ticker"]: r for r in _res if r["verdict"] == "fill"}
             new_recs = [r for r in new_recs
                         if _rec_attr(r, "ticker", "") in _resolved]
+            _apply_second_pass(_resolved, alloc_per, _budget,
+                               source=f"{month_key} 콴텍봇")
 
         for result_index, rec in enumerate(new_recs):
             try:
