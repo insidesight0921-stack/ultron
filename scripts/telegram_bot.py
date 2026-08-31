@@ -1661,7 +1661,13 @@ async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if plan["action"] == "hold":
-        log.debug("유휴 자본: %s", plan["reason"])
+        # **데이터 때문에 못 움직이는 것은 debug에 묻으면 안 된다.** 2026-08-31:
+        # 청약일 미확정을 "못 읽음"으로 세는 버그로 2,000만원이 계속 유휴 상태였는데,
+        # 사유가 debug 로그에만 있어 이틀 동안 아무도 몰랐다.
+        if idle_cash.unreadable_subscriptions(subs):
+            log.warning("유휴 자본 보류(데이터 문제): %s", plan["reason"])
+        else:
+            log.debug("유휴 자본: %s", plan["reason"])
         return
 
     # 매도 시점의 체결가는 따로 받는다(판단은 수량만 정한다).

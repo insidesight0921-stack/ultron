@@ -209,3 +209,55 @@ def test_the_writer_is_declared_in_the_inventory():
            / "paper_trade_identity.py").read_text(encoding="utf-8")
     assert 'key="telegram-idle-cash"' in inv
     assert 'function="idle_cash_job"' in inv
+
+
+# ─── 미확정 vs 불량 (2026-08-31) ─────────────────────
+
+
+def test_an_undecided_date_is_not_a_data_error():
+    """청약일이 아직 안 잡힌 종목은 정상이다 — 수요예측만 잡힌 상태.
+
+    **이 구분이 없어서 기능이 한 번도 동작하지 않았다.** 빈 값을 '못 읽음'으로
+    세는 바람에, KIND 목록에 청약일 미확정 종목이 하나만 있어도 매수가 막혔다.
+    그런 종목은 거의 항상 있다.
+    """
+    for blank in (None, "", "   "):
+        assert ic.unreadable_subscriptions([blank, "20261120"]) == 0
+        assert ic.pending_subscriptions([blank, "20261120"]) == 1
+
+
+def test_a_malformed_date_is_still_a_data_error():
+    """구분을 넣다가 진짜 오류까지 통과시키면 반대쪽으로 망가진다."""
+    for bad in ("2026-11-20", "abcdefgh", "20261332", "2026112"):
+        assert ic.unreadable_subscriptions([bad]) == 1
+        assert ic.pending_subscriptions([bad]) == 0
+
+
+def test_undecided_dates_do_not_block_buying():
+    plan = _plan(subscriptions=[None, "20261120"])
+    assert plan["action"] == "buy"
+
+
+def test_undecided_dates_do_not_force_a_sell_while_holding():
+    plan = _plan(parked_qty=200, subscriptions=[None, "20261120"])
+    assert plan["action"] == "hold"
+
+
+def test_a_malformed_date_still_blocks_buying():
+    assert _plan(subscriptions=["2026-11-20"])["action"] == "hold"
+
+
+def test_the_undecided_count_is_visible_in_the_reason():
+    """보이지 않으면 다시 조용히 굳는다 — 그게 이 버그가 이틀 산 이유다."""
+    assert "미확정 2건" in _plan(subscriptions=[None, None, "20261120"])["reason"]
+    assert "미확정" in _plan(parked_qty=200, subscriptions=[None, "20261120"])["reason"]
+
+
+def test_no_undecided_means_no_noise_in_the_reason():
+    assert "미확정" not in _plan(subscriptions=["20261120"])["reason"]
+
+
+def test_the_real_shape_of_the_kind_list_allows_parking():
+    """실제 목록 모양 — 청약일 확정 1건 + 수요예측만 잡힌 여러 건."""
+    subs = ["20261120", None, None, None]
+    assert _plan(subscriptions=subs)["action"] == "buy"
