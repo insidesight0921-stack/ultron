@@ -312,6 +312,29 @@ async def api_ipo_stats():
     return JSONResponse(_list_ipo_stats())
 
 
+@app.get("/api/ipo/strategy")
+async def api_ipo_strategy():
+    """v3.61: IPO 매도 전략 — `wiki/투자/IPO_매도전략.md`에서 읽는다.
+
+    **기록된 수익률이 어느 기준인지 화면에서 보여야 한다.** 전략 A(상장 당일
+    종가)와 B(당일 고가)는 같은 종목에서도 수치가 크게 달라진다. 기준을 안 밝히면
+    나중에 서로 다른 기준의 수치가 한 표에 섞인다.
+    """
+    try:
+        import ipo_settlement as ipos
+
+        strategy = ipos.current_strategy()
+        basis = ipos.strategy_basis(strategy)
+        return JSONResponse({
+            **basis,
+            "source": str(ipos.WIKI_RELATIVE),
+            "options": {k: v[0] for k, v in ipos.STRATEGY_BASIS.items()},
+        })
+    except Exception as e:
+        log.exception("IPO 매도전략 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/paper/portfolios")
 async def api_portfolios():
     return JSONResponse(_list_portfolios())
@@ -1313,6 +1336,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     <div class="card" style="margin-top:1rem;">
       <h3 style="margin-bottom:0.75rem;">📒 페이퍼 청약 기록</h3>
+      <p class="muted" id="ipo-strategy-note" style="margin:0 0 0.75rem;
+         border-left:3px solid #888; padding-left:0.6rem;">
+        매도 전략 확인 중…
+      </p>
       <table id="ipo-records-table">
         <thead><tr>
           <th>등급</th><th>종목명</th><th>청약마감</th><th>상장일</th>
@@ -2305,8 +2332,29 @@ async function loadIpoStats() {
 }
 
 // IPO 탭 클릭 시 기록 자동 로드
+async function loadIpoStrategy() {
+  const el = document.getElementById("ipo-strategy-note");
+  if (!el) return;
+  try {
+    const d = await (await fetch("/api/ipo/strategy")).json();
+    if (d.error) throw new Error(d.error);
+    const others = Object.entries(d.options || {})
+      .filter(([k]) => k !== d.strategy)
+      .map(([k, v]) => `${k} ${v}`).join(" · ");
+    el.innerHTML =
+      `기록된 수익률은 <b>전략 ${d.strategy} — ${d.label}</b> 기준입니다.` +
+      ` 기준은 <code>${d.source}</code>의 「현재 전략:」 한 줄에서 읽습니다.` +
+      (others ? `<br>다른 선택지: ${others}` : "") +
+      `<br><b>기준이 바뀌면 과거 수치와 섞이지 않도록</b> 전환 시점을 기록하세요` +
+      ` — 전략 A(종가)와 B(고가)는 같은 종목에서도 수치가 크게 다릅니다.`;
+  } catch (e) {
+    el.textContent = "매도 전략을 읽지 못했습니다 — 기본값 A(상장 당일 종가)로 측정됩니다.";
+  }
+}
+
 document.querySelector(".tab[data-tab='tab-ipo']").addEventListener("click", () => {
   loadIpoRecords();
+  loadIpoStrategy();
 });
 
 // ── 전략 비교 탭 (v3.49) ─────────────────────────────────────────────────────

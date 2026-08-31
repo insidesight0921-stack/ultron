@@ -73,3 +73,34 @@ def test_the_ohlcv_loader_reads_the_high_too():
 def test_the_alert_says_the_return_is_allocation_independent():
     """'수익률'만 보이면 배정받은 결과로 오해할 수 있다."""
     assert "배정수량과 무관한" in _func("ipo_settle_job")
+
+
+# ─── 화면 배선 (탭 B 측정 기준) ──────────────────────
+
+UI = (SCRIPTS / "paper_ui.py").read_text(encoding="utf-8")
+
+
+def test_the_strategy_endpoint_exists():
+    assert '@app.get("/api/ipo/strategy")' in UI
+
+
+def test_the_screen_states_which_basis_the_returns_use():
+    """전략 A(종가)와 B(고가)는 같은 종목에서도 수치가 크게 다르다.
+    기준을 안 밝히면 서로 다른 기준의 수치가 한 표에 섞인다."""
+    assert "ipo-strategy-note" in UI and "loadIpoStrategy" in UI
+    assert "기록된 수익률은" in UI
+
+
+def test_the_screen_warns_about_mixing_bases():
+    assert "과거 수치와 섞이지 않도록" in UI
+
+
+def test_a_failed_read_still_says_what_will_be_used():
+    """읽기 실패를 침묵으로 두면 어떤 기준으로 측정 중인지 알 수 없다."""
+    assert "기본값 A" in UI
+
+
+def test_the_endpoint_reads_the_wiki_not_a_hardcoded_value():
+    body = UI[UI.index('@app.get("/api/ipo/strategy")'):]
+    body = body[:body.index("\n@app.")]
+    assert "current_strategy" in body and "WIKI_RELATIVE" in body
