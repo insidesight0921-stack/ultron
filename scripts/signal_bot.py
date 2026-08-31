@@ -616,6 +616,37 @@ def load_watchlist(include_personal: bool = True) -> list:
     return merge_watchlists(base, personal_watch_items())
 
 
+# ─── 신호 대상 범위 (2026-08-31 결정) ────────────────
+#
+# 신호는 **개인 관심종목에만** 보낸다. 이전에는 자산배분 포트폴리오(wiki SSOT,
+# TIGER 200·KODEX 코스닥150 등 15종목)와 관심종목을 합쳐서 스캔했고, 실제로
+# 자산배분 쪽 신호만 올라와 "이전 데이터가 남아 있다"는 인상을 줬다.
+#
+# 관심종목은 실제 보유·거래 종목과 일치하므로 알림이 바로 행동과 연결된다.
+# 자산배분 15종목은 paper 운용과 별개의 장기 배분이라 1시간봉 신호의 대상이
+# 아니다.
+#
+# **조회(`load_watchlist`)와 분리한다.** `/watchlist`로 전체를 보는 것과
+# 신호를 어디에 보낼지는 다른 질문이다.
+SIGNAL_SCOPE = "personal"          # "personal" | "all"
+
+
+def signal_watchlist(scope: Optional[str] = None) -> list:
+    """신호를 보낼 대상 목록.
+
+    **관심종목 조회에 실패해도 자산배분으로 대체하지 않는다.** 대체하면
+    사용자가 끈 것이 조용히 되살아난다 — 0건이면 신호가 없는 것이 맞다.
+    """
+    scope = scope or SIGNAL_SCOPE
+    if scope != "personal":
+        return load_watchlist()
+    items = personal_watch_items()
+    if not items:
+        log.warning("관심종목 0건 — 신호 대상 없음 "
+                    "(자산배분으로 대체하지 않습니다)")
+    return items
+
+
 # ─── 실행 ───────────────────────────────────────────
 
 
@@ -669,7 +700,7 @@ def scan(log_path=None, now: Optional[str] = None) -> list[Signal]:
     """
     stamp = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     signals: list[Signal] = []
-    for item in load_watchlist():
+    for item in signal_watchlist():
         ticker = item.code or (None if item.yf_override else resolve_etf_ticker(item.name))
         if not item.yf_override and not ticker:
             log.debug(f"코드 해석 실패 — skip: {item.name}")

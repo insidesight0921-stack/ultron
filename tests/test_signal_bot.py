@@ -121,6 +121,9 @@ def test_too_few_candles_returns_none():
 def test_scan_with_mocked_fetch(monkeypatch, tmp_path):
     # 코드 해석·intraday fetch를 가짜로
     monkeypatch.setattr(sb, "resolve_etf_ticker", lambda name: "069500")
+    # 2026-08-31: 신호 대상이 관심종목으로 바뀌었다. 스캔 **로직**을 보는
+    # 테스트이므로 대상 목록을 명시적으로 준다(Private API를 때리지 않는다).
+    monkeypatch.setattr(sb, "signal_watchlist", lambda: list(sb.WATCHLIST))
 
     def fake_fetch(sym, interval="60m", period="60d"):
         # 강한 상승 → macd 종목은 홀딩유지 신호
@@ -442,7 +445,9 @@ def test_scan_logs_suppressed_signal(tmp_path, monkeypatch):
     import json as _json
     item = sb.WatchItem("TIGER 200", 20, "bollinger", "국내주식_지수", code="102110")
     sig = sb.Signal("TIGER 200", "102110", "볼린저", "매수", "🟢", "하단 터치", 41000.0, 20.0)
-    monkeypatch.setattr(sb, "load_watchlist", lambda *a, **k: [item])
+    # 2026-08-31: scan은 signal_watchlist(관심종목)를 쓴다. 억제 기록을 보는
+    # 테스트이므로 대상을 명시적으로 준다.
+    monkeypatch.setattr(sb, "signal_watchlist", lambda *a, **k: [item])
     monkeypatch.setattr(sb, "_fetch_intraday_raw", lambda *a, **k: {"closes": [1] * 40})
     monkeypatch.setattr(sb, "_fetch_daily_raw", lambda *a, **k: [1] * 40)
     monkeypatch.setattr(sb, "evaluate", lambda *a, **k: sig)
@@ -509,3 +514,45 @@ def test_no_test_in_this_file_calls_scan_without_a_log_path():
     bare = re.findall(r"sb\.scan\(\s*\)", src)
     # test_scan_does_not_write_without_an_explicit_path 한 곳만 의도적으로 인자가 없다
     assert len(bare) == 1
+
+
+# ─── 신호 대상 범위 (2026-08-31) ─────────────────────
+#
+# 자산배분 포트폴리오(TIGER 200·KODEX 코스닥150 등 15종목)와 개인 관심종목을
+# 합쳐서 스캔하고 있었고, 실제로 자산배분 쪽 신호만 올라와 "이전 데이터가 남아
+# 있다"는 인상을 줬다. 관심종목은 실제 보유·거래 종목과 일치하므로 알림이 바로
+# 행동과 연결된다.
+
+
+class TestSignalScope:
+    def test_the_default_scope_is_personal_only(self):
+        assert sb.SIGNAL_SCOPE == "personal"
+
+    def test_the_scan_uses_the_signal_scope_not_the_full_list(self):
+        import inspect
+        src = inspect.getsource(sb.scan)
+        assert "signal_watchlist()" in src
+        assert "load_watchlist()" not in src
+
+    def test_personal_scope_returns_only_personal_items(self, monkeypatch):
+        personal = [sb.WatchItem("알테오젠", 0.0, "stochrsi", "개인", code="196170")]
+        monkeypatch.setattr(sb, "personal_watch_items", lambda: personal)
+        assert sb.signal_watchlist("personal") == personal
+
+    def test_an_empty_personal_list_does_not_fall_back(self, monkeypatch):
+        """대체하면 사용자가 끈 것이 조용히 되살아난다 — 0건이 맞는 답이다."""
+        monkeypatch.setattr(sb, "personal_watch_items", lambda: [])
+        assert sb.signal_watchlist("personal") == []
+
+    def test_a_lookup_failure_does_not_fall_back_either(self, monkeypatch):
+        """관심종목 조회 실패도 마찬가지다 — 자산배분 신호가 되살아나면 안 된다."""
+        monkeypatch.setattr(sb, "personal_watch_items", lambda: [])
+        got = sb.signal_watchlist("personal")
+        assert all(w.asset_class != "국내주식_지수" for w in got)
+
+    def test_the_all_scope_still_works_for_other_callers(self):
+        assert len(sb.signal_watchlist("all")) > 0
+
+    def test_browsing_the_full_watchlist_is_unaffected(self):
+        """`/watchlist`로 전체를 보는 것과 신호를 어디에 보낼지는 다른 질문이다."""
+        assert len(sb.load_watchlist(include_personal=False)) == 15
