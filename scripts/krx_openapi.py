@@ -237,12 +237,141 @@ def format_probe(result: dict, bas_dd: str) -> str:
     return "\n".join(lines)
 
 
+
+# ─── 인증 진단 (음성 대조) ───────────────────────────
+#
+# **"헤더 이름이 틀렸나, 권한이 없나"는 추측으로 가릴 수 없다.** 둘 다 401을
+# 준다. 그래서 **음성 대조**를 쓴다 — 키를 아예 안 보낸 요청, 엉터리 키를 보낸
+# 요청과 응답을 비교한다.
+#
+#   진짜 키 == 엉터리 키 == 키 없음   → 서버가 키를 안 보고 있다(헤더 이름 또는 권한)
+#   진짜 키 != 엉터리 키              → 헤더는 읽히고 있다. 키/권한 문제다
+#
+# 이 프로젝트에서 음성 대조가 검사 자체의 결함을 세 번 잡아냈다(순열검정 2회,
+# 전후반 기준선 1회). 같은 도구를 여기에도 쓴다.
+
+AUTH_VARIANTS = [
+    ("헤더 AUTH_KEY", "header", "AUTH_KEY"),
+    ("헤더 auth_key", "header", "auth_key"),
+    ("헤더 authKey", "header", "authKey"),
+    ("헤더 apiKey", "header", "apiKey"),
+    ("헤더 Authorization: Bearer", "bearer", "Authorization"),
+    ("쿼리 AUTH_KEY", "query", "AUTH_KEY"),
+]
+
+GARBAGE_KEY = "0" * 40
+
+
+def _call_variant(path: str, bas_dd: str, kind: str, name: str,
+                  key: str, *, timeout: int = TIMEOUT) -> dict:
+    """인증 방식 하나로 호출해 (상태, 본문)만 돌려준다."""
+    url = f"{BASE}{path}?basDd={bas_dd}"
+    headers = {}
+    if key:
+        if kind == "header":
+            headers[name] = key
+        elif kind == "bearer":
+            headers[name] = f"Bearer {key}"
+        elif kind == "query":
+            url += f"&{name}={key}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return {"status": resp.status if hasattr(resp, "status") else 200,
+                "body": body[:200]}
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", "replace")[:200]
+        except OSError:
+            body = ""
+        return {"status": e.code, "body": body}
+    except (urllib.error.URLError, OSError) as e:
+        return {"status": None, "body": f"네트워크 실패: {e}"}
+
+
+def auth_diagnose(bas_dd: str, path: Optional[str] = None) -> dict:
+    """인증 방식별 응답 + 음성 대조. 반환: {variants, controls}"""
+    path = path or INDEX_ENDPOINTS["KOSPI 시리즈"]
+    key = _auth_key()
+    if not key:
+        return {"error": f"{KEY_NAME} 미설정"}
+    out = {"path": path, "variants": {}, "controls": {}}
+    for label, kind, name in AUTH_VARIANTS:
+        out["variants"][label] = _call_variant(path, bas_dd, kind, name, key)
+    out["controls"]["키 없음"] = _call_variant(path, bas_dd, "header", "AUTH_KEY", "")
+    out["controls"]["엉터리 키"] = _call_variant(
+        path, bas_dd, "header", "AUTH_KEY", GARBAGE_KEY)
+    return out
+
+
+def auth_verdict(diag: dict) -> str:
+    """진단 판정(순수): ok | key_read | key_ignored | unknown
+
+    ok          어떤 방식이든 200을 받았다
+    key_read    진짜 키와 엉터리 키의 응답이 다르다 → 서버가 키를 보고 있다
+    key_ignored 진짜 키·엉터리 키·키 없음이 모두 같다 → 키가 반영되지 않는다
+    unknown     네트워크 실패 등으로 비교 자체가 불가
+    """
+    variants = (diag or {}).get("variants") or {}
+    controls = (diag or {}).get("controls") or {}
+    if not variants or not controls:
+        return "unknown"
+    if any(v.get("status") == 200 for v in variants.values()):
+        return "ok"
+    if any(v.get("status") is None for v in variants.values()):
+        return "unknown"
+    real = variants.get("헤더 AUTH_KEY") or {}
+    garbage = controls.get("엉터리 키") or {}
+    none = controls.get("키 없음") or {}
+    same = (real.get("status"), real.get("body")) == \
+           (garbage.get("status"), garbage.get("body")) == \
+           (none.get("status"), none.get("body"))
+    return "key_ignored" if same else "key_read"
+
+
+def format_auth_diagnose(diag: dict) -> str:
+    """진단 결과 — **무엇이 원인이 아닌지**까지 말한다."""
+    if diag.get("error"):
+        return f"❌ {diag['error']}"
+    lines = [f"🔐 인증 방식 진단 ({diag['path']})", "",
+             "인증 방식별 응답:"]
+    for label, r in diag["variants"].items():
+        lines.append(f"  {label:26} → {r['status']} {r['body'][:80]}")
+    lines.append("")
+    lines.append("음성 대조:")
+    for label, r in diag["controls"].items():
+        lines.append(f"  {label:26} → {r['status']} {r['body'][:80]}")
+    lines.append("")
+
+    verdict = auth_verdict(diag)
+    if verdict == "ok":
+        ok = [l for l, r in diag["variants"].items() if r.get("status") == 200]
+        lines.append(f"→ ✅ 성공한 방식: {', '.join(ok)}")
+    elif verdict == "key_read":
+        lines.append("→ **서버가 키를 읽고 있습니다.** 진짜 키와 엉터리 키의 응답이")
+        lines.append("  다릅니다. 헤더 이름 문제가 아니라 **키 또는 권한** 문제입니다.")
+        lines.append("  → 인증키 승인 상태와 **API별 활용신청** 승인을 확인하세요.")
+    elif verdict == "key_ignored":
+        lines.append("→ **키가 응답에 아무 영향을 주지 않습니다.**")
+        lines.append("  진짜 키 · 엉터리 키 · 키 없음이 모두 같은 응답입니다.")
+        lines.append("  두 가지 중 하나입니다:")
+        lines.append("   ① 이 엔드포인트를 **활용신청하지 않아** 인증 이전에 거절된다")
+        lines.append("   ② 인증 방식이 위 6가지 중에 없다(KRX 샘플 코드 확인 필요)")
+        lines.append("  ①이 훨씬 흔합니다 — KRX는 키 발급과 API별 활용신청이 따로입니다.")
+    else:
+        lines.append("→ ⚠️ 판정 불가 — 네트워크 실패가 섞여 비교할 수 없습니다.")
+    return "\n".join(lines)
+
+
 def _cli() -> int:
     import argparse
     from datetime import date, timedelta
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--probe", action="store_true", help="지수 엔드포인트 실측")
+    ap.add_argument("--auth", action="store_true",
+                    help="인증 방식 진단(음성 대조 — 헤더 문제인지 권한 문제인지)")
     ap.add_argument("--date", help="기준일 YYYYMMDD (기본: 어제)")
     args = ap.parse_args()
 
@@ -250,6 +379,9 @@ def _cli() -> int:
     if not _auth_key():
         print(f"❌ {KEY_NAME}가 없습니다. ~/울트론/ai-agent/.env를 확인하세요.")
         return 1
+    if args.auth:
+        print(format_auth_diagnose(auth_diagnose(bas)))
+        return 0
     if args.probe:
         print(format_probe(probe(bas), bas))
         return 0

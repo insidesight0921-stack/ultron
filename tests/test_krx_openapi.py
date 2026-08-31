@@ -169,3 +169,69 @@ def test_the_endpoint_paths_are_marked_as_unconfirmed():
     """추측한 경로를 확정처럼 두면 다음 사람이 그대로 믿는다."""
     assert "확정이 아니다" in k.__doc__ or "확정이 아니다" in \
         open(k.__file__, encoding="utf-8").read()
+
+
+# ─── 인증 진단 · 음성 대조 (2026-08-31) ──────────────
+#
+# "헤더 이름이 틀렸나, 권한이 없나"는 둘 다 401을 준다 — 추측으로는 못 가른다.
+# 키 없음 / 엉터리 키와 응답을 비교하면 서버가 키를 보고 있는지 알 수 있다.
+
+
+def _diag(real, garbage, none):
+    return {"path": "/x",
+            "variants": {"헤더 AUTH_KEY": real},
+            "controls": {"엉터리 키": garbage, "키 없음": none}}
+
+
+U401 = {"status": 401, "body": '{"respCode":"401"}'}
+
+
+def test_identical_responses_mean_the_key_is_ignored():
+    """진짜 키·엉터리 키·키 없음이 같으면 서버가 키를 안 보고 있다."""
+    assert k.auth_verdict(_diag(U401, U401, U401)) == "key_ignored"
+
+
+def test_a_different_response_for_a_bad_key_means_the_key_is_read():
+    """엉터리 키에만 다른 응답이 오면 헤더는 읽히고 있다 — 권한 문제다."""
+    bad = {"status": 401, "body": '{"respCode":"E0002","respMsg":"invalid key"}'}
+    assert k.auth_verdict(_diag(U401, bad, U401)) == "key_read"
+
+
+def test_a_success_wins():
+    ok = {"status": 200, "body": '{"OutBlock_1":[]}'}
+    assert k.auth_verdict(_diag(ok, U401, U401)) == "ok"
+
+
+def test_a_network_failure_makes_the_comparison_impossible():
+    """대조군이 못 돌면 판정하지 않는다 — 실패한 측정에서 결론 내지 않는다."""
+    dead = {"status": None, "body": "네트워크 실패: timeout"}
+    assert k.auth_verdict(_diag(dead, U401, U401)) == "unknown"
+
+
+def test_an_empty_diagnosis_is_unknown():
+    assert k.auth_verdict({}) == "unknown"
+    assert k.auth_verdict({"variants": {}, "controls": {}}) == "unknown"
+
+
+def test_the_report_names_the_likelier_cause_when_the_key_is_ignored():
+    """두 가능성을 나열만 하면 사용자가 무엇부터 볼지 모른다."""
+    text = k.format_auth_diagnose(_diag(U401, U401, U401))
+    assert "키가 응답에 아무 영향을 주지 않습니다" in text
+    assert "활용신청" in text
+
+
+def test_the_report_rules_out_the_header_when_the_key_is_read():
+    """무엇이 원인이 아닌지를 말해야 엉뚱한 데를 안 고친다."""
+    bad = {"status": 401, "body": "다름"}
+    text = k.format_auth_diagnose(_diag(U401, bad, U401))
+    assert "헤더 이름 문제가 아니라" in text
+
+
+def test_the_controls_include_no_key_and_a_bad_key():
+    """대조군이 하나면 '키를 읽는가'를 가릴 수 없다."""
+    assert k.GARBAGE_KEY and len(k.AUTH_VARIANTS) >= 4
+
+
+def test_a_missing_key_is_reported_before_calling(monkeypatch):
+    monkeypatch.setattr(k, "_auth_key", lambda: "")
+    assert "미설정" in k.auth_diagnose("20260828")["error"]
