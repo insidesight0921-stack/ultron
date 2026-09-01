@@ -129,3 +129,56 @@ def test_the_daily_series_asks_for_rows_not_months():
     assert "limit" in sig.parameters
     src = inspect.getsource(vx._cli)
     assert "limit=args.days" in src
+
+
+# ─── 일치율에는 대조가 필요하다 (2026-09-01 실측에서 드러난 구멍) ──
+#
+# 초판은 "같은 판정 36.6%"만 내놓았다. 그 숫자만 보면 관계가 있어 보이는데,
+# **같은 주변분포를 가진 무관한 두 지표의 기대 일치율이 35.5%였다.**
+# 치우친 지표는 서로 무관해도 자주 겹친다.
+
+
+def test_agreement_comes_with_its_chance_baseline():
+    vix = {f"d{i}": 12.0 for i in range(10)}          # 전부 risk_on
+    vk = {f"d{i}": 10.0 for i in range(10)}           # 전부 risk_on
+    agr = vx.proxy_agreement(vix, vk, vix_calm=18.0, vix_stress=28.0,
+                             vk_low=20.7, vk_high=60.6)
+    # 둘 다 한 값만 내면 일치율 100%지만 **우연 기대도 100%**다 — 정보가 없다.
+    assert agr["agree_pct"] == 100.0
+    assert agr["expected_agree_pct"] == 100.0
+    assert agr["kappa"] is None or agr["kappa"] == 0
+
+
+def test_two_unrelated_but_skewed_indicators_do_not_look_related():
+    """치우친 지표끼리는 무관해도 자주 겹친다 — kappa가 그걸 걷어낸다."""
+    days = [f"d{i}" for i in range(100)]
+    # VIX는 80%가 risk_on, VKOSPI는 80%가 neutral. 서로 무관하게 배치한다.
+    vix = {d: (12.0 if i % 5 else 40.0) for i, d in enumerate(days)}
+    vk = {d: (40.0 if i % 5 != 2 else 80.0) for i, d in enumerate(days)}
+    agr = vx.proxy_agreement(vix, vk, vix_calm=18.0, vix_stress=28.0,
+                             vk_low=20.7, vk_high=60.6)
+    assert abs(agr["kappa"]) < 0.2
+
+
+def test_perfect_agreement_beyond_chance_shows_up_as_high_kappa():
+    days = [f"d{i}" for i in range(60)]
+    vix = {d: (12.0 if i % 3 == 0 else (20.0 if i % 3 == 1 else 40.0))
+           for i, d in enumerate(days)}
+    vk = {d: (10.0 if i % 3 == 0 else (40.0 if i % 3 == 1 else 80.0))
+          for i, d in enumerate(days)}
+    agr = vx.proxy_agreement(vix, vk, vix_calm=18.0, vix_stress=28.0,
+                             vk_low=20.7, vk_high=60.6)
+    assert agr["agree_pct"] == 100.0
+    assert agr["kappa"] > 0.9
+
+
+def test_the_report_puts_the_baseline_next_to_the_number():
+    """기대값 없이 일치율만 적으면 읽는 사람이 관계가 있다고 읽는다."""
+    days = [f"d{i}" for i in range(30)]
+    vix = {d: (12.0 if i % 2 else 40.0) for i, d in enumerate(days)}
+    vk = {d: (40.0 if i % 3 else 80.0) for i, d in enumerate(days)}
+    agr = vx.proxy_agreement(vix, vk, vix_calm=18.0, vix_stress=28.0,
+                             vk_low=20.7, vk_high=60.6)
+    msg = vx.format_proxy(agr, level_corr=0.03, change_corr=-0.03)
+    assert "무관할 때 기대" in msg
+    assert "kappa" in msg

@@ -91,6 +91,12 @@ def proxy_agreement(vix: dict, vkospi: dict, *,
 
     반환의 `opposite`는 **한쪽이 risk_on인데 다른 쪽이 risk_off인 날**이다.
     대용 지표라면 이 값이 0에 가까워야 한다.
+
+    **일치율은 혼자서는 아무 뜻이 없다.** 두 지표가 서로 무관해도, 각자
+    한쪽으로 치우쳐 있으면 우연히 상당한 비율로 겹친다. 그래서 같은 주변분포를
+    가진 두 무관한 지표의 **기대 일치율**과 코헨 kappa를 함께 낸다 —
+    kappa가 0 근처면 일치율이 몇 %든 "관계 없음"이다.
+    (2026-09-01 초판은 이 대조 없이 36.6%만 내놓았다. 기대값은 35.5%였다.)
     """
     days = sorted(set(vix) & set(vkospi))
     if not days:
@@ -107,10 +113,33 @@ def proxy_agreement(vix: dict, vkospi: dict, *,
         elif {a, b} == {RISK_ON, RISK_OFF}:
             opposite += 1
     n = len(days)
+    exp_agree, exp_opp = _chance(pairs)
+    obs = agree / n
+    kappa = ((obs - exp_agree) / (1 - exp_agree)) if exp_agree < 1 else None
     return {"n": n, "agree": agree, "opposite": opposite,
             "agree_pct": round(agree / n * 100, 1),
             "opposite_pct": round(opposite / n * 100, 1),
+            "expected_agree_pct": round(exp_agree * 100, 1),
+            "expected_opposite_pct": round(exp_opp * 100, 1),
+            "kappa": round(kappa, 3) if kappa is not None else None,
             "pairs": pairs}
+
+
+def _chance(pairs: list) -> tuple[float, float]:
+    """두 판정이 **서로 무관할 때**의 기대 일치율·기대 정반대율(순수).
+
+    각자의 주변분포는 그대로 두고 독립이라고 가정한다 — 순열검정에서 라벨
+    구성을 보존하는 것과 같은 이유다. 치우친 지표는 무관해도 자주 겹친다.
+    """
+    n = len(pairs)
+    if not n:
+        return 0.0, 0.0
+    states = (RISK_ON, NEUTRAL, RISK_OFF, "unknown")
+    pa = {s: sum(1 for _, a, _ in pairs if a == s) / n for s in states}
+    pb = {s: sum(1 for _, _, b in pairs if b == s) / n for s in states}
+    exp_agree = sum(pa[s] * pb[s] for s in states)
+    exp_opp = pa[RISK_ON] * pb[RISK_OFF] + pa[RISK_OFF] * pb[RISK_ON]
+    return exp_agree, exp_opp
 
 
 def correlation(a: list[float], b: list[float]) -> Optional[float]:
@@ -182,9 +211,15 @@ def format_proxy(agr: dict, *, level_corr: Optional[float],
         return "🔍 VIX·VKOSPI 겹치는 날이 없어 대용 여부를 잴 수 없습니다."
     lines = ["🔍 VIX가 VKOSPI 대용이었는가", ""]
     lines.append(f"  겹치는 날 {agr['n']}일")
-    lines.append(f"  같은 판정 {agr['agree']}일 ({agr['agree_pct']}%)")
-    lines.append(f"  **정반대 판정 {agr['opposite']}일 ({agr['opposite_pct']}%)** "
-                 "— 한쪽은 위험선호, 다른 쪽은 위험회피")
+    lines.append(f"  같은 판정 {agr['agree']}일 ({agr['agree_pct']}%) · "
+                 f"**무관할 때 기대 {agr['expected_agree_pct']}%**")
+    lines.append(f"  정반대 판정 {agr['opposite']}일 ({agr['opposite_pct']}%) · "
+                 f"기대 {agr['expected_opposite_pct']}%")
+    if agr.get("kappa") is not None:
+        verdict = ("우연과 구분되지 않는다" if abs(agr["kappa"]) < 0.2
+                   else ("약한 일치" if agr["kappa"] < 0.4 else "일치"))
+        lines.append(f"  **코헨 kappa {agr['kappa']:+.3f} — {verdict}** "
+                     "(0=무관, 1=완전일치)")
     if level_corr is not None:
         lines.append(f"  수준 상관 {level_corr:+.3f}")
     if change_corr is not None:
@@ -192,7 +227,7 @@ def format_proxy(agr: dict, *, level_corr: Optional[float],
                      "— 같이 움직이는지는 이쪽이 답한다")
     lines.append("")
     lines.append("_수준 상관이 높아도 둘 다 추세적으로 올랐을 뿐일 수 있습니다._")
-    lines.append("_봇이 실제로 쓰는 것은 세 글자 판정이므로 일치율이 결론입니다._")
+    lines.append("_일치율은 혼자서는 뜻이 없습니다 — 기대값과의 차이가 결론입니다._")
     return "\n".join(lines)
 
 
