@@ -38,13 +38,32 @@ BASE = os.getenv("KRX_OPENAPI_BASE", "http://data-dbg.krx.co.kr")
 KEY_NAME = "KRX_OPENAPI_KEY"
 TIMEOUT = 20
 
-# 공개 서비스 목록에 실린 지수 API 4종의 추정 경로.
-# **확정이 아니다** — `--probe`가 실제로 어느 것이 200을 주는지 확인한다.
+# 지수 API. **2026-08-31 로그인 후 화면에서 API ID를 직접 확인해 확정했다.**
+#
+# 처음엔 이름 규칙으로 4종을 유추했고 넷 다 맞았지만, **`drvprod_dd_trd`
+# (파생상품지수)를 통째로 빠뜨렸다.** 하필 그게 VKOSPI 최유력 후보다 —
+# 코스피200 변동성지수는 옵션에서 산출되는 **파생상품지수**이고, 공개
+# 서비스 목록 페이지에는 이 항목이 렌더링되지 않아 보이지 않았다.
+#
+# **목록을 유추로 만들면 없는 것을 없다고 말하게 된다.** 설령 401이 아니라
+# 200이 왔더라도, 이 엔드포인트를 안 불렀으면 "변동성지수 없음"이라는
+# 오답이 나왔을 것이다.
+#
+# 활용신청 승인분(2026-09-01~2027-08-31)만 남긴다. 채권지수·KOSDAQ 시리즈는
+# 신청하지 않았으므로 부르지 않는다 — 401을 섞어 놓으면 판정이 흐려진다.
 INDEX_ENDPOINTS = {
+    "파생상품지수": "/svc/apis/idx/drvprod_dd_trd",   # ← VKOSPI 최유력
     "KOSPI 시리즈": "/svc/apis/idx/kospi_dd_trd",
-    "KOSDAQ 시리즈": "/svc/apis/idx/kosdaq_dd_trd",
     "KRX 시리즈": "/svc/apis/idx/krx_dd_trd",
-    "채권지수": "/svc/apis/idx/bon_dd_trd",
+}
+
+# 승인은 받았지만 지수 탐침 대상은 아닌 것들(필요해질 때 붙인다).
+OTHER_ENDPOINTS = {
+    "유가증권 일별매매": "/svc/apis/sto/stk_bydd_trd",
+    "코스닥 일별매매": "/svc/apis/sto/ksq_bydd_trd",
+    "유가증권 종목기본": "/svc/apis/sto/stk_isu_base_info",
+    "코스닥 종목기본": "/svc/apis/sto/ksq_isu_base_info",
+    "ETF 일별매매": "/svc/apis/etp/etf_bydd_trd",
 }
 
 # 응답에서 지수 이름·종가로 쓰이는 필드 후보. 실제 이름은 탐침 결과로 확정한다.

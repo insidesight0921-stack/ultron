@@ -165,10 +165,37 @@ def test_a_failed_endpoint_shows_its_error():
     assert "HTTP 401" in text and "unauthorized" in text
 
 
-def test_the_endpoint_paths_are_marked_as_unconfirmed():
-    """추측한 경로를 확정처럼 두면 다음 사람이 그대로 믿는다."""
-    assert "확정이 아니다" in k.__doc__ or "확정이 아니다" in \
-        open(k.__file__, encoding="utf-8").read()
+def test_the_volatility_index_endpoint_is_present():
+    """**유추 목록이 이걸 빠뜨렸다.**
+
+    2026-08-31: 이름 규칙으로 만든 4종은 넷 다 맞았지만 `drvprod_dd_trd`
+    (파생상품지수)가 통째로 없었다. 하필 그게 VKOSPI 최유력 후보다 —
+    코스피200 변동성지수는 옵션에서 산출되는 파생상품지수이고, 공개 목록
+    페이지에는 렌더링되지 않아 보이지 않았다.
+
+    **목록을 유추로 만들면 없는 것을 없다고 말하게 된다.** 401이 아니라
+    200이 왔더라도 이걸 안 불렀으면 "변동성지수 없음"이라는 오답이 나왔다.
+    """
+    assert "/svc/apis/idx/drvprod_dd_trd" in k.INDEX_ENDPOINTS.values()
+
+
+def test_only_approved_endpoints_are_probed():
+    """신청하지 않은 API를 부르면 401이 섞여 판정이 흐려진다.
+
+    승인분(2026-09-01~): 파생상품지수·KOSPI 시리즈·KRX 시리즈.
+    채권지수·KOSDAQ 시리즈는 신청하지 않았다.
+    """
+    paths = set(k.INDEX_ENDPOINTS.values())
+    assert "/svc/apis/idx/bon_dd_trd" not in paths
+    assert "/svc/apis/idx/kosdaq_dd_trd" not in paths
+
+
+def test_the_endpoint_ids_match_the_console_listing():
+    """화면에서 확인한 API ID와 코드가 어긋나면 조용히 404가 난다."""
+    for path in k.INDEX_ENDPOINTS.values():
+        assert path.startswith("/svc/apis/idx/") and path.endswith("_dd_trd")
+    for path in k.OTHER_ENDPOINTS.values():
+        assert path.startswith("/svc/apis/")
 
 
 # ─── 인증 진단 · 음성 대조 (2026-08-31) ──────────────
