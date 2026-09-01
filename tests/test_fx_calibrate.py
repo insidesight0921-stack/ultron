@@ -135,3 +135,91 @@ def test_the_monthly_path_is_unchanged():
     src = inspect.getsource(qb._fetch_ecos_series_raw)
     assert "months + 3" in src
     assert 'end = today.strftime("%Y%m")' in src
+
+
+# ─── 정렬이 틀리면 진짜 관계가 사라진다 (v3.64) ─────
+#
+# ECOS 731Y001은 매매기준율이고, 그 값이 **어느 날의 시장**을 반영하는지는
+# 확인한 적이 없다. 하루 어긋난 채로 "같은 날 상관 +0.03"을 읽으면
+# "관계 없음"이라고 결론 내리게 된다 — 실제로는 다른 lag에 있을 수 있다.
+
+
+def _lagged(n=200, shift=0):
+    """주가와 환율을 정확히 shift일 어긋나게 만든 인공 계열."""
+    days = [f"2026{i:04d}" for i in range(1, n + 1)]
+    import math
+    k, f = {}, {}
+    kv, fv = 2500.0, 1300.0
+    for i, d in enumerate(days):
+        kr = math.sin(i / 3.0) * 0.01
+        kv *= 1 + kr
+        k[d] = kv
+        j = i - shift
+        fr = -math.sin(j / 3.0) * 0.01 if 0 <= j else 0.0
+        fv *= 1 + fr
+        f[d] = fv
+    return f, k
+
+
+def test_the_scan_finds_the_alignment_when_there_is_no_shift():
+    f, k = _lagged(shift=0)
+    scan = fx.lag_scan(f, k)
+    best = max(scan, key=lambda r: abs(r["corr"]))
+    assert best["lag"] == 0
+    assert best["corr"] < -0.5          # 원화 약세 ↔ 주가 하락
+
+
+def test_the_scan_finds_a_one_day_shift():
+    """하루 밀린 계열에서 lag 0만 보면 관계가 없다고 결론 내린다."""
+    f, k = _lagged(shift=1)
+    scan = fx.lag_scan(f, k)
+    best = max(scan, key=lambda r: abs(r["corr"]))
+    assert best["lag"] != 0
+    at_zero = [r for r in scan if r["lag"] == 0][0]
+    assert abs(at_zero["corr"]) < abs(best["corr"])
+
+
+def test_a_lag_that_leaves_too_few_days_is_dropped_not_guessed():
+    days = [f"2026{i:04d}" for i in range(1, 41)]
+    f = {d: 1300.0 + i for i, d in enumerate(days)}
+    k = {d: 2500.0 + i for i, d in enumerate(days)}
+    out = fx.same_day_relation(f, k, lag=35)
+    assert out.get("corr") is None
+
+
+# ─── 밴드별 결과 ────────────────────────────────────
+
+
+def test_band_outcomes_split_the_days_without_losing_any():
+    days = [f"2026{i:04d}" for i in range(1, 80)]
+    f = {d: 1300.0 * (1.001 ** i) for i, d in enumerate(days)}
+    k = {d: 2500.0 + (i % 3) for i, d in enumerate(days)}
+    bo = fx.band_outcomes(f, k, window=20, threshold=2.0)
+    parts = bo["weak_krw"]["n"] + bo["neutral"]["n"] + bo["strong_krw"]["n"]
+    assert parts <= bo["all"]["n"]          # 앞쪽 window는 밴드가 없다
+    assert bo["all"]["n"] > 0
+
+
+def test_a_shift_is_tested_against_random_draws_not_eyeballed():
+    """표본이 작으면 10%p 차이는 흔하다 — 놀라기 전에 대조한다."""
+    base = {"n": 300, "up": 190}
+    same = {"n": 60, "up": 38}              # 전체와 같은 비율
+    p_same = fx.shift_significance(same, base)
+    assert p_same is not None and p_same > 0.3
+    extreme = {"n": 60, "up": 15}           # 크게 낮다
+    p_extreme = fx.shift_significance(extreme, base)
+    assert p_extreme < 0.01
+
+
+def test_a_tiny_band_gets_no_p_value_instead_of_a_fake_one():
+    assert fx.shift_significance({"n": 5, "up": 1}, {"n": 300, "up": 190}) is None
+
+
+def test_the_report_shows_the_band_split_and_the_base_rate():
+    days = [f"2026{i:04d}" for i in range(1, 90)]
+    f = {d: 1300.0 * (1.001 ** i) for i, d in enumerate(days)}
+    k = {d: 2500.0 + (i % 5) * 2 for i, d in enumerate(days)}
+    msg = fx.format_report(f, k, window=20, threshold=2.0)
+    assert "③ 밴드별 다음 날 상승 비율" in msg
+    assert "이겨야 할 기준" in msg
+    assert "lag 스캔" in msg

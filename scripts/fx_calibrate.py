@@ -67,10 +67,16 @@ def aligned(a: dict, b: dict) -> tuple[list, list, list]:
     return days, [a[d] for d in days], [b[d] for d in days]
 
 
-def same_day_relation(fx: dict, kospi: dict) -> dict:
-    """같은 날 환율 변화 vs 주가 변화(순수).
+def same_day_relation(fx: dict, kospi: dict, *, lag: int = 0) -> dict:
+    """환율 변화 vs 주가 변화(순수). `lag`만큼 환율을 **뒤로** 민다.
 
     부호가 음(-)이면 "원화 약세일 때 주가 하락"이다 — 교과서가 말하는 방향.
+
+    **왜 lag을 스캔해야 하는가.** ECOS 731Y001은 매매기준율이고, 그 값이
+    어느 날의 시장을 반영하는지는 우리가 확인한 적이 없다. 만약 T일 고시값이
+    T-1일 시장에서 나온 것이라면, "같은 날"이라고 부른 비교는 사실 하루 어긋난
+    비교다 — **정렬이 틀리면 진짜 -0.3이 +0.03으로 보인다.** 어느 lag에서
+    상관이 가장 강한지가 그 규약을 드러낸다.
     """
     import vix_calibrate as vx
 
@@ -79,8 +85,85 @@ def same_day_relation(fx: dict, kospi: dict) -> dict:
         return {"n": len(days)}
     df = [b / a - 1 for a, b in zip(f, f[1:]) if a]
     dk = [b / a - 1 for a, b in zip(k, k[1:]) if a]
+    if lag > 0:
+        df, dk = df[:-lag], dk[lag:]
+    elif lag < 0:
+        df, dk = df[-lag:], dk[:lag]
     m = min(len(df), len(dk))
-    return {"n": m, "corr": vx.correlation(df[:m], dk[:m])}
+    if m < 30:
+        return {"n": m}
+    return {"n": m, "lag": lag, "corr": vx.correlation(df[:m], dk[:m])}
+
+
+def lag_scan(fx: dict, kospi: dict, *, lags=(-2, -1, 0, 1, 2)) -> list[dict]:
+    """여러 lag에서 동행 상관(순수). 가장 강한 곳이 정렬 규약을 드러낸다."""
+    out = []
+    for lg in lags:
+        r = same_day_relation(fx, kospi, lag=lg)
+        if r.get("corr") is not None:
+            out.append(r)
+    return out
+
+
+def band_outcomes(fx: dict, kospi: dict, *, window: int,
+                  threshold: float) -> dict:
+    """밴드별 **다음 날 상승 비율**(순수).
+
+    적중률 하나로는 무슨 일이 일어났는지 모른다. "원화 약세일 때 상승 비율이
+    평소보다 낮은가"가 진짜 질문이고, 그 답은 밴드별로 갈라 봐야 나온다.
+    """
+    import nowcast_eval as ne
+
+    kd = sorted(kospi)
+    truth = dict(ne.direction_series(kd, [kospi[d] for d in kd]))
+    preds = next_day_predictions(fx, window=window, threshold=threshold)
+    buckets = {"weak_krw": [], "strong_krw": [], "neutral": [], "all": []}
+    keys = sorted(fx)
+    values = [fx[d] for d in keys]
+    changes = dict(zip(keys, window_change_pct(values, window)))
+    for d, want in truth.items():
+        buckets["all"].append(want)
+        c = changes.get(d)
+        if c is None:
+            continue
+        if c >= threshold:
+            buckets["weak_krw"].append(want)
+        elif c <= -threshold:
+            buckets["strong_krw"].append(want)
+        else:
+            buckets["neutral"].append(want)
+    out = {}
+    for name, vals in buckets.items():
+        n = len(vals)
+        up = sum(1 for v in vals if v == ne.UP)
+        out[name] = {"n": n, "up": up,
+                     "up_pct": round(up / n * 100, 1) if n else None}
+    del preds
+    return out
+
+
+def shift_significance(band: dict, base: dict, *, trials: int = 5000,
+                       seed: int = 20260901) -> Optional[float]:
+    """밴드의 상승 비율이 전체와 다른가 — 같은 크기로 무작위 추출한 대조(순수).
+
+    **비율 차이만 보고 놀라지 않기 위해서다.** 표본이 작으면 10%p 차이는
+    흔하게 나온다.
+    """
+    import random
+
+    n, up = band.get("n") or 0, band.get("up") or 0
+    total, tot_up = base.get("n") or 0, base.get("up") or 0
+    if n < 20 or total <= n:
+        return None
+    pool = [1] * tot_up + [0] * (total - tot_up)
+    rng = random.Random(seed)
+    obs = up / n
+    hits = 0
+    for _ in range(trials):
+        pick = rng.sample(pool, n)
+        if abs(sum(pick) / n - tot_up / total) >= abs(obs - tot_up / total):
+            hits += 1
+    return (hits + 1) / (trials + 1)
 
 
 def next_day_predictions(fx: dict, *, window: int, threshold: float,
@@ -149,14 +232,19 @@ def format_report(fx: dict, kospi: dict, *, window: int,
                      "(변화 절대값 상위 20%)")
     lines.append("")
 
-    same = same_day_relation(fx, kospi)
-    lines.append("■ ① 같은 날 관계 (동행)")
-    if same.get("corr") is None:
-        lines.append(f"  표본 {same.get('n', 0)}일 — 판정 불가")
+    lines.append("■ ① 같은 날 관계 (동행) — **lag 스캔**")
+    scan = lag_scan(fx, kospi)
+    if not scan:
+        lines.append("  표본 부족 — 판정 불가")
     else:
-        lines.append(f"  일간 변화 상관 {same['corr']:+.3f} "
-                     f"(표본 {same['n']}일)")
+        for r in scan:
+            mark = " ←" if abs(r["corr"]) == max(abs(x["corr"]) for x in scan) else ""
+            label = {0: "같은 날", 1: "환율이 하루 앞섬", -1: "주가가 하루 앞섬"}.get(
+                r["lag"], f"lag {r['lag']:+d}")
+            lines.append(f"  lag {r['lag']:+d} ({label:<12}) 상관 {r['corr']:+.3f} "
+                         f"· 표본 {r['n']}일{mark}")
         lines.append("  _음(−)이면 '원화 약세일 때 주가 하락'입니다._")
+        lines.append("  _lag 0이 아닌 곳이 가장 강하면 매매기준율의 기준일이 어긋나 있다는 뜻입니다._")
     lines.append("")
 
     truth = dict(ne.direction_series(sorted(kospi), [kospi[k] for k in sorted(kospi)]))
@@ -170,6 +258,23 @@ def format_report(fx: dict, kospi: dict, *, window: int,
                      f"같은 날 '항상 상승' {r.get('control_rate')}% · "
                      f"백분위 {r.get('percentile')}")
         lines.append(f"  → {r['verdict']}")
+    lines.append("")
+
+    lines.append("■ ③ 밴드별 다음 날 상승 비율")
+    bo = band_outcomes(fx, kospi, window=window, threshold=threshold)
+    base = bo["all"]
+    lines.append(f"  전체 {base['n']}일 · 상승 {base['up_pct']}%  ← 이겨야 할 기준")
+    for key, label in (("weak_krw", "원화 약세"), ("neutral", "중립"),
+                       ("strong_krw", "원화 강세")):
+        b = bo[key]
+        if not b["n"]:
+            lines.append(f"  {label} — 해당 없음")
+            continue
+        pv = shift_significance(b, base)
+        tail = "" if pv is None else f" · 무작위 대조 p={pv:.3f}"
+        lines.append(f"  {label} {b['n']:>3}일 · 상승 {b['up_pct']}%"
+                     f" ({b['up_pct'] - base['up_pct']:+.1f}%p){tail}")
+    lines.append("  _적중률 하나로는 무슨 일이 일어났는지 모릅니다._")
     lines.append("")
     lines.append("_①이 강해도 ②는 없을 수 있습니다. 나우캐스팅이 쓰는 것은 ②입니다._")
     return "\n".join(lines)
@@ -209,6 +314,22 @@ def _cli() -> int:
     fx = {str(d): float(v) for d, v in series}
 
     import price_sanity as ps
+
+    # **받은 원자료를 남긴다.** 매번 다시 받아야 하면 재측정이 네트워크에
+    # 묶이고, 네트워크가 막힌 곳에서는 아무도 다시 재지 못한다.
+    try:
+        out_dir = ps._cache_root() / "fx"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        last = max(fx)
+        (out_dir / f"usdkrw_{last}.json").write_text(
+            json.dumps({"pair": "USD/KRW", "source": "ECOS 731Y001",
+                        "as_of": last,
+                        "series": {"date": sorted(fx),
+                                   "close": [fx[d] for d in sorted(fx)]}},
+                       ensure_ascii=False), encoding="utf-8")
+        print(f"  (원자료 {len(fx)}일 캐시에 저장: cache/fx/usdkrw_{last}.json)")
+    except OSError as exc:
+        print(f"  (캐시 저장 실패 — 측정은 계속합니다: {exc})")
 
     files = sorted((ps._cache_root() / "indices").glob("market_index_KOSPI_*.json"))
     if not files:
