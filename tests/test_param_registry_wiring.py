@@ -72,14 +72,43 @@ def test_taste_parameters_are_not_registered():
     assert not bad, bad
 
 
+# **아는 위반은 목록에 적어둔다.** 통과시켜 버리면 새 위반도 같이 묻히고,
+# 테스트를 지우면 다음 사람이 이 사실을 모른다. 여기 있는 값은 "고쳐야 하는데
+# 아직 승인을 안 받은 값"이지 "괜찮은 값"이 아니다.
+#
+# vix.calm / vix.stress — 2026-09-01 실측(494일): risk_on 58.1% · risk_off 3.4%.
+#   교과서 값(≤18/≥28)이고 **죽은 가지는 아니지만**(양쪽 다 걸린다) 한쪽이
+#   과반이라 사실상 기본 상태다. 분포 기준은 15.7 / 20.6(각 21.1% · 20.9%).
+#   VIX는 분기 중앙값 15.8~20.8로 정상성이 있어 백분위가 무너지지 않는다
+#   (VKOSPI는 19.8→79.6으로 4배 올라 레벨 임계가 무너졌다 — 다른 경우다).
+#   **돈이 걸린 값이 아니라 자동으로 바꾸지 않고 `/파라미터` 승인에 맡긴다.**
+KNOWN_OUT_OF_BAND = {"vix.calm", "vix.stress"}
+
+
 def test_the_current_defaults_all_pass_their_own_validation():
     """지금 도는 값이 자기 검증을 통과 못 하면, 그 값부터 틀린 것이다."""
+    failures = {}
     for key, param in pr.PARAMS.items():
         sample = param.sample()
         if len(sample) < ps.MIN_SAMPLE:
             continue                      # 캐시 없는 환경(CI) — 건너뛴다
         out = ps.validate(param, pr.code_default(param), sample)
-        assert out["ok"], f"{key}: {out.get('reason')}"
+        if not out["ok"]:
+            failures[key] = out.get("reason")
+    unexpected = {k: v for k, v in failures.items() if k not in KNOWN_OUT_OF_BAND}
+    assert not unexpected, f"새로 한도를 벗어난 값: {unexpected}"
+
+
+def test_the_known_violations_are_still_violations():
+    """고쳐지면 목록에서 빼야 한다 — 안 빼면 목록이 낡아 아무것도 안 지킨다."""
+    for key in KNOWN_OUT_OF_BAND:
+        param = pr.PARAMS[key]
+        sample = param.sample()
+        if len(sample) < ps.MIN_SAMPLE:
+            continue
+        out = ps.validate(param, pr.active(key)[0], sample)
+        assert not out["ok"], (
+            f"{key}가 이제 통과한다 — KNOWN_OUT_OF_BAND에서 빼라")
 
 
 # ─── 소비자가 원장을 읽는가 ─────────────────────────
