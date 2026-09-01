@@ -1693,6 +1693,10 @@ def _equity_budget(cash, positions, new_names, *, source: str = "") -> tuple[flo
         import equity_drift as _ed
 
         drift = _ed.assess(float(cash or 0), hv["value"], w)
+        # v3.64 — 긴급 상태(급락)에서도 신규 매수를 막는다. **파는 것은 하지
+        # 않는다.** 비중 초과 차단과 사유가 다르므로 따로 싣는다 —
+        # "목표를 넘어서 안 산다"와 "시장이 무너져서 안 산다"는 다른 말이다.
+        emergency = _emergency_now()
         log.info(
             f"{source} 예산: 슬롯총액 "
             f"{_sb.slot_total(float(cash or 0), hv['value']):,.0f}원 "
@@ -1700,7 +1704,8 @@ def _equity_budget(cash, positions, new_names, *, source: str = "") -> tuple[flo
             f"목표 주식 {w * 100:.0f}%"
             f"{f'({why})' if why else ''} → 신규 {n}종목 × {plan['per_name']:,.0f}원")
         return plan["per_name"], {"plan": plan, "holdings": hv, "drift": drift,
-                                  "weight": w, "reason": why}
+                                  "weight": w, "reason": why,
+                                  "emergency": emergency}
     except Exception:
         log.warning("예산 산정 실패 — 옛 방식으로 진행", exc_info=True)
         return (float(cash or 0) / n if n else 0.0), {}
@@ -1859,7 +1864,17 @@ def _equity_block_line(budget: dict) -> str:
     **초과와 현금 부족은 다르다.** 예산이 0이면 수량이 0이 되어 매수가 조용히
     사라지고 화면에는 "배정금액 부족"으로 뜬다 — 증상이지 원인이 아니다.
     """
+    import emergency_response as _er
     import equity_drift as _ed
+
+    # **긴급이 비중 초과보다 먼저다.** 둘 다 걸리면 더 급한 쪽을 이름으로
+    # 불러야 한다 — "목표를 넘어서 안 산다"와 "시장이 무너져서 안 산다"는
+    # 사람이 취할 다음 행동이 다르다.
+    emg = (budget or {}).get("emergency")
+    if emg and _er.blocks_new_buys(emg):
+        detail = " · ".join(t["detail"] for t in emg.get("triggers") or [])
+        return (f"🚨 긴급({emg['level']}) — 신규 매수를 건너뜁니다"
+                f"(기존 보유는 그대로 둡니다)\n   {detail}")
 
     drift = (budget or {}).get("drift")
     if not drift or not _ed.blocks_new_buys(drift):
@@ -1867,6 +1882,90 @@ def _equity_block_line(budget: dict) -> str:
     return (f"⚖️ 주식 비중 {drift['current']*100:.1f}% > 목표 "
             f"{drift['target']*100:.0f}% — 신규 매수를 건너뜁니다"
             f"(기존 보유는 그대로 둡니다)")
+
+
+# v3.64 — 시장 급락 긴급 대응
+#
+# 계획서 원안(VKOSPI 20/30 · 코스피 5일 −7%)을 그대로 붙이면 **절반의 날에**
+# "전 포지션 50% 축소"가 발동한다(2026-09-01 실측 48.6%). 실측 분포로 다시
+# 잡았다: VKOSPI p90(77.8) 진입 연 1.9회 · 코스피 5일 p1(−15%) 진입 연 2.1회.
+EMERGENCY_INTERVAL_SEC = 60 * 30
+EMERGENCY_STATE_FILE = REBALANCE_FLAG_DIR / "emergency_state.json"
+
+
+def _emergency_now() -> dict:
+    """지금 긴급 상태(캐시만 읽는다 — 네트워크 없음).
+
+    **매수 경로에서 불린다.** 여기서 네트워크를 쓰면 외부가 느려질 때 매수가
+    같이 멈추고, 그 원인이 '긴급'으로 보인다.
+    """
+    import emergency_response as _er
+
+    try:
+        import proxy_indicators as _pi
+
+        vk, _as_of = _pi._vkospi_latest()
+        closes, _ = _pi._kospi_series()
+        return _er.assess(vk, closes)
+    except Exception:
+        log.warning("긴급 상태 판정 실패 — 정상으로 두지 않고 미확보로 남긴다",
+                    exc_info=True)
+        return _er.assess(None, None)
+
+
+async def emergency_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """긴급 상태를 감시하고 **상태가 바뀔 때만** 알린다.
+
+    경보 구간은 실측 평균 13.7일 이어진다 — 매일 보내면 2주 내내 같은 말이
+    오고, 그러면 사람은 그 알림을 안 보게 된다.
+
+    **아무것도 팔지 않는다.** 자동 조치는 신규 매수 차단뿐이고, 매도·현금
+    전환은 알림으로 제안만 한다.
+    """
+    import json as _json
+
+    import emergency_response as _er
+
+    now = _now_kst()
+    assessment = await asyncio.to_thread(_emergency_now)
+    key = _er.state_key(assessment)
+
+    previous_level = _er.NORMAL
+    previous_key = None
+    try:
+        saved = _json.loads(EMERGENCY_STATE_FILE.read_text(encoding="utf-8"))
+        previous_level = saved.get("level") or _er.NORMAL
+        previous_key = saved.get("key")
+    except (OSError, ValueError):
+        pass
+
+    kind = _er.transition(previous_level, assessment)
+    if kind is None and key == previous_key:
+        return
+
+    try:
+        EMERGENCY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        EMERGENCY_STATE_FILE.write_text(
+            _json.dumps({"level": assessment["level"], "key": key,
+                         "at": now.isoformat(timespec="seconds")},
+                        ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        log.warning("긴급 상태 저장 실패 — 같은 알림이 또 갈 수 있다", exc_info=True)
+
+    if kind is None:
+        # 단계는 그대로인데 트리거 구성이 바뀐 경우(예: 급락이 빠지고 VKOSPI만
+        # 남음). 상태 파일만 갱신하고 조용히 넘어간다 — 사람이 취할 행동이
+        # 달라지지 않는다.
+        log.info("긴급 상태 구성 변경 %s → %s", previous_key, key)
+        return
+
+    text = _er.format_alert(assessment, kind=kind, previous=previous_level)
+    log.warning("긴급 상태 %s: %s", kind, key)
+    for uid in ALLOWED_IDS:
+        try:
+            await ctx.bot.send_message(chat_id=int(uid), text=text)
+        except Exception:
+            log.warning("긴급 알림 발송 실패 user=%s", uid, exc_info=True)
 
 
 # v3.64 — VKOSPI 임계값 분기 재측정 (승인형)
@@ -4459,6 +4558,17 @@ def main() -> None:
             job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 60},
         )
         log.info("📡 기술적 신호 봇 등록 (1시간 간격 · 평일 09:00~15:30 · 멱등)")
+        # v3.64 — 시장 급락 긴급 대응 (30분 간격 · 상태 변화 시에만 알림)
+        app.job_queue.run_repeating(
+            emergency_job,
+            interval=EMERGENCY_INTERVAL_SEC,
+            first=180,
+            name="emergency_response",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 120},
+        )
+        log.info("🚨 급락 긴급 대응 등록 "
+                 "(VKOSPI p90 · 코스피 5일 p1 — 매도 없음, 신규 매수만 차단)")
+
         # v3.64 — VKOSPI 임계값 분기 재측정 (하루 1회 검사 · 90일마다 실제 재측정)
         app.job_queue.run_repeating(
             vkospi_threshold_review_job,
