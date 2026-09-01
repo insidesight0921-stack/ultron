@@ -1069,6 +1069,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await notice.edit_text(f"❌ 에이전트 오류: {e}")
         return
 
+    # v3.64 — 한글 명령어는 CommandHandler로 등록할 수 없다(ASCII만 허용).
+    # 여기서 먼저 걷어낸다. **LLM을 태우지 않는다** — 라우터가 "파라미터"를
+    # 종목명으로 오해할 수 있고, 이미 그런 사고가 있었다(관심종목 문장 오인).
+    _stripped = (text or "").strip()
+    if _stripped in ("파라미터", "/파라미터", "파라미터 목록"):
+        ctx.args = []
+        await cmd_params(update, ctx)
+        return
+    if _stripped.startswith(("파라미터 ", "/파라미터 ")):
+        ctx.args = _stripped.split()[1:]
+        await cmd_params(update, ctx)
+        return
+
     notice = await update.message.reply_text("🧭 라우팅 중...")
 
     # 1. 라우터 호출 (직전 N턴 history 포함)
@@ -4578,7 +4591,8 @@ def main() -> None:
     app.add_handler(CommandHandler("notes", cmd_notes))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("agent", cmd_agent))  # v3.42 범용 에이전트
-    app.add_handler(CommandHandler("파라미터", cmd_params))  # v3.64
+    # v3.64 — **명령어 이름은 ASCII만 된다.** `/파라미터`로 등록했다가 봇이
+    # 부팅 때마다 ValueError로 죽었다(2026-09-01). 한글은 handle_text 쪽에서 받는다.
     app.add_handler(CommandHandler("params", cmd_params))
     app.add_handler(CommandHandler("mode", cmd_mode_report))  # v3.64
     _setup_agent_tools()
