@@ -163,8 +163,12 @@ def load(path: Path) -> dict:
     if not p.exists():
         return {"active": {}, "history": []}
     raw = json.loads(p.read_text(encoding="utf-8"))
-    return {"active": dict(raw.get("active") or {}),
-            "history": list(raw.get("history") or [])}
+    # 아는 키만 골라 담지 않는다 — vkospi 원장에서 `last_reviewed_at`이
+    # 왕복마다 사라진 것과 같은 유형을 여기서도 막는다.
+    out = dict(raw)
+    out["active"] = dict(raw.get("active") or {})
+    out["history"] = list(raw.get("history") or [])
+    return out
 
 
 def save(path: Path, ledger: dict) -> None:

@@ -76,11 +76,28 @@ def test_the_check_does_not_touch_the_network():
 
 
 def test_a_failed_check_is_unknown_not_calm():
-    """판정 실패를 '정상'으로 두면 수집이 멈춘 날 조용히 안전해진다."""
-    body = _func(BOT, "_emergency_now")
-    idx = body.find("except")
-    tail = body[idx:]
-    assert "assess ( None , None )" in _code_only(tail).replace("(None", "( None")
+    """판정 실패를 '정상'으로 두면 수집이 멈춘 날 조용히 안전해진다.
+
+    (2026-09-01 정비: 문자열 슬라이스를 tokenize하던 방식은 except 뒤에 코드가
+    생기자 IndentationError로 깨졌다 — 검사도 AST로 한다.)
+    """
+    tree = ast.parse(BOT)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == "_emergency_now":
+            handlers = [h for sub in ast.walk(node)
+                        for h in getattr(sub, "handlers", [])]
+            assert handlers, "except 블록이 없다"
+            for h in handlers:
+                calls = [c for c in ast.walk(h) if isinstance(c, ast.Call)
+                         and isinstance(c.func, ast.Attribute)
+                         and c.func.attr == "assess"]
+                if calls:
+                    c = calls[0]
+                    assert all(isinstance(a, ast.Constant) and a.value is None
+                               for a in c.args), "실패 시 assess(None, None)이어야 한다"
+                    return
+    raise AssertionError("_emergency_now의 except에서 assess 호출을 못 찾았다")
 
 
 def test_the_job_only_speaks_on_a_transition():
@@ -94,3 +111,27 @@ def test_nothing_in_the_wiring_sells():
     body = _code_only(_func(BOT, "emergency_job")) + _code_only(_func(BOT, "_emergency_now"))
     for forbidden in ("execute_trade", "sell", "close_position"):
         assert forbidden not in body, f"매도 경로 흔적: {forbidden}"
+
+
+# ─── 2026-09-01 리뷰에서 나온 배선 보강 ─────────────
+
+
+def test_a_hold_keeps_the_previous_level_in_the_state_file():
+    """hold에서 '정상'을 저장하면 다음 턴이 이미 해제된 걸로 안다."""
+    body = _code_only(_func(BOT, "emergency_job"))
+    assert "level_to_save" in body
+    assert 'kind ==' in _func(BOT, "emergency_job")
+
+
+def test_the_buy_path_consults_the_saved_state_during_an_outage():
+    body = _code_only(_func(BOT, "_emergency_now"))
+    assert "effective" in body
+    assert "EMERGENCY_STATE_FILE" in body
+
+
+def test_the_vkospi_ledger_writers_share_a_lock():
+    """잡과 승인 콜백이 같은 원장을 읽고-고치고-쓴다 — 마지막 쓰기가 이기면
+    승인 항목이 조용히 사라질 수 있다."""
+    for fn in ("vkospi_threshold_review_job", "handle_vkospi_threshold_callback"):
+        body = _code_only(_func(BOT, fn))
+        assert "_VKOSPI_LEDGER_LOCK" in body, fn

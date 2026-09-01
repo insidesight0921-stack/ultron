@@ -223,3 +223,14 @@ def test_the_report_shows_the_band_split_and_the_base_rate():
     assert "③ 밴드별 다음 날 상승 비율" in msg
     assert "이겨야 할 기준" in msg
     assert "lag 스캔" in msg
+
+
+def test_a_long_daily_range_raises_the_row_limit_instead_of_truncating():
+    """기본 1000행인 채로 months>44면 응답이 조용히 잘린다 — 값은 멀쩡해
+    보이고 표본만 사라지는 유형(FRED limit에서 이미 겪었다)."""
+    import inspect
+
+    import quant_bot as qb
+
+    src = inspect.getsource(qb._fetch_ecos_series_raw)
+    assert "rows = max(" in src

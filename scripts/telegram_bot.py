@@ -2093,6 +2093,8 @@ def _emergency_now() -> dict:
     **매수 경로에서 불린다.** 여기서 네트워크를 쓰면 외부가 느려질 때 매수가
     같이 멈추고, 그 원인이 '긴급'으로 보인다.
     """
+    import json as _json
+
     import emergency_response as _er
 
     try:
@@ -2100,11 +2102,20 @@ def _emergency_now() -> dict:
 
         vk, _as_of = _pi._vkospi_latest()
         closes, _ = _pi._kospi_series()
-        return _er.assess(vk, closes)
+        fresh = _er.assess(vk, closes)
     except Exception:
         log.warning("긴급 상태 판정 실패 — 정상으로 두지 않고 미확보로 남긴다",
                     exc_info=True)
-        return _er.assess(None, None)
+        fresh = _er.assess(None, None)
+    # **수집이 끊겼다고 차단이 조용히 풀리면 안 된다.** 새 판정이 미확보뿐인
+    # '정상'이면 저장된 경보 상태를 유지한다(2026-09-01 리뷰에서 발견).
+    saved_level = None
+    try:
+        saved_level = _json.loads(
+            EMERGENCY_STATE_FILE.read_text(encoding="utf-8")).get("level")
+    except (OSError, ValueError):
+        pass
+    return _er.effective(fresh, saved_level)
 
 
 async def emergency_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2137,10 +2148,13 @@ async def emergency_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if kind is None and key == previous_key:
         return
 
+    # hold(경보 중 미확보)는 **이전 단계를 유지**한 채 저장한다 — 여기서
+    # '정상'을 써버리면 다음 턴의 transition이 이미 해제된 걸로 알게 된다.
+    level_to_save = previous_level if kind == "hold" else assessment["level"]
     try:
         EMERGENCY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         EMERGENCY_STATE_FILE.write_text(
-            _json.dumps({"level": assessment["level"], "key": key,
+            _json.dumps({"level": level_to_save, "key": key,
                          "at": now.isoformat(timespec="seconds")},
                         ensure_ascii=False), encoding="utf-8")
     except OSError:
@@ -2170,6 +2184,11 @@ async def emergency_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # 그래서 재측정만 자동이고, 반영은 사람이 누른다.
 VKOSPI_REVIEW_INTERVAL_SEC = 60 * 60 * 24
 VKOSPI_REVIEW_SAMPLE_DAYS = 365
+# 재측정 잡과 승인 콜백이 **같은 원장을 읽고-고치고-쓴다.** 콜백은 저장 전에
+# await(스냅샷 계산)를 지나므로 그 사이 잡이 끼어들면 마지막 쓰기가 이긴다 —
+# pending 소거나 승인 항목이 조용히 사라질 수 있다. 드물지만 원장은 이력이
+# 전부라 잃으면 복구가 없다.
+_VKOSPI_LEDGER_LOCK = asyncio.Lock()
 
 
 def _vkospi_review_snapshot() -> tuple[dict, list, float, float]:
@@ -2201,6 +2220,14 @@ async def vkospi_threshold_review_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     **`keep`이면 아무 말도 하지 않는다.** 분기마다 "이상 없음"을 보내면 그
     알림은 읽히지 않게 되고, 정작 깨졌을 때도 놓친다.
     """
+    await _VKOSPI_LEDGER_LOCK.acquire()
+    try:
+        return await _vkospi_review_locked(ctx)
+    finally:
+        _VKOSPI_LEDGER_LOCK.release()
+
+
+async def _vkospi_review_locked(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     import kium_bot as _kb
     import vkospi_threshold_review as _vtr
 
@@ -2278,9 +2305,6 @@ async def handle_vkospi_threshold_callback(update, ctx) -> None:
 
     사람이 누른 버튼은 근거가 아니다 — 죽은 가지를 만드는 값이면 거부한다.
     """
-    import kium_bot as _kb
-    import vkospi_threshold_review as _vtr
-
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
@@ -2289,6 +2313,14 @@ async def handle_vkospi_threshold_callback(update, ctx) -> None:
     parts = (query.data or "").split(":")
     action = parts[1] if len(parts) > 1 else ""
     await query.edit_message_reply_markup(reply_markup=None)
+
+    async with _VKOSPI_LEDGER_LOCK:
+        await _vkospi_apply_locked(query, uid, action, parts)
+
+
+async def _vkospi_apply_locked(query, uid, action, parts) -> None:
+    import kium_bot as _kb
+    import vkospi_threshold_review as _vtr
 
     try:
         ledger = _vtr.load_ledger(_kb.VKOSPI_LEDGER_FILE)

@@ -126,6 +126,10 @@ def _fetch_ecos_series_raw(stat_code: str, item_code: str, cycle: str,
         # 달력일 기준으로 넉넉히 잡는다(휴장일이 빠지므로 거래일은 더 적다).
         start = (today - timedelta(days=int(months * 31) + 10)).strftime("%Y%m%d")
         end = today.strftime("%Y%m%d")
+        # **행 수도 기간에 맞춘다.** 기본 1000행인 채로 months>44쯤 되면
+        # 응답이 조용히 잘린다 — 값은 멀쩡해 보이고 표본만 사라지는 유형
+        # (FRED limit에서 이미 겪었다).
+        rows = max(int(rows or 0), int(months * 31) + 20)
     else:
         raise ValueError(f"cycle 미지원: {cycle!r}")
 

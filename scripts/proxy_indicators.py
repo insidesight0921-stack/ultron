@@ -323,7 +323,12 @@ def _fx_series(*, refresh: bool = True) -> tuple[list[float], Optional[str]]:
     try:
         import quant_bot as qb
 
-        payload = qb._fetch_ecos_series_raw("731Y001", "0000001", "D", 3)
+        # 시리즈 코드는 fx_calibrate가 원본이다 — 두 곳에 같은 코드를 두면
+        # 한쪽만 바뀌는 날이 온다(오늘 vix_calibrate에서 실제로 겪었다).
+        from fx_calibrate import FX_SERIES as _FX
+
+        payload = qb._fetch_ecos_series_raw(
+            _FX["stat_code"], _FX["item_code"], _FX["cycle"], 3)
         series = qb._parse_ecos_series(payload)
         if not series:
             log.warning("원/달러 ECOS 응답이 비었다 — 변화율을 내지 않는다")

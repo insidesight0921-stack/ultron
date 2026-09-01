@@ -71,7 +71,7 @@ def test_the_job_does_not_fetch_over_the_network():
 
 def test_a_kept_verdict_sends_nothing():
     """분기마다 '이상 없음'을 보내면 그 알림은 읽히지 않게 된다."""
-    body = _func(BOT, "vkospi_threshold_review_job")
+    body = _func(BOT, "_vkospi_review_locked")
     idx = body.find('"keep"')
     assert idx > 0
     tail = body[idx:idx + 700]
@@ -80,19 +80,19 @@ def test_a_kept_verdict_sends_nothing():
 
 def test_approval_goes_through_validation_not_straight_to_the_ledger():
     """**버튼은 근거가 아니다** — approve()가 검증을 다시 돌린다."""
-    body = _code_only(_func(BOT, "handle_vkospi_threshold_callback"))
+    body = _code_only(_func(BOT, "_vkospi_apply_locked"))
     assert "_vtr . approve" in body
     assert "ValueError" in body      # 거부를 잡아서 사용자에게 말한다
 
 
 def test_a_rejected_approval_says_nothing_changed():
-    body = _func(BOT, "handle_vkospi_threshold_callback")
+    body = _func(BOT, "_vkospi_apply_locked")
     assert "반영하지 않았습니다" in body
 
 
 def test_a_corrupt_ledger_stops_the_job_instead_of_overwriting_it():
     """빈 원장으로 덮어쓰면 승인 이력이 사라지고 초기값으로 되돌아간다."""
-    body = _func(BOT, "vkospi_threshold_review_job")
+    body = _func(BOT, "_vkospi_review_locked")
     idx = body.find("load_ledger")
     tail = body[idx:idx + 500]
     assert "return" in tail
@@ -106,3 +106,12 @@ def test_the_weight_rule_reads_the_ledger_not_only_the_constants():
         (SCRIPTS / "kium_bot.py").read_text(encoding="utf-8"),
         "compute_weight_recommendation"))
     assert "active_thresholds ( )" in src
+
+
+def test_the_wrappers_actually_take_the_lock_before_delegating():
+    """2026-09-01 락 리팩터링: 본문이 _locked로 옮겨졌다 — 이 테스트들이 옛
+    함수를 계속 보면 아무것도 안 지키게 되므로, 위임 구조 자체를 고정한다."""
+    job = _code_only(_func(BOT, "vkospi_threshold_review_job"))
+    assert "_VKOSPI_LEDGER_LOCK" in job and "_vkospi_review_locked" in job
+    cb = _code_only(_func(BOT, "handle_vkospi_threshold_callback"))
+    assert "_VKOSPI_LEDGER_LOCK" in cb and "_vkospi_apply_locked" in cb

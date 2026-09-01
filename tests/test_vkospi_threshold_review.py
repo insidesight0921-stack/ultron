@@ -231,3 +231,28 @@ def test_a_rejected_proposal_says_approval_will_not_apply():
                         "check": vtr.validate(vals, 90.0, 12.0)}
     msg = vtr.format_proposal(rev, current_high=60.0, current_low=10.0)
     assert "승인해도 반영되지 않습니다" in msg
+
+
+# ─── 원장 왕복에서 필드가 사라지면 안 된다 (2026-09-01 리뷰) ──
+#
+# load_ledger가 아는 키만 골라 담아서 `last_reviewed_at`이 저장→로드마다
+# 사라졌다. 그 결과 분기(90일) 재측정이 **매일** 돌았다 — verdict가 keep이라
+# 알림은 없었지만, 설계한 주기가 조용히 무너져 있었다.
+
+
+def test_the_ledger_round_trip_keeps_every_field(tmp_path):
+    p = tmp_path / "led.json"
+    led = {"active": None, "history": [], "pending": None,
+           "last_reviewed_at": "2026-09-01"}
+    vtr.save_ledger(p, led)
+    back = vtr.load_ledger(p)
+    assert back.get("last_reviewed_at") == "2026-09-01"
+
+
+def test_yesterdays_review_makes_today_not_due(tmp_path):
+    """이게 무너지면 90일 주기가 1일 주기가 된다."""
+    p = tmp_path / "led.json"
+    vtr.save_ledger(p, {"active": None, "history": [],
+                        "last_reviewed_at": "2026-09-01"})
+    assert vtr.due_for_review(vtr.load_ledger(p), today="2026-09-02") is False
+    assert vtr.due_for_review(vtr.load_ledger(p), today="2026-12-15") is True

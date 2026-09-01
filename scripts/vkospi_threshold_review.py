@@ -145,9 +145,14 @@ def load_ledger(path: Path) -> dict:
     if not p.exists():
         return {"active": None, "history": []}
     raw = json.loads(p.read_text(encoding="utf-8"))
-    return {"active": raw.get("active"),
-            "history": list(raw.get("history") or []),
-            "pending": raw.get("pending")}
+    # **아는 키만 골라 담지 않는다.** 처음에 active/history/pending만 옮겼더니
+    # `last_reviewed_at`이 왕복마다 사라져 분기 재측정이 **매일** 돌았다
+    # (2026-09-01 리뷰에서 발견). 원장은 통째로 보존하고 필수 키만 보정한다.
+    out = dict(raw)
+    out["active"] = raw.get("active")
+    out["history"] = list(raw.get("history") or [])
+    out["pending"] = raw.get("pending")
+    return out
 
 
 def active_thresholds(ledger: dict, *, fallback_high: float,
@@ -287,6 +292,6 @@ def format_proposal(rev: dict, *, current_high: float, current_low: float) -> st
             lines.append("  → 승인해도 반영되지 않습니다. 규칙 형태를 다시 봐야 합니다.")
     if rev["verdict"] == "propose":
         lines.append("")
-        lines.append("_승인하면 원장에 기록되고 그때부터 적용됩니다._")
-        lines.append("_승인 전까지는 지금 값이 그대로 돕니다._")
+        lines.append("승인하면 원장에 기록되고 그때부터 적용됩니다.")
+        lines.append("승인 전까지는 지금 값이 그대로 돕니다.")
     return "\n".join(lines)

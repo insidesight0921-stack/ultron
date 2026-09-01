@@ -181,3 +181,51 @@ def test_entries_not_days_are_what_the_user_sees():
     entries += 1 if inside[0] else 0
     per_year = entries / len(days) * 252
     assert per_year <= 6, f"연 {per_year:.1f}회 — 긴급이라기엔 잦다"
+
+
+# ─── 미확보는 해제의 근거가 될 수 없다 (2026-09-01 리뷰) ──
+#
+# 경보 중에 수집이 끊기면 트리거가 비어 '정상'이 나오고, 그대로면
+# 「긴급 해제·차단 풉니다」가 나갔다. 진입 쪽만 막고(미확보를 트리거로
+# 안 셈) 해제 쪽을 안 막은 것이다.
+
+
+def test_an_outage_during_an_alert_holds_instead_of_clearing():
+    outage = er.assess(None, None)
+    assert outage["level"] == er.NORMAL          # 판정 자체는 정상(트리거 없음)
+    assert er.transition(er.ALERT, outage) == "hold"
+    assert er.transition(er.SEVERE, outage) == "hold"
+
+
+def test_a_real_calm_reading_still_clears():
+    """값이 돌아와 정상임을 보여주면 해제된다 — hold가 영구가 되면 안 된다."""
+    calm = er.assess(30.0, [100.0] * 10)
+    assert not calm["unknown"]
+    assert er.transition(er.ALERT, calm) == "clear"
+
+
+def test_an_outage_with_no_prior_alert_is_not_a_hold():
+    outage = er.assess(None, None)
+    assert er.transition(er.NORMAL, outage) is None
+
+
+def test_the_hold_message_says_the_block_stays():
+    outage = er.assess(None, None)
+    msg = er.format_alert(outage, kind="hold", previous=er.ALERT)
+    assert "차단을 유지" in msg and "미확보" in msg
+
+
+def test_the_buy_path_keeps_blocking_through_an_outage():
+    """수집이 끊겼다고 차단이 조용히 풀리면 안 된다."""
+    outage = er.assess(None, None)
+    held = er.effective(outage, er.ALERT)
+    assert held["level"] == er.ALERT
+    assert held.get("held") is True
+    assert er.blocks_new_buys(held) is True
+
+
+def test_effective_does_not_invent_an_alert_from_nothing():
+    calm = er.assess(30.0, [100.0] * 10)
+    assert er.effective(calm, er.ALERT)["level"] == er.NORMAL   # 진짜 정상은 그대로
+    outage = er.assess(None, None)
+    assert er.effective(outage, None)["level"] == er.NORMAL     # 저장 상태 없으면 그대로

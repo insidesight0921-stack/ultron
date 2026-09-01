@@ -142,9 +142,19 @@ def state_key(assessment: dict) -> str:
 
 
 def transition(previous: Optional[str], now: dict) -> Optional[str]:
-    """`enter` / `escalate` / `deescalate` / `clear` / None(순수)."""
+    """`enter` / `escalate` / `deescalate` / `clear` / `hold` / None(순수).
+
+    **미확보는 해제의 근거가 될 수 없다.** 경보 중에 수집이 끊기면 트리거가
+    비어 판정이 '정상'으로 나오는데, 그건 시장이 진정된 게 아니라 **모르는
+    것**이다. 그 상태에서 clear를 돌려주면 "긴급 해제·차단 풉니다"가 나간다 —
+    2026-09-01 리뷰에서 발견. 진입 쪽만 막고(미확보를 트리거로 안 셈) 해제
+    쪽을 안 막은 것. 그래서 그 경우는 `hold`다: 상태를 유지하고, 판단을
+    보류했다고 말한다. 해제는 **값이 돌아와서 정상임을 보여줄 때만** 한다.
+    """
     lvl = (now or {}).get("level", NORMAL)
     prev = previous or NORMAL
+    if prev != NORMAL and lvl == NORMAL and (now or {}).get("unknown"):
+        return "hold"
     if prev == lvl:
         return None
     a, b = LEVEL_ORDER.get(prev, 0), LEVEL_ORDER.get(lvl, 0)
@@ -155,11 +165,33 @@ def transition(previous: Optional[str], now: dict) -> Optional[str]:
     return "escalate" if b > a else "deescalate"
 
 
+def effective(assessment: dict, saved_level: Optional[str]) -> dict:
+    """매수 경로가 쓸 **유효 판정**(순수).
+
+    새 판정이 '정상'인데 근거가 미확보뿐이고 저장된 상태가 경보 이상이면,
+    저장된 상태를 유지한다 — 수집이 끊겼다고 차단이 조용히 풀리면 안 된다.
+    """
+    a = dict(assessment or {})
+    if (saved_level and saved_level != NORMAL
+            and a.get("level") == NORMAL and a.get("unknown")):
+        a["level"] = saved_level
+        a["held"] = True
+    return a
+
+
 def format_alert(assessment: dict, *, kind: str,
                  previous: Optional[str] = None) -> str:
     """사람이 읽는 알림(순수). **무엇을 자동으로 했고 무엇을 안 했는지 말한다.**"""
     a = assessment or {}
     lvl = a.get("level", NORMAL)
+    if kind == "hold":
+        return "\n".join([
+            f"⚠️ 긴급 상태 판단 보류 — {previous} 유지",
+            f"   미확보: {', '.join(a.get('unknown') or [])}",
+            "   지표를 읽지 못해 해제 여부를 판단할 수 없습니다.",
+            "   신규 매수 차단을 유지합니다 — 값이 돌아와 정상임이",
+            "   확인될 때만 해제합니다. 수집이 계속 실패하면 점검이 필요합니다.",
+        ])
     if kind == "clear":
         lines = [f"✅ 긴급 상태 해제 — {previous} → {lvl}"]
         if a.get("vkospi") is not None:
@@ -177,14 +209,14 @@ def format_alert(assessment: dict, *, kind: str,
     for t in a.get("triggers") or []:
         lines.append(f"  • {t['detail']}")
     if a.get("unknown"):
-        # **미확보를 조용히 넘기지 않는다.** 수집이 멈춘 날 안전하다고
+        # 미확보를 조용히 넘기지 않는다. 수집이 멈춘 날 안전하다고
         # 말하는 것이 이 프로젝트에서 반복된 실패다.
         lines.append(f"  • ⚠️ 미확보: {', '.join(a['unknown'])} — 판정에서 빠졌습니다")
     lines.append("")
-    lines.append("자동으로 한 것: **신규 매수 차단**(기존 보유는 그대로)")
+    lines.append("자동으로 한 것: 신규 매수 차단(기존 보유는 그대로)")
     lines.append("사람이 정할 것: 매도·현금 전환 — 되돌릴 수 없어 자동으로 하지 않습니다")
     lines.append("")
-    lines.append(f"_임계값은 {MEASURED_AT} 실측 분포 기준"
-                 f"(VKOSPI p90 · 코스피 {DROP_WINDOW}일 p1)입니다._")
-    lines.append("_같은 상태가 이어지는 동안에는 다시 보내지 않습니다._")
+    lines.append(f"임계값은 {MEASURED_AT} 실측 분포 기준"
+                 f"(VKOSPI p90 · 코스피 {DROP_WINDOW}일 p1)입니다.")
+    lines.append("같은 상태가 이어지는 동안에는 다시 보내지 않습니다.")
     return "\n".join(lines)
