@@ -698,33 +698,97 @@ def test_weight_kospi_below_ma_uses_50():
 
 
 def test_weight_high_vkospi_reduces_equity():
-    """VKOSPI 35 → 채권 +10%p (70 → 60)."""
+    """VKOSPI가 상단 임계 위 → 채권 +10%p (70 → 60)."""
     prices = pd.Series(list(range(200, 400)))
-    out = kb.compute_weight_recommendation(vkospi=35.0, kospi_close=prices)
+    out = kb.compute_weight_recommendation(
+        vkospi=kb.VKOSPI_HIGH + 1, kospi_close=prices)
     assert out["vkospi_band"] == "high"
     assert out["equity_weight"] == 0.60
 
 
 def test_weight_low_vkospi_boosts_equity():
     prices = pd.Series(list(range(200, 400)))
-    out = kb.compute_weight_recommendation(vkospi=12.0, kospi_close=prices)
+    out = kb.compute_weight_recommendation(
+        vkospi=kb.VKOSPI_LOW - 1, kospi_close=prices)
     assert out["vkospi_band"] == "low"
     assert out["equity_weight"] == 0.80
 
 
 def test_weight_mid_vkospi_neutral():
     prices = pd.Series(list(range(200, 400)))
-    out = kb.compute_weight_recommendation(vkospi=20.0, kospi_close=prices)
+    mid = (kb.VKOSPI_HIGH + kb.VKOSPI_LOW) / 2
+    out = kb.compute_weight_recommendation(vkospi=mid, kospi_close=prices)
     assert out["vkospi_band"] == "mid"
     assert out["equity_weight"] == 0.70  # 변화 없음
 
 
 def test_weight_clamping():
-    """KOSPI < MA + VKOSPI 35 → 50 - 10 = 40 (하한 30 안 닿음)."""
+    """KOSPI < MA + VKOSPI 상단 → 50 - 10 = 40 (하한 30 안 닿음)."""
     prices = pd.Series(list(range(400, 200, -1)))
-    out = kb.compute_weight_recommendation(vkospi=35.0, kospi_close=prices)
+    out = kb.compute_weight_recommendation(
+        vkospi=kb.VKOSPI_HIGH + 1, kospi_close=prices)
     assert out["equity_weight"] == 0.40
     assert 0.30 <= out["equity_weight"] <= 0.90
+
+
+# ─── 임계값의 유래 (2026-09-01 실측) ────────────────
+#
+# v3.17의 >30 / <15는 교과서 상식에서 가져온 상수였고, 407일 실측에서 하단이
+# **0일** 걸렸다 — 죽은 가지였다. 아래 테스트들은 그 실패가 되돌아오는 것을
+# 막는다. 값을 바꾸려는 사람은 분포를 다시 재야 한다.
+
+
+def test_the_textbook_thresholds_are_gone():
+    """>30 / <15로 되돌아가면 하단이 다시 죽는다."""
+    assert kb.VKOSPI_HIGH != 30
+    assert kb.VKOSPI_LOW != 15
+    # 실측 p20이 20.69이므로 하단 임계가 그보다 한참 아래면 또 죽은 가지다.
+    assert kb.VKOSPI_LOW > 17.67, "실측 최저(17.67)보다 낮으면 영원히 안 걸린다"
+
+
+def test_thresholds_are_ordered_and_leave_a_neutral_band():
+    assert kb.VKOSPI_LOW < kb.VKOSPI_HIGH
+    mid = (kb.VKOSPI_HIGH + kb.VKOSPI_LOW) / 2
+    prices = pd.Series(list(range(200, 400)))
+    assert kb.compute_weight_recommendation(
+        vkospi=mid, kospi_close=prices)["vkospi_band"] == "mid"
+
+
+def test_thresholds_carry_their_measurement_provenance():
+    """숫자만 있고 근거가 없으면 다음 사람이 또 상식으로 바꾼다."""
+    assert kb.VKOSPI_MEASURED_N >= 250
+    assert kb.VKOSPI_MEASURED_AT.count("-") == 2
+
+
+def _cached_vkospi_closes():
+    """수집된 캐시가 있으면 실측 계열, 없으면 None (CI에서는 없음)."""
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    files = sorted(
+        (root / "data" / "shareable" / "cache" / "indices")
+        .glob("market_index_VKOSPI_*.json"))
+    if not files:
+        return None
+    payload = json.loads(files[-1].read_text(encoding="utf-8"))
+    return [float(c) for c in payload["series"]["close"]]
+
+
+def test_neither_branch_is_dead_on_the_measured_distribution():
+    """**이 프로젝트가 실제로 겪은 실패**: 하단이 407일 중 0일 걸렸다."""
+    closes = _cached_vkospi_closes()
+    if not closes:
+        pytest.skip("VKOSPI 캐시 없음 — 맥에서 --collect 후에만 검증된다")
+    n = len(closes)
+    above = sum(1 for v in closes if v > kb.VKOSPI_HIGH)
+    below = sum(1 for v in closes if v < kb.VKOSPI_LOW)
+    assert above > 0, "상단이 한 번도 안 걸린다 — 항이 없는 것과 같다"
+    assert below > 0, "하단이 한 번도 안 걸린다 — 죽은 가지다"
+    assert above < n, "상단이 늘 참이면 규칙이 아니라 상수다(−10%p 고정)"
+    assert below < n
+    # 상·하위 20% 근처여야 한다. ±10%p까지 허용(분포가 움직이므로).
+    assert 10 <= above / n * 100 <= 30
+    assert 10 <= below / n * 100 <= 30
 
 
 # ─── format_scan_result + crash + weight 통합 ──────

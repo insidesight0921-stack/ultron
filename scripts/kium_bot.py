@@ -551,7 +551,32 @@ def detect_crash_signals(
     }
 
 
-# ─── VKOSPI 비중 룰 (v3.17) ────────────────────────
+# ─── VKOSPI 비중 룰 (v3.17 → v3.64 임계값 실측 교체) ──
+
+# **이 값은 유래가 있다.** v3.17의 >30 / <15는 "VKOSPI는 보통 15~30을
+# 오간다"는 교과서 상식에서 가져온 상수였고, 이 시장에서 재보니 틀렸다.
+#
+#   2026-09-01 실측 · KRX OPEN API · 407거래일(20241226~20260831)
+#     최저 17.67 · p20 20.69 · 중앙 28.40 · p80 60.59 · 최고 96.94
+#     기존 임계값: 상단(>30) 198일 48.6% · **하단(<15) 0일 — 죽은 가지**
+#
+# 이 계열이 진짜 변동성지수인지는 음성 대조로 확인했다: KOSPI 20일 실현
+# 변동성(연율)과 상관 +0.837, 배수 중앙 1.28 — 내재>실현이라는 정상 부호다.
+#
+# 임계값은 분포의 상·하위 20%로 잡는다. 레벨을 백분위로 정하면 "평소보다
+# 불안하면 채권, 평소보다 잔잔하면 주식"이라는 **뜻**이 유지된다.
+VKOSPI_HIGH = 60.6   # p80. 초과 81일(19.9%)
+VKOSPI_LOW = 20.7    # p20. 미만 82일(20.1%)
+
+# **아직 증명된 규칙이 아니다.** 362일 모의(주식/채권 연3%)에서 고정 70%
+# 대비 누적 +106.8%→+106.0%(동급), MDD 28.29%→24.40%, 샤프 1.65→1.82로
+# 개선됐고 상단 임계 45~75 구간에서 결과가 평평했다(과최적화 아님). 그러나
+# ① MDD 개선은 2026년 급락 **한 번**에 전부 기대고 있고, ② VKOSPI 밴드별
+# 향후 20일 KOSPI 수익률 차이는 순환이동 순열검정 p=0.061로 우연과 구분되지
+# 않는다(독립창 17개뿐 — 유의성 확보엔 5~9년 필요).
+# 그래서 이건 "수익을 올리는 규칙"이 아니라 **방어 규칙**으로만 붙인다.
+VKOSPI_MEASURED_AT = "2026-09-01"
+VKOSPI_MEASURED_N = 407
 
 
 def compute_weight_recommendation(
@@ -562,8 +587,12 @@ def compute_weight_recommendation(
     """주식/채권 비중 룰.
 
     1차 (KOSPI 200일선): 위 → 주식 70%, 아래 → 50% (균형)
-    2차 (VKOSPI):       > 30 → 채권 +10%p, < 15 → 주식 +10%p
+    2차 (VKOSPI):       > VKOSPI_HIGH → 채권 +10%p,
+                        < VKOSPI_LOW  → 주식 +10%p
     클램프: 주식 30~90%.
+
+    임계값의 유래와 한계는 모듈 상단 주석을 볼 것. 요약하면 **분포에서 잰
+    값이고, 방어 규칙으로만 쓴다.**
     """
     base_equity = 0.70  # 디폴트
     parts: list[str] = []
@@ -592,14 +621,16 @@ def compute_weight_recommendation(
     if vkospi is not None:
         try:
             v = float(vkospi)
-            if v > 30:
+            if v > VKOSPI_HIGH:
                 vkospi_band = "high"
                 base_equity -= 0.10
-                parts.append(f"VKOSPI {v:.1f} > 30 → 채권 +10%p")
-            elif v < 15:
+                parts.append(
+                    f"VKOSPI {v:.1f} > {VKOSPI_HIGH}(상위 20%) → 채권 +10%p")
+            elif v < VKOSPI_LOW:
                 vkospi_band = "low"
                 base_equity += 0.10
-                parts.append(f"VKOSPI {v:.1f} < 15 → 주식 +10%p")
+                parts.append(
+                    f"VKOSPI {v:.1f} < {VKOSPI_LOW}(하위 20%) → 주식 +10%p")
             else:
                 vkospi_band = "mid"
                 parts.append(f"VKOSPI {v:.1f} 중립")

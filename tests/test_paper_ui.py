@@ -162,7 +162,12 @@ def test_kium_scan_includes_weight_when_crash_on(client, monkeypatch):
 
 
 def test_kium_scan_high_vkospi_reduces_equity(client, monkeypatch):
-    _stub_kium(monkeypatch, vkospi_value=35.0)
+    # 임계값은 실측에서 오므로 하드코딩하지 않는다(kium_bot.VKOSPI_HIGH).
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "scripts"))
+    import kium_bot as _kb
+    _stub_kium(monkeypatch, vkospi_value=_kb.VKOSPI_HIGH + 1)
     r = client.get("/api/paper/kium-scan?top_n=2&with_crash_signals=true")
     d = r.json()
     assert d["weight"]["vkospi_band"] == "high"
