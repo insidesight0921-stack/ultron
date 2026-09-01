@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import pytest  # noqa: E402
 import nowcast_eval as ne
 
 
@@ -262,3 +263,58 @@ def test_the_vkospi_predictor_is_empty_without_a_cache(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
     assert ne._vkospi_predictions(thresholds=(60.6, 20.7)) == []
+
+
+# ─── 이겨야 할 상대는 동전이 아니다 (2026-09-01) ────
+#
+# progress()는 "적중률 60%를 무작위 50%와 가르려면 276건"이라고 표시해 왔다.
+# 그런데 이 표본의 '항상 상승'은 **63.4%**다 — 60%는 목표가 아니라 기준선
+# **미달**이었고, 진행률은 없는 목표를 향해 51.4%를 가리키고 있었다.
+
+
+def test_the_bar_is_the_up_share_not_a_coin():
+    truth = {f"d{i}": (ne.UP if i % 10 < 7 else ne.DOWN) for i in range(100)}
+    assert ne.base_rate(truth) == pytest.approx(0.70)
+
+
+def test_an_empty_truth_has_no_bar_rather_than_a_fake_one():
+    assert ne.base_rate({}) is None
+
+
+def test_beating_a_higher_bar_costs_far_more_sample():
+    """기준선이 높을수록 같은 우위를 증명하기 어렵다."""
+    easy = ne.required_n(0.60, 0.50, k=4)
+    hard = ne.required_n(0.70, 0.634, k=4)
+    assert hard > easy
+
+
+def test_the_bar_table_speaks_in_margins_not_fixed_targets():
+    """기준선은 표본마다 다르다 — 차이(%p)로 말해야 뜻이 유지된다."""
+    rows = ne.bar_table(0.634, margins=(0.05, 0.10))
+    assert rows[0]["target"] == pytest.approx(0.684)
+    assert rows[0]["need"] > rows[1]["need"]      # 작은 우위일수록 표본이 많이 든다
+
+
+def test_a_one_sided_sample_is_named_as_such():
+    """**표본 수만 채우면 되는 게 아니다.** 국면이 안 바뀌면 판정할 수 없다."""
+    truth = {f"d{i}": (ne.UP if i % 10 < 7 else ne.DOWN) for i in range(100)}
+    warn = ne.regime_warning(truth)
+    assert warn and "한 국면에 쏠려" in warn
+
+
+def test_a_balanced_sample_gets_no_warning():
+    truth = {f"d{i}": (ne.UP if i % 2 else ne.DOWN) for i in range(100)}
+    assert ne.regime_warning(truth) is None
+
+
+def test_a_one_sided_down_sample_is_also_named():
+    truth = {f"d{i}": (ne.DOWN if i % 10 < 7 else ne.UP) for i in range(100)}
+    warn = ne.regime_warning(truth)
+    assert warn and "하락일" in warn
+
+
+def test_the_report_leads_with_the_bar_not_with_a_progress_bar():
+    truth = {f"d{i}": (ne.UP if i % 10 < 7 else ne.DOWN) for i in range(100)}
+    msg = ne.format_report({}, truth)
+    assert "이겨야 할 기준선" in msg
+    assert "무작위 50%가 아니다" in msg

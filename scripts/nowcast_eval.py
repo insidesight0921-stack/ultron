@@ -203,7 +203,11 @@ def control_rate(predictions: Iterable[tuple], truth: dict):
 
 def required_n(rate: float, base: float = 0.5, *, alpha: float = 0.05,
                k: int = 1, power: float = 0.8) -> int:
-    """이 정도 적중률을 우연과 가르려면 몇 건이 필요한가(순수)."""
+    """`rate`를 `base`와 가르려면 몇 건이 필요한가(순수).
+
+    **`base`의 기본값 0.5는 '무작위 동전'이지 '이겨야 할 상대'가 아니다.**
+    방향 예측에서 상대는 '항상 상승'이고 그 값은 표본마다 다르다.
+    """
     h = 2 * math.asin(math.sqrt(rate)) - 2 * math.asin(math.sqrt(base))
     if h == 0:
         return 0
@@ -227,13 +231,64 @@ def required_n(rate: float, base: float = 0.5, *, alpha: float = 0.05,
 N_INDICATORS = 4
 
 
-def progress(n: int, rate: float = 0.60, k: int = N_INDICATORS) -> dict:
-    """지금 표본이 목표의 몇 %인가(순수). **아직 멀었다는 것을 숨기지 않는다.**"""
-    need = required_n(rate, k=k)
-    return {"have": n, "need": need,
+def base_rate(truth: dict) -> Optional[float]:
+    """이 표본에서 '항상 상승'의 적중률(순수) — **진짜 이겨야 할 기준선.**"""
+    vals = [v for v in (truth or {}).values() if v in (UP, DOWN)]
+    if not vals:
+        return None
+    return sum(1 for v in vals if v == UP) / len(vals)
+
+
+def progress(n: int, rate: float = 0.60, k: int = N_INDICATORS,
+             base: float = 0.5) -> dict:
+    """지금 표본이 목표의 몇 %인가(순수). **아직 멀었다는 것을 숨기지 않는다.**
+
+    **`base`를 0.5로 두면 안 되는 경우가 대부분이다.** 방향 예측에서 이겨야 할
+    상대는 동전이 아니라 '항상 상승'이고, 그 값은 표본의 상승일 비율이다.
+    2026-09-01 실측에서 이 비율이 **63.4%**였다 — 즉 목표로 잡아둔 60%는
+    **기준선 미달**이었고, 진행률 표시는 없는 목표를 향해 51.4%를 가리키고
+    있었다. 무작위 대조(50%)와 기준선 대조(63.4%)는 다른 것이다.
+    """
+    need = required_n(rate, base, k=k)
+    return {"have": n, "need": need, "base": base, "target": rate,
             "pct": round(n / need * 100, 1) if need else None,
             "trading_days_left": max(0, need - n),
             "years_left": round(max(0, need - n) / 252, 1)}
+
+
+def bar_table(base: float, *, margins=(0.05, 0.10, 0.15),
+              k: int = N_INDICATORS) -> list[dict]:
+    """기준선을 몇 %p 이기려면 표본이 얼마나 필요한가(순수).
+
+    목표 적중률을 고정하지 않는다 — 기준선이 표본마다 다르므로 **차이(%p)로
+    말해야 뜻이 유지된다.**
+    """
+    out = []
+    for m in margins:
+        target = min(base + m, 0.999)
+        need = required_n(target, base, k=k)
+        out.append({"margin": m, "target": target, "need": need,
+                    "years": round(need / 252, 1)})
+    return out
+
+
+def regime_warning(truth: dict, *, extreme: float = 0.60) -> Optional[str]:
+    """표본이 한 국면에 쏠려 있는가(순수).
+
+    **표본 수만 채우면 되는 게 아니다.** 상승일이 63%인 구간에서는 어떤
+    지표도 '항상 상승'을 이기기 어렵고, 이기더라도 그 지표가 하락 국면에서
+    작동한다는 근거가 되지 않는다. 표본에 **국면 전환이 들어와야** 한다.
+    """
+    b = base_rate(truth)
+    if b is None:
+        return None
+    if b >= extreme:
+        return (f"이 표본은 상승일이 {b*100:.1f}%다 — 한 국면에 쏠려 있다. "
+                "표본 수를 채워도 하락 국면이 들어오기 전에는 판정할 수 없다.")
+    if b <= 1 - extreme:
+        return (f"이 표본은 하락일이 {(1-b)*100:.1f}%다 — 한 국면에 쏠려 있다. "
+                "표본 수를 채워도 상승 국면이 들어오기 전에는 판정할 수 없다.")
+    return None
 
 
 # ─── 표시 ────────────────────────────────────────────
@@ -262,11 +317,16 @@ def format_report(results: dict, truth: dict, *, target: str = "다음 거래일
                      f"{ctrl:>8}{pctl:>8}  {r['verdict']}")
     lines.append("")
     best = max((r.get("n") or 0) for r in results.values()) if results else 0
-    p = progress(best)
-    lines.append(f"표본 진행: {p['have']}/{p['need']}건 ({p['pct']}%) — "
-                 f"적중률 60%를 우연과 가르는 기준(지표 {N_INDICATORS}종 보정)")
-    if p["trading_days_left"]:
-        lines.append(f"   남은 거래일 약 {p['trading_days_left']}일 (~{p['years_left']}년)")
+    b = base_rate(truth)
+    lines.append(f"표본 {best}건 · **이겨야 할 기준선 '항상 상승' {b*100:.1f}%**")
+    lines.append(f"   (무작위 50%가 아니다 — 기준선을 넘지 못하면 발견이 아니다)")
+    for row in bar_table(b):
+        lines.append(f"   기준선 +{row['margin']*100:.0f}%p"
+                     f"(적중 {row['target']*100:.1f}%) 판정에 "
+                     f"{row['need']:,}건 (~{row['years']}년)")
+    warn = regime_warning(truth)
+    if warn:
+        lines.append(f"   ⚠️ {warn}")
     lines.append("")
     lines.append("_백분위 95 미만은 우연으로 설명되는 범위입니다._")
     lines.append("_'항상 상승'을 못 이기는 지표는 방향 정보를 담고 있지 않습니다._")
