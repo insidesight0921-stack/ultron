@@ -258,6 +258,94 @@ def _vkospi_latest(*, today: Optional[str] = None,
         return None, None
 
 
+# 환율 변화율을 재는 구간과, 캐시가 이만큼 낡으면 쓰지 않는 기준.
+FX_CHANGE_DAYS = 20
+FX_STALE_DAYS = 7
+
+
+def _fx_series(*, refresh: bool = True) -> tuple[list[float], Optional[str]]:
+    """원/달러 일간 종가 (오름차순, 기준일). 캐시 우선, 낡으면 ECOS로 갱신.
+
+    **여기가 v3.64까지 비어 있던 자리다.** `_fetch_ecos_series_raw`가 월간만
+    지원해 원/달러는 최신값 하나만 들어왔고, 그래서 `fx_change`가 상수 `None`
+    이었다 — `fx_state`는 줄곧 `unknown`. 임계값이 안 걸린 게 아니라
+    **계산 자체를 한 적이 없었다.**
+    """
+    import json
+    from datetime import date, datetime
+
+    import price_sanity as ps
+
+    root = ps._cache_root() / "fx"
+    def _read() -> tuple[list[float], Optional[str]]:
+        files = sorted(root.glob("usdkrw_*.json"))
+        if not files:
+            return [], None
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        series = payload.get("series") or {}
+        closes = [float(c) for c in series.get("close") or []]
+        dates = [str(d) for d in series.get("date") or []]
+        return closes, (dates[-1] if dates else None)
+
+    def _stale(as_of: Optional[str]) -> bool:
+        if not as_of:
+            return True
+        try:
+            gap = (datetime.strptime(date.today().strftime("%Y%m%d"), "%Y%m%d")
+                   - datetime.strptime(as_of, "%Y%m%d")).days
+        except ValueError:
+            return True
+        return gap > FX_STALE_DAYS
+
+    try:
+        closes, as_of = _read()
+    except (OSError, ValueError) as exc:
+        log.warning("원/달러 캐시 읽기 실패: %s", exc)
+        closes, as_of = [], None
+
+    if not refresh or not _stale(as_of):
+        return closes, as_of
+
+    # 캐시가 없거나 낡았다 — 받아온다. **실패해도 낡은 값을 쓰지 않는다.**
+    try:
+        import quant_bot as qb
+
+        payload = qb._fetch_ecos_series_raw("731Y001", "0000001", "D", 3)
+        series = qb._parse_ecos_series(payload)
+        if not series:
+            log.warning("원/달러 ECOS 응답이 비었다 — 변화율을 내지 않는다")
+            return [], as_of
+        dates = [str(d) for d, _ in series]
+        closes = [float(v) for _, v in series]
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            (root / f"usdkrw_{dates[-1]}.json").write_text(
+                json.dumps({"pair": "USD/KRW", "source": "ECOS 731Y001",
+                            "as_of": dates[-1],
+                            "series": {"date": dates, "close": closes}},
+                           ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            log.warning("원/달러 캐시 저장 실패(측정은 계속): %s", exc)
+        return closes, dates[-1]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("원/달러 일간 조회 실패 — 변화율 미확보: %s", exc)
+        return [], as_of
+
+
+def fx_change_pct(closes: list[float], days: int = FX_CHANGE_DAYS
+                  ) -> Optional[float]:
+    """N거래일 환율 변화율(%). 표본이 모자라면 None(순수).
+
+    **0을 돌려주지 않는다.** 0은 '변화 없음'이라는 사실이고, 모르는 것과 다르다.
+    """
+    if not closes or len(closes) <= days:
+        return None
+    base = closes[-1 - days]
+    if not base:
+        return None
+    return round((closes[-1] / base - 1) * 100, 3)
+
+
 def _finance_value(name: str) -> tuple[Optional[float], Optional[str]]:
     """finance_bot 지표 → (값, 기준일). **실패는 None으로 돌려주고 이유를 남긴다.**
 
@@ -336,9 +424,15 @@ def snapshot() -> dict:
     slope = ma_slope_pct(closes)
 
     fx, fx_as_of = _finance_value("USD/KRW")
-    fx_change = None
-    # 환율은 최신값만 받으므로 변화율을 낼 수 없다. 방향은 미확보로 둔다 —
-    # 수준만으로 "원화가 약세인가"를 말할 수 없기 때문이다(기준선이 없다).
+    # v3.64: 일간 계열이 열려 변화율을 실제로 낸다(그전까지 상수 None이었다).
+    fx_closes, fx_series_as_of = _fx_series()
+    fx_change = fx_change_pct(fx_closes)
+    if fx_change is None:
+        log.warning("원/달러 %d일 변화율 미확보 — 방향을 판정하지 않는다",
+                    FX_CHANGE_DAYS)
+    if fx is None and fx_closes:
+        # 최신값 조회가 실패해도 일간 계열이 있으면 수준은 알 수 있다.
+        fx, fx_as_of = fx_closes[-1], fx_series_as_of
 
     vix, vix_as_of = _finance_value("VIX")
     flow, flow_as_of = _foreign_net()
@@ -353,8 +447,10 @@ def snapshot() -> dict:
                   as_of=flow_as_of, source="pykrx"),
         indicator("원/달러 환율", fx, fx_state(fx_change), unit="원",
                   as_of=fx_as_of, source="ECOS",
-                  note="후행 지표 — 같은 날 −0.378 / 다음 날 +0.029(2026-09-01). "
-                       "기록만 하고 방향은 판정하지 않는다"),
+                  note=f"{FX_CHANGE_DAYS}일 변화 "
+                       + ("미확보" if fx_change is None else f"{fx_change:+.2f}%")
+                       + " · **후행 지표**(같은 날 −0.378 / 다음 날 +0.029, "
+                         "2026-09-01) — 기록은 하되 예측 검정 대상은 아니다"),
         # **"VKOSPI 대용"이라는 표기는 2026-09-01 실측으로 취소했다.**
         # 겹치는 404일에서 판정 일치 36.6%인데 무관할 때 기대가 35.5%,
         # 코헨 kappa +0.018 — 우연과 구분되지 않는다. 수준 상관 +0.029,

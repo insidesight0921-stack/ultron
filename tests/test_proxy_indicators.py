@@ -220,3 +220,80 @@ def test_format_stays_quiet_when_every_credential_is_set():
     text = pi.format_snapshot({"indicators": [item],
                                "summary": pi.summarize([item]), "missing_env": []})
     assert "자격 정보 미설정" not in text
+
+
+# ─── 안 도는 가지를 실제로 열었는가 (v3.64) ─────────
+#
+# `fx_change = None`이 코드에 상수로 박혀 있어 `fx_state`는 줄곧 `unknown`
+# 이었다. 임계값이 안 걸린 게 아니라 **계산 자체를 한 적이 없었다.**
+# 지표 목록에는 이름이 올라 있어 밖에서는 4개를 보는 것처럼 보였다.
+
+
+def test_the_change_is_computed_not_hardcoded_to_none():
+    """상수 None이 남아 있으면 이 항은 영원히 unknown이다."""
+    import ast
+    import inspect
+
+    import proxy_indicators as pi
+
+    src = inspect.getsource(pi.snapshot)
+    tree = ast.parse(src.lstrip())
+    hardcoded = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", "") == "fx_change" for t in n.targets)
+        and isinstance(n.value, ast.Constant) and n.value.value is None
+    ]
+    assert not hardcoded, "fx_change가 다시 상수 None으로 돌아갔다"
+
+
+def test_a_real_change_produces_a_real_state():
+    import proxy_indicators as pi
+
+    closes = [1300.0] * 20 + [1400.0]          # +7.7%
+    ch = pi.fx_change_pct(closes)
+    assert ch is not None and ch > 2.0
+    assert pi.fx_state(ch) == "risk_off"       # 원화 약세 → 위험회피
+
+
+def test_a_short_series_gives_none_not_zero():
+    """0은 '변화 없음'이라는 사실이다 — 모르는 것과 다르다."""
+    import proxy_indicators as pi
+
+    assert pi.fx_change_pct([1300.0, 1310.0]) is None
+    assert pi.fx_change_pct([]) is None
+
+
+def test_a_flat_series_gives_zero_not_none():
+    """반대로, 진짜 변화가 없는 것은 0으로 말해야 한다."""
+    import proxy_indicators as pi
+
+    assert pi.fx_change_pct([1300.0] * 25) == 0.0
+
+
+def test_a_stale_cache_is_not_used_silently(tmp_path, monkeypatch):
+    """낡은 환율로 '원화 강세'라고 말하면 없는 사실이 생긴다."""
+    import json
+
+    import price_sanity as ps
+    import proxy_indicators as pi
+
+    root = tmp_path / "fx"
+    root.mkdir(parents=True)
+    (root / "usdkrw_20200101.json").write_text(json.dumps({
+        "series": {"date": ["20200101"], "close": [1200.0]}}), encoding="utf-8")
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+    closes, as_of = pi._fx_series(refresh=False)
+    # 갱신을 끄면 캐시를 그대로 준다(호출부가 신선도를 판단할 수 있게).
+    assert as_of == "20200101"
+    # 갱신을 켜면 낡은 것으로 판정하고 네트워크를 시도한다 — 실패해도
+    # 낡은 값을 돌려주지 않는다.
+    monkeypatch.setattr(pi, "FX_STALE_DAYS", 1)
+    import quant_bot as qb
+
+    def _boom(*a, **k):
+        raise RuntimeError("네트워크 없음")
+
+    monkeypatch.setattr(qb, "_fetch_ecos_series_raw", _boom)
+    closes2, _ = pi._fx_series(refresh=True)
+    assert closes2 == []
