@@ -149,13 +149,19 @@ def _parse_ecos_series(payload: dict) -> list[tuple[str, float]]:
 # ─── FRED 시계열 fetch ────────────────────────────
 
 
-def _fetch_fred_series_raw(series_id: str, months: int) -> dict:
-    """FRED API — 최근 N개월. FRED_API_KEY 미설정 시 RuntimeError."""
+def _fetch_fred_series_raw(series_id: str, months: int,
+                           limit: int | None = None) -> dict:
+    """FRED API — 최근 N개월. FRED_API_KEY 미설정 시 RuntimeError.
+
+    `limit`은 **행 수**다. 기본값은 월간 시리즈 기준(months+3)이지만, VIX처럼
+    일간 시리즈를 부를 때는 그대로 쓰면 24개월치를 27행만 받아온다 — 값은
+    멀쩡히 나오고 표본만 조용히 잘린다. 그래서 호출부가 직접 줄 수 있게 열어둔다.
+    """
     key = os.getenv("FRED_API_KEY", "").strip()
     if not key:
         raise RuntimeError("FRED_API_KEY 미설정 (.env에 추가 필요)")
     # months + 3 여유. CLI는 월간이라 한 달 1 row.
-    limit = months + 3
+    limit = int(limit) if limit else months + 3
     url = (
         "https://api.stlouisfed.org/fred/series/observations"
         f"?series_id={quote(series_id, safe='')}"
