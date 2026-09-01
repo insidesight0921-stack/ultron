@@ -152,12 +152,50 @@ def evaluate(predictions: list[tuple], truth: dict, *,
     below = sum(1 for s in sims if s < actual["rate"])
     ties = sum(1 for s in sims if s == actual["rate"])
     pct = (below + ties / 2) / len(sims) * 100
+    ctrl = control_rate(predictions, truth)
+    beats_control = ctrl is None or actual["rate"] > ctrl
+    if not beats_control:
+        # **순열검정을 통과해도 여기서 떨어질 수 있다.** 순열은 "이 지표의
+        # 예측 구성으로 무작위로 찍었을 때"와 비교할 뿐, 시장 상승 편향을
+        # 이기는지는 묻지 않는다. 2026-08-31에 200일선 기울기가 이 틈으로
+        # 빠져나갈 뻔했다.
+        verdict = "음성 대조 미달"
+    elif pct < 95:
+        verdict = "우연 범위"
+    else:
+        verdict = VERDICT_FINDING
     return {
         **actual, "constant": False,
         "baseline_mean": round(sum(sims) / len(sims), 1),
         "percentile": round(pct, 1),
-        "verdict": ("우연 범위" if pct < 95 else "기준선 초과"),
+        "control_rate": ctrl,
+        "verdict": verdict,
     }
+
+
+VERDICT_FINDING = "기준선 초과"
+
+
+def is_finding(result: dict) -> bool:
+    """이 결과를 '발견'으로 다뤄도 되는가(순수).
+
+    **문자열을 밖에서 비교하지 않게 한다.** 판정 종류가 늘 때마다(v3.64에서
+    「음성 대조 미달」이 늘었다) 호출부가 조용히 틀리기 때문이다.
+    """
+    return (result or {}).get("verdict") == VERDICT_FINDING
+
+
+def control_rate(predictions: Iterable[tuple], truth: dict):
+    """**그 지표가 실제로 예측한 날 위에서** '항상 상승'의 적중률(순수).
+
+    전체 기간의 상승 비율과 비교하면 안 된다 — 지표가 예측한 날이 전체와 다른
+    성격일 수 있고(예: 변동성 높은 날만), 그러면 비교 자체가 어긋난다.
+    이 프로젝트에서 '기간이 다른 두 수치를 나란히 놓는' 실수가 이미 있었다
+    (2026-08-31 전후반 원수익 비교).
+    """
+    days = [d for d, p in (predictions or []) if p in (UP, DOWN)]
+    ctrl = score(always(UP, days), truth)
+    return ctrl["rate"]
 
 
 # ─── 표본 계산 ───────────────────────────────────────
@@ -174,7 +212,13 @@ def required_n(rate: float, base: float = 0.5, *, alpha: float = 0.05,
     return math.ceil(((za + zb) / h) ** 2)
 
 
-def progress(n: int, rate: float = 0.60, k: int = 4) -> dict:
+# 동시에 검정하는 지표 수(본페로니 보정용). v3.64에서 VKOSPI가 붙어 4→5.
+# **지표를 늘리면 필요 표본도 는다** — 여러 개를 동시에 보면 그중 하나가 우연히
+# 잘 나올 확률이 커지기 때문이다. 지표 추가는 공짜가 아니다.
+N_INDICATORS = 5
+
+
+def progress(n: int, rate: float = 0.60, k: int = N_INDICATORS) -> dict:
     """지금 표본이 목표의 몇 %인가(순수). **아직 멀었다는 것을 숨기지 않는다.**"""
     need = required_n(rate, k=k)
     return {"have": n, "need": need,
@@ -195,20 +239,23 @@ def format_report(results: dict, truth: dict, *, target: str = "다음 거래일
              "   정답 표본 없음", ""]
     if not total:
         return "\n".join(lines)
-    lines.append(f"{'지표':22}{'예측':>6}{'적중률':>8}{'무작위':>8}{'백분위':>8}  판정")
+    lines.append(f"{'지표':22}{'예측':>6}{'적중률':>8}{'항상상승':>8}{'백분위':>8}  판정")
     for name, r in results.items():
         if not r.get("n"):
             lines.append(f"{name:22}{'—':>6}{'—':>8}{'—':>8}{'—':>8}  {r.get('verdict','')}")
             continue
-        base = "—" if r.get("baseline_mean") is None else f"{r['baseline_mean']:.1f}%"
+        # **무작위 대조가 아니라 '항상 상승'을 나란히 놓는다.** 읽는 사람이
+        # 이겨야 할 상대는 무작위가 아니라 시장 상승 편향이다.
+        ctrl = ("—" if r.get("control_rate") is None
+                else f"{r['control_rate']:.1f}%")
         pctl = "—" if r.get("percentile") is None else f"{r['percentile']:.1f}"
         lines.append(f"{name:22}{r['n']:>6}{r['rate']:>7.1f}%"
-                     f"{base:>8}{pctl:>8}  {r['verdict']}")
+                     f"{ctrl:>8}{pctl:>8}  {r['verdict']}")
     lines.append("")
     best = max((r.get("n") or 0) for r in results.values()) if results else 0
     p = progress(best)
     lines.append(f"표본 진행: {p['have']}/{p['need']}건 ({p['pct']}%) — "
-                 f"적중률 60%를 우연과 가르는 기준(지표 4종 보정)")
+                 f"적중률 60%를 우연과 가르는 기준(지표 {N_INDICATORS}종 보정)")
     if p["trading_days_left"]:
         lines.append(f"   남은 거래일 약 {p['trading_days_left']}일 (~{p['years_left']}년)")
     lines.append("")
@@ -250,6 +297,43 @@ def _slope_predictions(dates, closes):
     return out
 
 
+def _vkospi_predictions(thresholds=None):
+    """VKOSPI는 **캐시로 소급 계산된다** — 로그가 쌓이길 기다릴 필요가 없다.
+
+    판정 임계값은 비중 규칙이 실제로 쓰는 값을 그대로 쓴다. 나우캐스팅이 다른
+    임계값으로 판정하면, 어느 쪽이 맞았는지 알아도 왜 맞았는지 모른다.
+
+    **여기서 재는 것은 "다음 날 방향"이지 "위험 방어"가 아니다.** 이 검정에서
+    떨어졌다고 비중 규칙이 쓸모없다는 뜻이 아니다 — 비중 규칙은 낙폭을 줄이는
+    쪽으로 재야 하고, 그건 별도로 쟀다(2026-09-01 · MDD 28.29%→24.40%).
+    """
+    import json
+
+    import price_sanity as ps
+
+    files = sorted((ps._cache_root() / "indices").glob("market_index_VKOSPI_*.json"))
+    if not files:
+        return []
+    payload = json.loads(files[-1].read_text(encoding="utf-8"))
+    series = payload.get("series") or {}
+    dates = [str(d) for d in series.get("date") or []]
+    closes = [float(c) for c in series.get("close") or []]
+    if thresholds is None:
+        try:
+            import kium_bot as kb
+
+            high, low, _src = kb.active_thresholds()
+        except Exception:  # noqa: BLE001
+            return []
+    else:
+        high, low = float(thresholds[0]), float(thresholds[1])
+    out = []
+    for d, v in zip(dates, closes):
+        # 변동성이 높으면 하락 쪽, 낮으면 상승 쪽. 중립 밴드는 **예측하지 않는다.**
+        out.append((d, DOWN if v > high else (UP if v < low else None)))
+    return out
+
+
 def _logged_predictions(name: str):
     """적재된 지표 로그에서 예측을 만든다(지표별 시계열이 쌓인 뒤에 쓴다)."""
     import indicator_log as il
@@ -275,6 +359,9 @@ def _cli() -> int:
     results = {}
     slope = _slope_predictions(dates, closes)
     results["코스피 200일선 기울기"] = evaluate(slope, truth)
+    vkospi = _vkospi_predictions()
+    if vkospi:
+        results["VKOSPI 밴드"] = evaluate(vkospi, truth)
     days = [d for d, _ in slope]
     results["대조: 항상 상승"] = evaluate(always(UP, days), truth)
     results["대조: 항상 하락"] = evaluate(always(DOWN, days), truth)
@@ -284,6 +371,7 @@ def _cli() -> int:
         logged = il.load()
     except ImportError:
         logged = []
+    # VKOSPI는 위에서 캐시로 소급했으므로 로그 대기 목록에 넣지 않는다.
     for name in ("외국인 순매수(5일)", "원/달러 환율", "VIX"):
         preds = _logged_predictions(name)
         results[name] = (evaluate(preds, truth) if preds

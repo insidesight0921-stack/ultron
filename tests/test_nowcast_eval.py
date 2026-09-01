@@ -127,7 +127,10 @@ def test_noise_stays_in_the_chance_range():
     """무작위 예측이 '기준선 초과'로 나오면 이 도구는 해롭다."""
     truth = _truth("uuduuddudu" * 4)
     r = ne.evaluate(_preds("uduuddudud" * 4), truth, trials=300)
-    assert r["verdict"] == "우연 범위"
+    # v3.64: 판정이 「우연 범위」와 「음성 대조 미달」로 갈렸다. 둘 다 발견이
+    # 아니다 — 문자열이 아니라 `is_finding`으로 묻는다.
+    assert ne.is_finding(r) is False
+    assert r["percentile"] < 95
 
 
 def test_no_prediction_yields_no_verdict():
@@ -146,9 +149,18 @@ def test_the_required_sample_matches_the_plan_figures():
 
 
 def test_progress_does_not_hide_how_far_it_is():
+    """v3.64: VKOSPI가 붙어 지표 4→5 → 필요 표본 276→289."""
     p = ne.progress(99)
-    assert p["need"] == 276 and p["pct"] == 35.9
-    assert p["trading_days_left"] == 177
+    assert p["need"] == 289 and p["pct"] == 34.3
+    assert p["trading_days_left"] == 190
+
+
+def test_adding_an_indicator_costs_sample():
+    """**지표 추가는 공짜가 아니다.** 여럿을 동시에 보면 그중 하나가 우연히
+    잘 나올 확률이 커져 필요 표본이 는다. 늘려놓고 기준을 그대로 두면
+    '우연히 잘 나온 지표'를 발견으로 오독한다."""
+    assert ne.required_n(0.60, k=5) > ne.required_n(0.60, k=4)
+    assert ne.N_INDICATORS == 5
 
 
 def test_a_finished_sample_has_nothing_left():
@@ -174,3 +186,69 @@ def test_the_report_warns_that_permutation_misses_constants():
 
 def test_an_empty_truth_says_so():
     assert "정답 표본 없음" in ne.format_report({}, {})
+
+
+# ─── 음성 대조를 판정에 넣는다 (v3.64) ──────────────
+#
+# 순열검정은 "이 지표의 예측 구성으로 무작위로 찍었을 때"와 비교할 뿐,
+# **시장 상승 편향을 이기는지는 묻지 않는다.** 2026-08-31에 200일선 기울기가
+# 그 틈으로 빠져나갈 뻔했고(상수라서 다른 경로로 잡혔다), 상수가 아닌 지표는
+# 그 경로로도 안 잡힌다.
+
+
+def test_the_control_is_measured_on_the_days_the_indicator_actually_predicted():
+    """전체 기간의 상승 비율과 비교하면 안 된다 — 예측한 날의 성격이 다르다."""
+    truth = {"d1": ne.UP, "d2": ne.UP, "d3": ne.DOWN, "d4": ne.DOWN}
+    # d1·d2(상승)에는 예측을 안 하고, d3·d4(하락)에만 예측한다.
+    preds = [("d1", None), ("d2", None), ("d3", ne.DOWN), ("d4", ne.UP)]
+    assert ne.control_rate(preds, truth) == 0.0      # 예측한 날은 둘 다 하락
+    # 전체 기간 기준이라면 50%가 나왔을 것이다.
+    assert ne.score(ne.always(ne.UP, list(truth)), truth)["rate"] == 50.0
+
+
+def test_an_indicator_that_loses_to_always_up_is_called_out():
+    """순열은 통과해도 '항상 상승'을 못 이기면 방향 정보가 없다."""
+    days = [f"d{i}" for i in range(40)]
+    # 시장은 70% 상승. 지표는 상승·하락을 반반 찍는다 → 적중률이 70%에 못 미친다.
+    truth = {d: (ne.UP if i % 10 < 7 else ne.DOWN) for i, d in enumerate(days)}
+    preds = [(d, ne.UP if i % 2 == 0 else ne.DOWN) for i, d in enumerate(days)]
+    r = ne.evaluate(preds, truth)
+    assert r["constant"] is False
+    assert r["control_rate"] > r["rate"]
+    assert r["verdict"] == "음성 대조 미달"
+
+
+def test_an_indicator_that_beats_the_control_is_not_called_out():
+    days = [f"d{i}" for i in range(40)]
+    truth = {d: (ne.UP if i % 2 == 0 else ne.DOWN) for i, d in enumerate(days)}
+    preds = [(d, truth[d]) for d in days]            # 완벽한 예측
+    r = ne.evaluate(preds, truth)
+    assert r["rate"] == 100.0
+    assert r["verdict"] != "음성 대조 미달"
+
+
+# ─── VKOSPI 예측기 ──────────────────────────────────
+
+
+def test_the_vkospi_band_maps_high_to_down_and_low_to_up(tmp_path, monkeypatch):
+    import json
+    import price_sanity as ps
+
+    root = tmp_path / "indices"
+    root.mkdir(parents=True)
+    (root / "market_index_VKOSPI_20260901.json").write_text(json.dumps({
+        "series": {"date": ["20260101", "20260102", "20260103"],
+                   "close": [70.0, 40.0, 10.0]}}), encoding="utf-8")
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+
+    out = dict(ne._vkospi_predictions(thresholds=(60.6, 20.7)))
+    assert out["20260101"] == ne.DOWN     # 상단 초과 → 위험회피
+    assert out["20260103"] == ne.UP       # 하단 미만 → 위험선호
+    assert out["20260102"] is None        # **중립 밴드는 예측하지 않는다**
+
+
+def test_the_vkospi_predictor_is_empty_without_a_cache(tmp_path, monkeypatch):
+    import price_sanity as ps
+
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+    assert ne._vkospi_predictions(thresholds=(60.6, 20.7)) == []

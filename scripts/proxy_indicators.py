@@ -111,6 +111,29 @@ def vix_state(vix: Optional[float]) -> str:
     return "neutral"
 
 
+def vkospi_state(vkospi: Optional[float]) -> str:
+    """VKOSPI 밴드 → 위험선호/회피. **임계값은 실제로 도는 값을 그대로 쓴다.**
+
+    VIX와 달리 교과서 상수를 쓰지 않는다 — `kium_bot.active_thresholds()`가
+    돌려주는 값(승인 원장 또는 코드 초기값)을 읽는다. 비중 규칙과 나우캐스팅이
+    **서로 다른 임계값으로 같은 지표를 판정하면**, 둘 중 하나가 맞아도 왜
+    맞았는지 알 수 없다.
+    """
+    if vkospi is None:
+        return "unknown"
+    try:
+        import kium_bot as _kb
+
+        high, low, _src = _kb.active_thresholds()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    if vkospi < low:
+        return "risk_on"
+    if vkospi > high:
+        return "risk_off"
+    return "neutral"
+
+
 def indicator(name: str, value, state: str, *, unit: str = "",
               as_of: Optional[str] = None, source: str = "",
               note: str = "") -> dict:
@@ -313,6 +336,8 @@ def snapshot() -> dict:
 
     vix, vix_as_of = _finance_value("VIX")
     flow, flow_as_of = _foreign_net()
+    # 캐시만 읽는다(네트워크 없음). 5일 넘게 낡으면 None으로 온다.
+    vkospi, vk_as_of = _vkospi_latest()
 
     items = [
         indicator("코스피 200일선 기울기", slope, slope_state(slope), unit="%",
@@ -326,6 +351,12 @@ def snapshot() -> dict:
         indicator("VIX", vix, vix_state(vix), unit="pt",
                   as_of=vix_as_of, source="FRED",
                   note="VKOSPI 대용. 미국 시장·다른 기초자산·시차가 있어 같은 지표가 아님"),
+        # v3.64 — 대용이 아니라 **진짜 VKOSPI**. KRX OPEN API 개통(2026-09-01)으로
+        # 수집이 가능해졌다. VIX를 빼지 않는다 — 대용이 얼마나 대용이었는지는
+        # 둘을 나란히 쌓아야 나중에 잴 수 있다.
+        indicator("VKOSPI", vkospi, vkospi_state(vkospi), unit="pt",
+                  as_of=vk_as_of, source="KRX OPEN API",
+                  note="임계값은 비중 규칙과 같은 값을 쓴다(승인 원장)"),
     ]
     return {"indicators": items, "summary": summarize(items),
             "missing_env": missing_env}
