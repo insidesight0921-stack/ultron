@@ -1869,6 +1869,187 @@ def _equity_block_line(budget: dict) -> str:
             f"(기존 보유는 그대로 둡니다)")
 
 
+# v3.64 — VKOSPI 임계값 분기 재측정 (승인형)
+#
+# **자동 갱신은 재보고 기각했다.** 롤링 백분위로 임계값이 값을 따라 올라가면
+# 407일 기준 상단 90.4% · 하단 0.0% · 밴드 전환 1회 — 지금 막 고친 "죽은 가지"로
+# 되돌아간다. 게다가 임계값이 조용히 바뀌면 과거 판단을 재현할 수 없다.
+# 그래서 재측정만 자동이고, 반영은 사람이 누른다.
+VKOSPI_REVIEW_INTERVAL_SEC = 60 * 60 * 24
+VKOSPI_REVIEW_SAMPLE_DAYS = 365
+
+
+def _vkospi_review_snapshot() -> tuple[dict, list, float, float]:
+    """(재측정 결과, 표본, 현재상단, 현재하단). **네트워크를 쓰지 않는다.**
+
+    수집은 `market_data_collector`가 따로 한다. 여기서 수집까지 하면 잡이
+    네트워크에 묶여, 실패가 '재측정 안 함'으로 조용히 굳는다.
+    """
+    import json as _json
+
+    import kium_bot as _kb
+    import price_sanity as _ps
+    import vkospi_threshold_review as _vtr
+
+    files = sorted((_ps._cache_root() / "indices").glob("market_index_VKOSPI_*.json"))
+    if not files:
+        return {}, [], 0.0, 0.0
+    payload = _json.loads(files[-1].read_text(encoding="utf-8"))
+    closes = [float(c) for c in (payload.get("series") or {}).get("close") or []]
+    closes = closes[-VKOSPI_REVIEW_SAMPLE_DAYS:]
+    hi, lo, _src = _kb.active_thresholds()
+    rev = _vtr.review(closes, current_high=hi, current_low=lo)
+    return rev, closes, hi, lo
+
+
+async def vkospi_threshold_review_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """분기마다 VKOSPI 임계값을 다시 재고, 필요하면 승인 버튼과 함께 알린다.
+
+    **`keep`이면 아무 말도 하지 않는다.** 분기마다 "이상 없음"을 보내면 그
+    알림은 읽히지 않게 되고, 정작 깨졌을 때도 놓친다.
+    """
+    import kium_bot as _kb
+    import vkospi_threshold_review as _vtr
+
+    try:
+        ledger = (_vtr.load_ledger(_kb.VKOSPI_LEDGER_FILE)
+                  if _kb.VKOSPI_LEDGER_FILE.exists()
+                  else {"active": None, "history": [], "pending": None})
+    except Exception:
+        # **깨진 원장을 빈 것으로 덮어쓰지 않는다.** 덮어쓰면 승인 이력이
+        # 사라지고 아무도 모르게 코드 초기값으로 되돌아간다.
+        log.warning("VKOSPI 임계값 원장을 읽지 못했다 — 재측정을 건너뛴다",
+                    exc_info=True)
+        return
+
+    now = _now_kst()
+    today = now.strftime("%Y-%m-%d")
+    pending = ledger.get("pending")
+    due = _vtr.due_for_review(ledger, today=today)
+    if not due and not _vtr.needs_push(pending, today=today):
+        return
+
+    try:
+        rev, closes, hi, lo = await asyncio.to_thread(_vkospi_review_snapshot)
+    except Exception:
+        log.warning("VKOSPI 임계값 재측정 실패", exc_info=True)
+        return
+    if not rev or not closes:
+        log.warning("VKOSPI 캐시가 없어 재측정하지 못했다 — "
+                    "`vkospi_calibrate.py --collect 365` 필요")
+        return
+
+    ledger["last_reviewed_at"] = today
+    if rev["verdict"] == "keep":
+        ledger["pending"] = None
+        log.info("VKOSPI 임계값 재측정 %s — 유지 (>%s/<%s · 상단 %s%% 하단 %s%%)",
+                 today, hi, lo, rev["current"].get("above_pct"),
+                 rev["current"].get("below_pct"))
+        try:
+            _vtr.save_ledger(_kb.VKOSPI_LEDGER_FILE, ledger)
+        except OSError:
+            log.warning("VKOSPI 원장 저장 실패", exc_info=True)
+        return
+
+    sug = rev.get("suggested") or {}
+    pushes = list((pending or {}).get("pushes") or []) if pending else []
+    pushes.append(today)
+    ledger["pending"] = {"high": sug.get("high"), "low": sug.get("low"),
+                         "verdict": rev["verdict"], "pushes": pushes,
+                         "n": rev.get("n")}
+    try:
+        _vtr.save_ledger(_kb.VKOSPI_LEDGER_FILE, ledger)
+    except OSError:
+        log.warning("VKOSPI 원장 저장 실패 — 다음에 또 알릴 수 있다", exc_info=True)
+
+    text = _vtr.format_proposal(rev, current_high=hi, current_low=lo)
+    markup = None
+    can_apply = bool(sug.get("check", {}).get("ok"))
+    if can_apply:
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"승인 · >{sug['high']} / <{sug['low']}",
+                callback_data=f"vkospi_th:apply:{sug['high']}:{sug['low']}"),
+            InlineKeyboardButton("유지", callback_data="vkospi_th:keep"),
+        ]])
+    for uid in ALLOWED_IDS:
+        try:
+            await ctx.bot.send_message(chat_id=int(uid), text=text,
+                                       reply_markup=markup)
+        except Exception:
+            log.warning("VKOSPI 임계값 알림 발송 실패 user=%s", uid, exc_info=True)
+
+
+async def handle_vkospi_threshold_callback(update, ctx) -> None:
+    """승인/유지 버튼. **승인해도 검증을 다시 통과해야 반영된다.**
+
+    사람이 누른 버튼은 근거가 아니다 — 죽은 가지를 만드는 값이면 거부한다.
+    """
+    import kium_bot as _kb
+    import vkospi_threshold_review as _vtr
+
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    if ALLOWED_IDS and uid not in ALLOWED_IDS:
+        return
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    try:
+        ledger = _vtr.load_ledger(_kb.VKOSPI_LEDGER_FILE)
+    except Exception:
+        await query.message.reply_text(
+            "임계값 원장을 읽지 못했습니다. 반영하지 않았습니다.")
+        log.warning("VKOSPI 원장 읽기 실패 — 승인 중단", exc_info=True)
+        return
+
+    if action == "keep":
+        ledger["pending"] = None
+        try:
+            _vtr.save_ledger(_kb.VKOSPI_LEDGER_FILE, ledger)
+        except OSError:
+            log.warning("VKOSPI 원장 저장 실패", exc_info=True)
+        hi, lo, src = _kb.active_thresholds()
+        await query.message.reply_text(
+            f"⏭ 임계값을 유지합니다 — >{hi} / <{lo} ({src})")
+        return
+
+    try:
+        high, low = float(parts[2]), float(parts[3])
+    except (IndexError, ValueError):
+        await query.message.reply_text("승인 값을 읽지 못했습니다.")
+        return
+
+    try:
+        _rev, closes, cur_hi, cur_lo = await asyncio.to_thread(
+            _vkospi_review_snapshot)
+        ledger = _vtr.approve(ledger, high=high, low=low, values=closes,
+                              approved_at=_now_kst().strftime("%Y-%m-%d"),
+                              by=str(uid), note="분기 재측정 승인")
+        _vtr.save_ledger(_kb.VKOSPI_LEDGER_FILE, ledger)
+    except ValueError as e:
+        # 검증 거부. **무엇이 왜 거부됐는지 그대로 말한다.**
+        await query.message.reply_text(f"⛔ 반영하지 않았습니다 — {e}")
+        log.warning("VKOSPI 임계값 승인 거부: %s", e)
+        return
+    except Exception:
+        await query.message.reply_text("반영 중 오류가 났습니다. 값은 그대로입니다.")
+        log.warning("VKOSPI 임계값 승인 실패", exc_info=True)
+        return
+
+    entry = ledger["active"]
+    await query.message.reply_text(
+        f"✅ 임계값을 바꿨습니다 — >{high} / <{low}\n"
+        f"이전 >{cur_hi} / <{cur_lo} · 표본 {entry['n']}일 · "
+        f"상단 {entry['above_pct']}% · 하단 {entry['below_pct']}%\n"
+        f"_다음 재측정은 {_vtr.REVIEW_EVERY_DAYS}일 뒤입니다._",
+        parse_mode="Markdown")
+    log.info("VKOSPI 임계값 변경 user=%s: >%s/<%s (이전 >%s/<%s)",
+             uid, high, low, cur_hi, cur_lo)
+
+
 # v3.61 — IPO 상장일 결과 정산 (매주 평일 1회 검사)
 IPO_SETTLE_INTERVAL_SEC = 60 * 60 * 12
 
@@ -4154,6 +4335,11 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(handle_kium_paper_callback, pattern=r"^kium_paper:")
     )
+    # v3.64 — VKOSPI 임계값 승인/유지
+    app.add_handler(
+        CallbackQueryHandler(handle_vkospi_threshold_callback,
+                             pattern=r"^vkospi_th:")
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(
         MessageHandler(
@@ -4273,6 +4459,17 @@ def main() -> None:
             job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 60},
         )
         log.info("📡 기술적 신호 봇 등록 (1시간 간격 · 평일 09:00~15:30 · 멱등)")
+        # v3.64 — VKOSPI 임계값 분기 재측정 (하루 1회 검사 · 90일마다 실제 재측정)
+        app.job_queue.run_repeating(
+            vkospi_threshold_review_job,
+            interval=VKOSPI_REVIEW_INTERVAL_SEC,
+            first=600,
+            name="vkospi_threshold_review",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 300},
+        )
+        log.info("📉 VKOSPI 임계값 분기 재측정 등록 "
+                 "(승인형 — 자동 갱신은 실측으로 기각)")
+
         # v3.43 — 봇작업 예약 디스패처: 60초마다 due 검사 → 실제 봇 실행·전송
         _seed_default_schedules()
         app.job_queue.run_repeating(

@@ -578,11 +578,36 @@ VKOSPI_LOW = 20.7    # p20. 미만 82일(20.1%)
 VKOSPI_MEASURED_AT = "2026-09-01"
 VKOSPI_MEASURED_N = 407
 
+# **위 두 상수는 초기값(폴백)일 뿐이다.** 실제로 도는 값은 승인 원장의 마지막
+# 항목이다 — 분기 재측정에서 사람이 승인한 값. 자동 갱신을 쓰지 않는 이유와
+# 원장의 형태는 `vkospi_threshold_review` 상단에 적혀 있다.
+VKOSPI_LEDGER_FILE = PATHS.private_state_dir / "vkospi_thresholds.json"
+
+
+def active_thresholds() -> tuple[float, float, str]:
+    """지금 유효한 (상단, 하단, 출처). 원장을 못 읽으면 초기값으로 돈다.
+
+    **원장이 없는 것과 깨진 것을 구분한다.** 없으면 조용히 초기값이지만,
+    깨졌으면 경고를 남긴다 — 승인 이력이 사라진 채로 도는 것은 사고다.
+    """
+    try:
+        import vkospi_threshold_review as _vtr
+
+        if not VKOSPI_LEDGER_FILE.exists():
+            return VKOSPI_HIGH, VKOSPI_LOW, "코드 초기값"
+        ledger = _vtr.load_ledger(VKOSPI_LEDGER_FILE)
+        return _vtr.active_thresholds(
+            ledger, fallback_high=VKOSPI_HIGH, fallback_low=VKOSPI_LOW)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("VKOSPI 임계값 원장을 읽지 못했다 — 초기값으로 돈다: %s", exc)
+        return VKOSPI_HIGH, VKOSPI_LOW, "코드 초기값(원장 읽기 실패)"
+
 
 def compute_weight_recommendation(
     vkospi: float | None = None,
     kospi_close=None,
     ma_window: int = 200,
+    thresholds: tuple[float, float] | None = None,
 ) -> dict:
     """주식/채권 비중 룰.
 
@@ -618,19 +643,24 @@ def compute_weight_recommendation(
                 parts.append(f"KOSPI < {ma_window}일선 → 균형(50%)")
 
     vkospi_band = None
+    if thresholds is not None:
+        hi_th, lo_th = float(thresholds[0]), float(thresholds[1])
+        th_source = "명시"
+    else:
+        hi_th, lo_th, th_source = active_thresholds()
     if vkospi is not None:
         try:
             v = float(vkospi)
-            if v > VKOSPI_HIGH:
+            if v > hi_th:
                 vkospi_band = "high"
                 base_equity -= 0.10
                 parts.append(
-                    f"VKOSPI {v:.1f} > {VKOSPI_HIGH}(상위 20%) → 채권 +10%p")
-            elif v < VKOSPI_LOW:
+                    f"VKOSPI {v:.1f} > {hi_th}(상위 20%) → 채권 +10%p")
+            elif v < lo_th:
                 vkospi_band = "low"
                 base_equity += 0.10
                 parts.append(
-                    f"VKOSPI {v:.1f} < {VKOSPI_LOW}(하위 20%) → 주식 +10%p")
+                    f"VKOSPI {v:.1f} < {lo_th}(하위 20%) → 주식 +10%p")
             else:
                 vkospi_band = "mid"
                 parts.append(f"VKOSPI {v:.1f} 중립")
@@ -644,6 +674,9 @@ def compute_weight_recommendation(
         "kospi_above_ma": kospi_above_ma,
         "vkospi_band": vkospi_band,
         "vkospi_value": float(vkospi) if vkospi is not None else None,
+        "vkospi_high": hi_th,
+        "vkospi_low": lo_th,
+        "vkospi_threshold_source": th_source,
         "reason": " · ".join(parts) if parts else "데이터 부족",
     }
 

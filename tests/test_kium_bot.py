@@ -1004,3 +1004,56 @@ def test_router_validate_with_crash_signals_omitted():
     import router
     out = router._validate_kium_args({"action": "scan"})
     assert "with_crash_signals" not in out
+
+
+# ─── 임계값의 출처 (v3.64 승인 원장) ────────────────
+#
+# 코드 상수는 초기값일 뿐이고, 실제로 도는 값은 승인 원장의 마지막 항목이다.
+# **어느 값으로 판정했는지가 결과에 남아야 한다** — 나중에 "그때 왜 60%였지"에
+# 답할 수 없으면 규칙이 아니라 우연이다.
+
+
+def test_the_result_says_which_thresholds_were_used():
+    prices = pd.Series(list(range(200, 400)))
+    out = kb.compute_weight_recommendation(vkospi=50.0, kospi_close=prices)
+    assert out["vkospi_high"] and out["vkospi_low"]
+    assert out["vkospi_threshold_source"]
+
+
+def test_explicit_thresholds_win_over_the_ledger():
+    """테스트와 모의는 원장에 의존하지 않아야 한다."""
+    prices = pd.Series(list(range(200, 400)))
+    out = kb.compute_weight_recommendation(
+        vkospi=50.0, kospi_close=prices, thresholds=(40.0, 20.0))
+    assert out["vkospi_band"] == "high"
+    assert out["vkospi_high"] == 40.0
+    assert out["vkospi_threshold_source"] == "명시"
+
+
+def test_an_approved_ledger_overrides_the_code_constants(tmp_path, monkeypatch):
+    import vkospi_threshold_review as vtr
+
+    vals = [15.0 + (95.0 - 15.0) / 399 * i for i in range(400)]
+    led = vtr.approve({"active": None, "history": []},
+                      high=79.0, low=31.0, values=vals, approved_at="2026-12-01")
+    path = tmp_path / "vkospi_thresholds.json"
+    vtr.save_ledger(path, led)
+    monkeypatch.setattr(kb, "VKOSPI_LEDGER_FILE", path)
+
+    hi, lo, src = kb.active_thresholds()
+    assert (hi, lo) == (79.0, 31.0)
+    assert "2026-12-01" in src
+    prices = pd.Series(list(range(200, 400)))
+    # 코드 초기값(60.6)으로는 high, 승인값(79.0)으로는 mid여야 한다.
+    out = kb.compute_weight_recommendation(vkospi=70.0, kospi_close=prices)
+    assert out["vkospi_band"] == "mid"
+
+
+def test_a_broken_ledger_falls_back_to_the_code_constants(tmp_path, monkeypatch):
+    """원장이 깨졌다고 비중 계산이 죽으면 안 된다 — 다만 조용하지도 않다."""
+    path = tmp_path / "vkospi_thresholds.json"
+    path.write_text("{ not json", encoding="utf-8")
+    monkeypatch.setattr(kb, "VKOSPI_LEDGER_FILE", path)
+    hi, lo, src = kb.active_thresholds()
+    assert (hi, lo) == (kb.VKOSPI_HIGH, kb.VKOSPI_LOW)
+    assert "실패" in src
