@@ -100,8 +100,14 @@ def _http_get_json(url: str, timeout: float = 15.0) -> dict:
 # ─── ECOS 시계열 fetch ────────────────────────────
 
 
-def _fetch_ecos_series_raw(stat_code: str, item_code: str, cycle: str, months: int) -> dict:
-    """ECOS API — 시계열 N개월. ECOS_API_KEY 미설정 시 RuntimeError."""
+def _fetch_ecos_series_raw(stat_code: str, item_code: str, cycle: str,
+                           months: int, rows: int = 1000) -> dict:
+    """ECOS API — 시계열 N개월. ECOS_API_KEY 미설정 시 RuntimeError.
+
+    v3.64에서 일간(`D`)을 연다. 그전까지 `ValueError: cycle 미지원`이었고,
+    그래서 **원/달러는 최신값 하나만 수집되고 있었다** — 변화율을 낼 수 없으니
+    `fx_state`는 늘 `unknown`이었다. 죽은 가지가 아니라 아예 안 도는 가지다.
+    """
     key = os.getenv("ECOS_API_KEY", "").strip()
     if not key:
         raise RuntimeError("ECOS_API_KEY 미설정 (.env에 추가 필요)")
@@ -116,13 +122,17 @@ def _fetch_ecos_series_raw(stat_code: str, item_code: str, cycle: str, months: i
             m += 12
         start = f"{y:04d}{m:02d}"
         end = today.strftime("%Y%m")
+    elif cycle == "D":
+        # 달력일 기준으로 넉넉히 잡는다(휴장일이 빠지므로 거래일은 더 적다).
+        start = (today - timedelta(days=int(months * 31) + 10)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
     else:
         raise ValueError(f"cycle 미지원: {cycle!r}")
 
     parts = [
         "https://ecos.bok.or.kr/api/StatisticSearch",
         quote(key, safe=""),
-        "json", "kr", "1", "1000",
+        "json", "kr", "1", str(int(rows)),
         quote(stat_code, safe=""),
         cycle, start, end,
         quote(item_code, safe=""),
