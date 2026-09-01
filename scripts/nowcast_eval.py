@@ -272,6 +272,30 @@ def bar_table(base: float, *, margins=(0.05, 0.10, 0.15),
     return out
 
 
+def readiness(truth: dict, n: int, *, margin: float = 0.10,
+              k: int = N_INDICATORS) -> dict:
+    """판정할 수 있는 상태인가 — **관문이 둘이다**(순수).
+
+    ① 표본 수   기준선을 `margin`만큼 이기는 것을 가릴 만큼 모였는가
+    ② 국면      표본에 상승·하락이 둘 다 들어 있는가
+
+    ②가 막혀 있으면 ①을 채워도 소용없다. 2026-09-01 실측에서 이 구분이
+    없어 "142/276건 (51.4%)"가 **곧 될 것처럼** 보였다 — 실제로는 시장이
+    꺾이기 전까지 아무것도 판정할 수 없는 상태였다.
+    """
+    b = base_rate(truth)
+    if b is None:
+        return {"ok": False, "reason": "정답 표본 없음"}
+    need = required_n(min(b + margin, 0.999), b, k=k)
+    warn = regime_warning(truth)
+    return {"ok": (n >= need) and (warn is None),
+            "have": n, "need": need, "base": b,
+            "sample_ok": n >= need,
+            "regime_ok": warn is None,
+            "blocker": ("국면" if warn else ("표본" if n < need else None)),
+            "reason": warn or ""}
+
+
 def regime_warning(truth: dict, *, extreme: float = 0.60) -> Optional[str]:
     """표본이 한 국면에 쏠려 있는가(순수).
 
@@ -318,15 +342,19 @@ def format_report(results: dict, truth: dict, *, target: str = "다음 거래일
     lines.append("")
     best = max((r.get("n") or 0) for r in results.values()) if results else 0
     b = base_rate(truth)
+    warn = regime_warning(truth)
     lines.append(f"표본 {best}건 · **이겨야 할 기준선 '항상 상승' {b*100:.1f}%**")
-    lines.append(f"   (무작위 50%가 아니다 — 기준선을 넘지 못하면 발견이 아니다)")
+    lines.append("   (무작위 50%가 아니다 — 기준선을 넘지 못하면 발견이 아니다)")
+    if warn:
+        # **막힌 이유를 먼저 말한다.** 표본 수 표를 위에 두면 "며칠만 더 모으면
+        # 된다"로 읽힌다 — 지금 막고 있는 것은 일수가 아니라 국면이다.
+        lines.append("")
+        lines.append(f"   ⛔ **지금은 표본 수가 문제가 아니다.** {warn}")
+        lines.append("   아래 표는 국면이 들어온 **뒤에** 필요한 양입니다.")
     for row in bar_table(b):
         lines.append(f"   기준선 +{row['margin']*100:.0f}%p"
                      f"(적중 {row['target']*100:.1f}%) 판정에 "
                      f"{row['need']:,}건 (~{row['years']}년)")
-    warn = regime_warning(truth)
-    if warn:
-        lines.append(f"   ⚠️ {warn}")
     lines.append("")
     lines.append("_백분위 95 미만은 우연으로 설명되는 범위입니다._")
     lines.append("_'항상 상승'을 못 이기는 지표는 방향 정보를 담고 있지 않습니다._")

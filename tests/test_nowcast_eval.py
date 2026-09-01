@@ -318,3 +318,49 @@ def test_the_report_leads_with_the_bar_not_with_a_progress_bar():
     msg = ne.format_report({}, truth)
     assert "이겨야 할 기준선" in msg
     assert "무작위 50%가 아니다" in msg
+
+
+# ─── 관문이 둘이다 (2026-09-01) ─────────────────────
+#
+# "142/276건 (51.4%)"는 곧 될 것처럼 보였다. 실제로는 시장이 꺾이기 전까지
+# 아무것도 판정할 수 없는 상태였다. 표본과 국면은 다른 관문이다.
+
+
+def _one_sided(n=400):
+    return {f"d{i}": (ne.UP if i % 10 < 7 else ne.DOWN) for i in range(n)}
+
+
+def _balanced(n=400):
+    return {f"d{i}": (ne.UP if i % 2 else ne.DOWN) for i in range(n)}
+
+
+def test_a_full_sample_in_one_regime_is_still_not_ready():
+    """**표본을 다 채워도** 국면이 하나면 판정할 수 없다."""
+    r = ne.readiness(_one_sided(), n=100000)
+    assert r["sample_ok"] is True
+    assert r["regime_ok"] is False
+    assert r["ok"] is False
+    assert r["blocker"] == "국면"
+
+
+def test_a_balanced_but_thin_sample_is_blocked_by_sample_size():
+    r = ne.readiness(_balanced(), n=5)
+    assert r["regime_ok"] is True
+    assert r["sample_ok"] is False
+    assert r["blocker"] == "표본"
+
+
+def test_both_gates_open_means_ready():
+    r = ne.readiness(_balanced(), n=100000)
+    assert r["ok"] is True and r["blocker"] is None
+
+
+def test_no_truth_is_not_silently_ready():
+    assert ne.readiness({}, n=100000)["ok"] is False
+
+
+def test_the_report_says_the_sample_count_is_not_the_blocker():
+    """표본 수 표를 위에 두면 '며칠만 더 모으면 된다'로 읽힌다."""
+    msg = ne.format_report({}, _one_sided())
+    assert "지금은 표본 수가 문제가 아니다" in msg
+    assert msg.index("표본 수가 문제가 아니다") < msg.index("기준선 +5%p")
