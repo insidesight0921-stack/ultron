@@ -114,3 +114,44 @@ def test_the_korean_alias_is_handled_in_text_not_as_a_command():
             break
     else:
         raise AssertionError("handle_text 없음")
+
+
+# ─── Markdown이 밑줄을 먹는다 (2026-09-01) ──────────
+#
+# `/파라미터` 첫 출력에서 `risk_on`이 `riskon`으로 보이고 백틱이 그대로 찍혔다.
+# Markdown이 밑줄 쌍을 이탤릭으로 해석하면서, 짝이 안 맞는 순간부터 뒤쪽 서식이
+# 통째로 어긋난 것이다. **밑줄이 들어가는 내용은 Markdown으로 보내면 안 된다.**
+
+
+def _sends_with_markdown(func_name: str) -> bool:
+    for node in ast.walk(TREE):
+        if not (isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+                and node.name == func_name):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            for kw in sub.keywords:
+                if (kw.arg == "parse_mode" and isinstance(kw.value, ast.Constant)
+                        and str(kw.value.value).lower().startswith("markdown")):
+                    return True
+        return False
+    raise AssertionError(f"{func_name} 없음")
+
+
+def test_the_parameter_listing_does_not_use_markdown():
+    """파라미터 키·라벨에는 밑줄이 들어간다(emergency.kospi_drop, risk_on)."""
+    assert _sends_with_markdown("cmd_params") is False
+
+
+def test_the_parameter_approval_does_not_use_markdown():
+    assert _sends_with_markdown("handle_param_callback") is False
+
+
+def test_the_mode_report_does_not_use_markdown():
+    """final_mode·llm_mode 등 밑줄이 든 말이 그대로 나간다."""
+    assert _sends_with_markdown("cmd_mode_report") is False
+
+
+def test_the_emergency_alert_does_not_use_markdown():
+    assert _sends_with_markdown("emergency_job") is False

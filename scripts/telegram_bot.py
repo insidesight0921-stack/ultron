@@ -1947,12 +1947,16 @@ async def cmd_params(update, ctx) -> None:
         for key, param in _pr.PARAMS.items():
             value, source = await asyncio.to_thread(_pr.active, key)
             sample = await asyncio.to_thread(param.sample)
-            lines.append(f"`{key}`")
+            lines.append(f"[{key}]")
             lines.append("  " + _ps.describe(param, value, source, sample))
         lines.append("")
-        lines.append("바꾸려면: `/파라미터 <키> <값>`")
-        lines.append("_검증을 통과해야만 반영됩니다 — 승인해도 통과 못 하면 그대로입니다._")
-        await update.message.reply_text(NEWLINE.join(lines), parse_mode="Markdown")
+        lines.append("바꾸려면: /params <키> <값>  (또는 '파라미터 <키> <값>')")
+        lines.append("검증을 통과해야만 반영됩니다 — 승인해도 통과 못 하면 그대로입니다.")
+        # **Markdown을 쓰지 않는다.** 파라미터 키와 라벨에는 밑줄이 들어간다
+        # (`emergency.kospi_drop`, `risk_on`). Markdown은 밑줄을 이탤릭 기호로
+        # 먹어서 `risk_on`이 `riskon`으로 보이고, 짝이 안 맞는 순간부터 뒤쪽
+        # 서식이 통째로 어긋난다 — 2026-09-01 첫 출력이 그랬다.
+        await update.message.reply_text(NEWLINE.join(lines))
         return
 
     key = args[0]
