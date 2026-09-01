@@ -265,6 +265,23 @@ def _cli() -> int:
 
     dates = [d.replace("-", "") for d, _ in series]
     closes = [v for _, v in series]
+
+    # **받은 원자료를 남긴다.** 임계값을 바꾸려면 분포가 있어야 하는데, 매번
+    # 네트워크로 다시 받아야 하면 막힌 곳에서는 아무도 검증할 수 없다.
+    try:
+        import price_sanity as ps
+
+        out_dir = ps._cache_root() / "vix"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"vix_{dates[-1]}.json").write_text(
+            json.dumps({"index": "VIX", "source": "FRED VIXCLS",
+                        "as_of": dates[-1],
+                        "series": {"date": dates, "close": closes}},
+                       ensure_ascii=False), encoding="utf-8")
+        print(f"  (원자료 {len(closes)}일 캐시에 저장: cache/vix/vix_{dates[-1]}.json)")
+    except OSError as exc:
+        print(f"  (캐시 저장 실패 — 측정은 계속합니다: {exc})")
+
     calm, stress = _thresholds()
     print()
     print(format_report(closes, dates=dates, calm=calm, stress=stress))

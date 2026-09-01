@@ -1381,6 +1381,7 @@ NOTIFY_HORIZON_SEC = 70  # 발화 임박 윈도우 (interval + 약간)
 # v3.23 — 콴텍봇 월간 리밸런싱 자동 푸시 (매월 첫 영업일 09:30 KST)
 REBALANCE_HOUR = 9
 REBALANCE_MINUTE = 30
+NEWLINE = chr(10)
 REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
@@ -1882,6 +1883,140 @@ def _equity_block_line(budget: dict) -> str:
     return (f"⚖️ 주식 비중 {drift['current']*100:.1f}% > 목표 "
             f"{drift['target']*100:.0f}% — 신규 매수를 건너뜁니다"
             f"(기존 보유는 그대로 둡니다)")
+
+
+# v3.64 — 파라미터 조정 창구 (실측된 값만)
+#
+# **표본이 없으면 바꿀 수 없다.** 승인해도 검증을 통과하지 못하면 반영되지
+# 않는다 — 버튼은 근거가 아니다. 알림 주기·슬롯 비중처럼 판정할 분포가 없는
+# 값은 애초에 목록에 없다(`param_registry` 상단 참조).
+
+
+async def cmd_params(update, ctx) -> None:
+    """`/파라미터` — 지금 값과 실측 발동률. `/파라미터 <키> <값>` — 변경 제안."""
+    import param_registry as _pr
+    import param_store as _ps
+
+    if not is_authorized(update):
+        deny_log(update, "/파라미터")
+        await update.message.reply_text("접근 권한이 없습니다.")
+        return
+    args = list(ctx.args or [])
+
+    if not args:
+        lines = ["⚙️ 조정 가능한 파라미터 (실측된 것만)", ""]
+        for key, param in _pr.PARAMS.items():
+            value, source = await asyncio.to_thread(_pr.active, key)
+            sample = await asyncio.to_thread(param.sample)
+            lines.append(f"`{key}`")
+            lines.append("  " + _ps.describe(param, value, source, sample))
+        lines.append("")
+        lines.append("바꾸려면: `/파라미터 <키> <값>`")
+        lines.append("_검증을 통과해야만 반영됩니다 — 승인해도 통과 못 하면 그대로입니다._")
+        await update.message.reply_text(NEWLINE.join(lines), parse_mode="Markdown")
+        return
+
+    key = args[0]
+    if key not in _pr.PARAMS:
+        await update.message.reply_text(
+            f"모르는 파라미터: {key} — /파라미터 로 목록을 보세요.")
+        return
+    if len(args) < 2:
+        await update.message.reply_text(f"값이 없습니다: /파라미터 {key} <값>")
+        return
+    try:
+        new_value = float(args[1])
+    except ValueError:
+        await update.message.reply_text(f"숫자가 아닙니다: {args[1]}")
+        return
+
+    param = _pr.PARAMS[key]
+    sample = await asyncio.to_thread(param.sample)
+    check = await asyncio.to_thread(_ps.validate, param, new_value, sample)
+    current, source = await asyncio.to_thread(_pr.active, key)
+
+    lines = [f"⚙️ {param.label}", "",
+             f"  지금 {current}{param.unit} ({source})",
+             f"  제안 {new_value}{param.unit}", ""]
+    if not check.get("ok"):
+        # **왜 안 되는지 그대로 말한다.** "실패"만 뜨면 다음에 또 같은 값을 넣는다.
+        lines.append(f"⛔ 반영할 수 없습니다 — {check.get('reason')}")
+        lines.append("")
+        lines.append(param.note)
+        await update.message.reply_text(NEWLINE.join(lines))
+        return
+
+    if check.get("per_year") is not None:
+        lines.append(f"  검증 통과 · 표본 {check['n']}일 · 진입 연 {check['per_year']}회")
+    elif check.get("up") is not None:
+        lines.append(f"  검증 통과 · 표본 {check['n']}일 · "
+                     f"상단 {check['up']}% · 하단 {check['down']}%")
+    else:
+        lines.append(f"  검증 통과 · 표본 {check['n']}일 · 발동 {check.get('coverage')}%")
+    lines.append("")
+    lines.append("승인하면 원장에 기록되고 그때부터 적용됩니다.")
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("승인", callback_data=f"param:apply:{key}:{new_value}"),
+        InlineKeyboardButton("취소", callback_data="param:cancel"),
+    ]])
+    await update.message.reply_text(NEWLINE.join(lines), reply_markup=markup)
+
+
+async def handle_param_callback(update, ctx) -> None:
+    """승인/취소. **승인해도 검증을 다시 통과해야 반영된다.**"""
+    import param_registry as _pr
+    import param_store as _ps
+
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    if ALLOWED_IDS and uid not in ALLOWED_IDS:
+        return
+    parts = (query.data or "").split(":")
+    await query.edit_message_reply_markup(reply_markup=None)
+    if len(parts) < 2 or parts[1] == "cancel":
+        await query.message.reply_text("취소했습니다. 값은 그대로입니다.")
+        return
+    try:
+        key, new_value = parts[2], float(parts[3])
+    except (IndexError, ValueError):
+        await query.message.reply_text("승인 값을 읽지 못했습니다.")
+        return
+    if key not in _pr.PARAMS:
+        await query.message.reply_text(f"모르는 파라미터: {key}")
+        return
+
+    param = _pr.PARAMS[key]
+    path = _pr.ledger_file()
+    try:
+        ledger = await asyncio.to_thread(_ps.load, path)
+    except Exception:
+        # **깨진 원장을 빈 것으로 덮어쓰지 않는다.** 덮으면 이력이 사라진다.
+        await query.message.reply_text("파라미터 원장을 읽지 못했습니다. 반영하지 않았습니다.")
+        log.warning("파라미터 원장 읽기 실패 — 승인 중단", exc_info=True)
+        return
+
+    try:
+        sample = await asyncio.to_thread(param.sample)
+        ledger = _ps.approve(ledger, param, new_value, sample,
+                             approved_at=_now_kst().strftime("%Y-%m-%d"),
+                             by=str(uid), note="텔레그램 승인")
+        await asyncio.to_thread(_ps.save, path, ledger)
+    except ValueError as e:
+        await query.message.reply_text(f"⛔ 반영하지 않았습니다 — {e}")
+        log.warning("파라미터 승인 거부: %s", e)
+        return
+    except Exception:
+        await query.message.reply_text("반영 중 오류가 났습니다. 값은 그대로입니다.")
+        log.warning("파라미터 승인 실패", exc_info=True)
+        return
+
+    entry = ledger["active"][key]
+    await query.message.reply_text(
+        f"✅ {param.label}: {entry.get('previous')} → {entry['value']}{param.unit}"
+        + NEWLINE + f"표본 {entry['n']}일 · 기록 {entry['approved_at']}")
+    log.info("파라미터 변경 user=%s %s: %s → %s", uid, key,
+             entry.get("previous"), entry["value"])
 
 
 # v3.64 — 시장 급락 긴급 대응
@@ -4417,6 +4552,8 @@ def main() -> None:
     app.add_handler(CommandHandler("notes", cmd_notes))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("agent", cmd_agent))  # v3.42 범용 에이전트
+    app.add_handler(CommandHandler("파라미터", cmd_params))  # v3.64
+    app.add_handler(CommandHandler("params", cmd_params))
     _setup_agent_tools()
     app.add_handler(CommandHandler("test_quant", cmd_test_quant))  # v3.30 강제 스캔
     app.add_handler(CommandHandler("test_kium", cmd_test_kium))  # v3.30 강제 스캔
@@ -4433,6 +4570,10 @@ def main() -> None:
     # v3.29 키움봇 paper 매매 승인 버튼
     app.add_handler(
         CallbackQueryHandler(handle_kium_paper_callback, pattern=r"^kium_paper:")
+    )
+    # v3.64 — 파라미터 승인/취소
+    app.add_handler(
+        CallbackQueryHandler(handle_param_callback, pattern=r"^param:")
     )
     # v3.64 — VKOSPI 임계값 승인/유지
     app.add_handler(

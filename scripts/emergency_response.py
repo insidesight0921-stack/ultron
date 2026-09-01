@@ -63,9 +63,19 @@ def window_return_pct(closes: Iterable[float],
     return round((vals[-1] / base - 1) * 100, 3)
 
 
+def _threshold(key: str, fallback: float) -> float:
+    """승인 원장의 값. 못 읽으면 코드 초기값(위 상수)."""
+    try:
+        import param_registry as _pr
+
+        return _pr.active_value(key)
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def assess(vkospi: Optional[float], kospi_closes: Optional[list] = None, *,
-           vkospi_high: float = VKOSPI_EMERGENCY,
-           drop_pct: float = DROP_EMERGENCY_PCT,
+           vkospi_high: Optional[float] = None,
+           drop_pct: Optional[float] = None,
            window: int = DROP_WINDOW) -> dict:
     """지금 긴급 상태인가(순수).
 
@@ -73,6 +83,13 @@ def assess(vkospi: Optional[float], kospi_closes: Optional[list] = None, *,
     '미확보'이지 '안 걸림'이 아니다 — 둘을 합치면 수집이 멈춘 날 조용히
     안전하다고 말하게 된다.
     """
+    # 명시하지 않으면 승인 원장의 값을 쓴다. 테스트·모의는 명시해서
+    # 원장에 의존하지 않게 한다.
+    if vkospi_high is None:
+        vkospi_high = _threshold("emergency.vkospi", VKOSPI_EMERGENCY)
+    if drop_pct is None:
+        drop_pct = _threshold("emergency.kospi_drop", DROP_EMERGENCY_PCT)
+
     triggers = []
     unknown = []
 

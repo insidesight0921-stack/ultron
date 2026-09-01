@@ -95,7 +95,8 @@ def fx_state(change_pct: Optional[float]) -> str:
     """**원화 약세(환율 상승)가 위험회피다.** 부호가 뒤집힌다 — 여기서 자주 틀린다."""
     if change_pct is None:
         return "unknown"
-    return _state(-change_pct, risk_on_above=FX_MOVE_PCT, risk_off_below=-FX_MOVE_PCT)
+    move = _param("fx.move", FX_MOVE_PCT)
+    return _state(-change_pct, risk_on_above=move, risk_off_below=-move)
 
 
 def flow_state(net_value: Optional[float]) -> str:
@@ -106,13 +107,25 @@ def flow_state(net_value: Optional[float]) -> str:
     return "risk_on" if net_value > 0 else ("risk_off" if net_value < 0 else "neutral")
 
 
+def _param(key: str, fallback: float) -> float:
+    """승인 원장의 값. 못 읽으면 코드 초기값."""
+    try:
+        import param_registry as _pr
+
+        return _pr.active_value(key)
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def vix_state(vix: Optional[float]) -> str:
     """VIX가 낮으면 위험선호. 판정 방향이 다른 지표들과 반대라 따로 둔다."""
     if vix is None:
         return "unknown"
-    if vix <= VIX_CALM:
+    calm = _param("vix.calm", VIX_CALM)
+    stress = _param("vix.stress", VIX_STRESS)
+    if vix <= calm:
         return "risk_on"
-    if vix >= VIX_STRESS:
+    if vix >= stress:
         return "risk_off"
     return "neutral"
 
