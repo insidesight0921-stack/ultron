@@ -184,6 +184,51 @@ def _kospi_series() -> tuple[list[float], Optional[str]]:
         return [], None
 
 
+# VKOSPI 캐시가 이 일수보다 오래되면 **쓰지 않는다.** 변동성 지표는 오래될수록
+# 위험하다 — 급등한 뒤 수집이 멈추면 캐시는 조용한 옛날 값을 계속 돌려주고,
+# 비중 규칙은 "평온하다"고 판단한다. 모르는 편이 낫다.
+VKOSPI_STALE_DAYS = 5
+
+
+def _vkospi_latest(*, today: Optional[str] = None,
+                   stale_days: int = VKOSPI_STALE_DAYS
+                   ) -> tuple[Optional[float], Optional[str]]:
+    """로컬 VKOSPI 캐시 → (종가, 기준일). 네트워크를 쓰지 않는다.
+
+    **오래된 값은 None으로 돌려준다.** 값이 있는데 낡은 것과 값이 없는 것은
+    비중 규칙 입장에서 같은 처지다 — 둘 다 '지금'을 모른다.
+    """
+    try:
+        import json
+        from datetime import date, datetime
+        import price_sanity as ps
+        files = sorted(
+            (ps._cache_root() / "indices").glob("market_index_VKOSPI_*.json"))
+        if not files:
+            return None, None
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        series = payload.get("series") or {}
+        closes = list(series.get("close") or [])
+        dates = list(series.get("date") or [])
+        if not closes or not dates:
+            return None, None
+        as_of = str(dates[-1])
+        ref = str(today or date.today().strftime("%Y%m%d"))
+        try:
+            gap = (datetime.strptime(ref, "%Y%m%d")
+                   - datetime.strptime(as_of, "%Y%m%d")).days
+        except ValueError:
+            return None, as_of
+        if gap > stale_days:
+            log.warning("VKOSPI 캐시가 %d일 낡았다(%s) — 비중 규칙에 쓰지 않는다",
+                        gap, as_of)
+            return None, as_of
+        return float(closes[-1]), as_of
+    except Exception as exc:  # noqa: BLE001
+        log.warning("VKOSPI 캐시 로드 실패: %s", exc)
+        return None, None
+
+
 def _finance_value(name: str) -> tuple[Optional[float], Optional[str]]:
     """finance_bot 지표 → (값, 기준일). **실패는 None으로 돌려주고 이유를 남긴다.**
 

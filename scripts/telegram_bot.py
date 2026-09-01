@@ -1646,6 +1646,10 @@ def _equity_weight_now() -> tuple[float, str]:
     지수 시계열이 없으면 함수가 `reason='데이터 부족'`과 함께 기본값 0.70을
     돌려준다. **그 사실을 삼키지 않고 근거 문구에 남긴다** — '판단해서 70%'와
     '몰라서 70%'는 다르다.
+
+    v3.64에서 VKOSPI 항까지 여기로 들어온다. 임계값은 교과서 값이 아니라 407일
+    분포에서 잰 값이다(`kium_bot.VKOSPI_HIGH/LOW`). VKOSPI를 못 읽거나 캐시가
+    낡았으면 그 항만 빠지고, 빠졌다는 사실이 근거 문구에 남는다.
     """
     import slot_budget as _sb
     try:
@@ -1656,12 +1660,19 @@ def _equity_weight_now() -> tuple[float, str]:
         # (`cache/indices/market_index_KOSPI_*.json`). 처음엔 종목 일봉 캐시에서
         # "1001"을 찾다 0건이 나와 늘 '데이터 부족'이었다 — 지수는 거기 없다.
         closes, as_of = _pi._kospi_series()
+        # v3.64: VKOSPI 항을 예산까지 연결한다. **낡은 값은 넘기지 않는다** —
+        # `_vkospi_latest`가 5일 넘은 캐시를 None으로 돌려주므로, 수집이 멈추면
+        # 규칙은 조용히 "평온"으로 기울지 않고 그냥 빠진다.
+        vk, vk_as_of = _pi._vkospi_latest()
         rec = _kb.compute_weight_recommendation(
-            kospi_close=closes if len(closes) >= 200 else None)
+            kospi_close=closes if len(closes) >= 200 else None,
+            vkospi=vk)
         w = float(rec.get("equity_weight") or _sb.DEFAULT_EQUITY_WEIGHT)
         why = str(rec.get("reason") or "")
         if closes and as_of:
             why = f"{why} · 지수 {as_of} 기준 {len(closes)}일"
+        if vk is None:
+            why = f"{why} · VKOSPI 미반영({vk_as_of or '캐시 없음'})"
         return w, why
     except Exception:
         log.warning("주식 비중 권고 조회 실패 — 기본값 사용", exc_info=True)

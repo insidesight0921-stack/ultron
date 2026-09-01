@@ -102,3 +102,36 @@ def test_a_short_series_is_not_judged():
     rec = kb.compute_weight_recommendation(kospi_close=list(range(1, 50)))
     assert rec["kospi_above_ma"] is None
     assert "데이터 부족" in rec["reason"]
+
+
+# ─── VKOSPI 항의 예산 연결 (v3.64) ──────────────────
+#
+# 임계값을 재기 전까지는 일부러 연결하지 않았다(a2fc820). 407일 분포를 재고
+# `>60.6 / <20.7`로 바꾼 뒤에야 연결한다. 아래는 **연결이 풀리는 것**과
+# **낡은 값이 흘러드는 것**을 둘 다 막는다.
+
+
+def test_the_vkospi_term_reaches_the_budget():
+    """출력 문구에만 쓰이던 항이 예산까지 오는지."""
+    body = _func(BOT, "_equity_weight_now")
+    code = _code_only(body)
+    assert "_vkospi_latest" in code
+    assert "vkospi = vk" in code.replace(" ,", ",")
+
+
+def test_a_stale_vkospi_is_dropped_not_used():
+    """수집이 멈추면 캐시는 '조용한 옛날 값'을 계속 준다 — 그게 더 위험하다."""
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(SCRIPTS))
+    import proxy_indicators as pi
+    assert pi.VKOSPI_STALE_DAYS <= 7
+    # 캐시가 있든 없든, 아주 먼 미래를 기준일로 주면 반드시 None이어야 한다.
+    value, _ = pi._vkospi_latest(today="20990101")
+    assert value is None
+
+
+def test_a_missing_vkospi_is_named_in_the_reason():
+    """'판단해서 70%'와 '몰라서 70%'는 다르다 — 근거 문구에 남아야 한다."""
+    body = _func(BOT, "_equity_weight_now")
+    assert "VKOSPI 미반영" in body
