@@ -1083,6 +1083,17 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     tool = action["tool"]
     args = action["args"]
     mode = action.get("mode", "accurate")
+    # v3.64 — mode 판정을 기록한다. **정답은 재질문이 만든다**(mode_log 상단).
+    # 기록 실패가 답변을 막지 않도록 통째로 감싼다.
+    try:
+        import mode_log as _ml
+
+        _ml.append(MODE_LOG_FILE, _ml.row(
+            text, llm_mode=action.get("llm_mode") or mode, final_mode=mode,
+            tool=tool, at=_now_kst().isoformat(timespec="seconds"),
+            overridden=bool(action.get("overridden")), user=str(chat_id)))
+    except Exception:
+        log.debug("mode 기록 실패", exc_info=True)
     mode_emoji = "🚀" if mode == "fast" else "🔍"
 
     # 2. 도구별 처리
@@ -1382,6 +1393,8 @@ NOTIFY_HORIZON_SEC = 70  # 발화 임박 윈도우 (interval + 약간)
 REBALANCE_HOUR = 9
 REBALANCE_MINUTE = 30
 NEWLINE = chr(10)
+# v3.64 — mode 판정 기록(재질문이 정답을 만든다)
+MODE_LOG_FILE = PATHS.private_state_dir / "mode_decisions.jsonl"
 REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
@@ -1883,6 +1896,19 @@ def _equity_block_line(budget: dict) -> str:
     return (f"⚖️ 주식 비중 {drift['current']*100:.1f}% > 목표 "
             f"{drift['target']*100:.0f}% — 신규 매수를 건너뜁니다"
             f"(기존 보유는 그대로 둡니다)")
+
+
+async def cmd_mode_report(update, ctx) -> None:
+    """`/mode` — mode 판정 기록과 재질문으로 드러난 오분류."""
+    import mode_log as _ml
+
+    if not is_authorized(update):
+        deny_log(update, "/mode")
+        await update.message.reply_text("접근 권한이 없습니다.")
+        return
+    rows = await asyncio.to_thread(_ml.load, MODE_LOG_FILE)
+    labeled = await asyncio.to_thread(_ml.label_reasks, rows)
+    await update.message.reply_text(_ml.format_report(labeled))
 
 
 # v3.64 — 파라미터 조정 창구 (실측된 값만)
@@ -4554,6 +4580,7 @@ def main() -> None:
     app.add_handler(CommandHandler("agent", cmd_agent))  # v3.42 범용 에이전트
     app.add_handler(CommandHandler("파라미터", cmd_params))  # v3.64
     app.add_handler(CommandHandler("params", cmd_params))
+    app.add_handler(CommandHandler("mode", cmd_mode_report))  # v3.64
     _setup_agent_tools()
     app.add_handler(CommandHandler("test_quant", cmd_test_quant))  # v3.30 강제 스캔
     app.add_handler(CommandHandler("test_kium", cmd_test_kium))  # v3.30 강제 스캔

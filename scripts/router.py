@@ -481,6 +481,10 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
         log.debug(f"알 수 없는 mode '{mode}' → {DEFAULT_MODE} fallback")
         mode = DEFAULT_MODE
     # B-2: 사용자 명시 키워드로 mode 결정론 override
+    # **LLM이 원래 뭐라고 했는지 남긴다.** 최종 mode만 돌려주면 "안전망이
+    # 일했다"와 "LLM이 원래 맞혔다"를 구분할 수 없고, 그러면 안전망을 떼도
+    # 되는지 영원히 모른다(v3.64).
+    llm_mode = mode
     mode = _override_mode_by_keywords(query, mode)
 
     # v3.38: IPO analyze 결정론 override — LLM이 tool/corp_name을 놓쳐도 강제 라우팅
@@ -598,7 +602,8 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
             return {"tool": "knowledge_bot", "args": {"query": query}, "mode": DEFAULT_MODE}
 
     log.info(f"🧭 라우팅: {tool} mode={mode} args={str(args)[:140]}")
-    return {"tool": tool, "args": args, "mode": mode}
+    return {"tool": tool, "args": args, "mode": mode,
+            "llm_mode": llm_mode, "overridden": llm_mode != mode}
 
 
 # ─── schedule_bot args 검증 ──────────────────────────
