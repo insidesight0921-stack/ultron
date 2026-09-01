@@ -155,3 +155,34 @@ def test_the_mode_report_does_not_use_markdown():
 
 def test_the_emergency_alert_does_not_use_markdown():
     assert _sends_with_markdown("emergency_job") is False
+
+
+# ─── 여분 인자를 조용히 버리지 않는다 (2026-09-01) ──
+#
+# 사용자가 한 메시지에 두 줄을 붙여 보냈다.
+#   /params vix.calm 15.7
+#   /params vix.stress 20.6
+# 텔레그램은 이것을 **명령 하나**로 넘긴다 — 뒤쪽 줄이 인자로 들어와 통째로
+# 무시됐고, vix.calm만 반영된 채 사용자는 둘 다 됐다고 알았다.
+
+
+def test_extra_arguments_are_refused_not_dropped():
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "cmd_params":
+            body = ast.get_source_segment(BOT_SRC, node) or ""
+            break
+    else:
+        raise AssertionError("cmd_params 없음")
+    assert "len(args) > 2" in body
+    assert "한 번에 하나씩만" in body
+
+
+def test_the_approval_passes_the_effective_previous_value():
+    """원장에 이전 항목이 없으면 코드 초기값이 이전 값이다."""
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "handle_param_callback":
+            body = ast.get_source_segment(BOT_SRC, node) or ""
+            break
+    else:
+        raise AssertionError("handle_param_callback 없음")
+    assert "previous=cur_value" in body

@@ -82,21 +82,43 @@ def test_taste_parameters_are_not_registered():
 #   VIX는 분기 중앙값 15.8~20.8로 정상성이 있어 백분위가 무너지지 않는다
 #   (VKOSPI는 19.8→79.6으로 4배 올라 레벨 임계가 무너졌다 — 다른 경우다).
 #   **돈이 걸린 값이 아니라 자동으로 바꾸지 않고 `/파라미터` 승인에 맡긴다.**
-KNOWN_OUT_OF_BAND = {"vix.calm", "vix.stress"}
+# 2026-09-01 12:06 vix.calm 승인(18.0 → 15.7, 발동 21.1%) — 목록에서 뺐다.
+# vix.stress는 한 메시지에 두 줄을 붙여 보내 **조용히 무시된 채** 남아 있었다.
+KNOWN_OUT_OF_BAND = {"vix.stress"}
 
 
-def test_the_current_defaults_all_pass_their_own_validation():
-    """지금 도는 값이 자기 검증을 통과 못 하면, 그 값부터 틀린 것이다."""
-    failures = {}
+def _violations(getter) -> dict:
+    out = {}
     for key, param in pr.PARAMS.items():
         sample = param.sample()
         if len(sample) < ps.MIN_SAMPLE:
             continue                      # 캐시 없는 환경(CI) — 건너뛴다
-        out = ps.validate(param, pr.code_default(param), sample)
-        if not out["ok"]:
-            failures[key] = out.get("reason")
+        check = ps.validate(param, getter(key, param), sample)
+        if not check["ok"]:
+            out[key] = check.get("reason")
+    return out
+
+
+def test_the_active_values_all_pass_their_own_validation():
+    """**지금 실제로 도는 값**이 자기 검증을 통과 못 하면 그 값부터 틀린 것이다.
+
+    코드 상수가 아니라 원장의 유효값을 본다 — 승인이 일어나면 둘이 갈린다.
+    """
+    failures = _violations(lambda key, _p: pr.active(key)[0])
     unexpected = {k: v for k, v in failures.items() if k not in KNOWN_OUT_OF_BAND}
     assert not unexpected, f"새로 한도를 벗어난 값: {unexpected}"
+
+
+def test_the_code_fallbacks_are_known_even_when_out_of_band():
+    """원장이 사라지면 코드 상수로 되돌아간다 — 그때 무엇이 되는지 알아야 한다.
+
+    코드 상수는 역사적 출발점이라 한도 밖일 수 있다(vix.calm 18.0 = 58.1%).
+    그 사실을 여기 적어두고, **새로 늘어나면** 실패시킨다.
+    """
+    known_fallback = {"vix.calm", "vix.stress"}
+    failures = _violations(lambda _k, p: pr.code_default(p))
+    unexpected = {k: v for k, v in failures.items() if k not in known_fallback}
+    assert not unexpected, f"코드 상수가 새로 한도를 벗어났다: {unexpected}"
 
 
 def test_the_known_violations_are_still_violations():

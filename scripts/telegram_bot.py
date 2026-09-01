@@ -1965,7 +1965,18 @@ async def cmd_params(update, ctx) -> None:
             f"모르는 파라미터: {key} — /파라미터 로 목록을 보세요.")
         return
     if len(args) < 2:
-        await update.message.reply_text(f"값이 없습니다: /파라미터 {key} <값>")
+        await update.message.reply_text(f"값이 없습니다: /params {key} <값>")
+        return
+    if len(args) > 2:
+        # **여분을 조용히 버리지 않는다.** 한 메시지에 두 줄을 붙여 보내면
+        # 텔레그램은 그것을 명령 하나로 넘긴다 — 뒤쪽 줄이 인자로 들어와
+        # 통째로 무시되고, 사용자는 둘 다 처리된 줄 안다.
+        # (2026-09-01: vix.stress가 그렇게 사라졌다.)
+        await update.message.reply_text(
+            "한 번에 하나씩만 바꿉니다." + NEWLINE
+            + f"받은 것: {' '.join(args)}" + NEWLINE
+            + f"처리하려면: /params {args[0]} {args[1]}" + NEWLINE
+            + "여러 줄을 한 메시지로 보내면 뒤쪽이 인자로 들어가 무시됩니다.")
         return
     try:
         new_value = float(args[1])
@@ -2041,9 +2052,14 @@ async def handle_param_callback(update, ctx) -> None:
 
     try:
         sample = await asyncio.to_thread(param.sample)
+        # **지금 실제로 도는 값**을 넘긴다. 원장에 이전 항목이 없으면 코드
+        # 초기값이 이전 값인데, 그걸 안 넘기면 기록에 None이 남아 나중에
+        # "무엇을 무엇으로 바꿨는지"를 재현할 수 없다.
+        cur_value, cur_source = await asyncio.to_thread(_pr.active, key)
         ledger = _ps.approve(ledger, param, new_value, sample,
                              approved_at=_now_kst().strftime("%Y-%m-%d"),
-                             by=str(uid), note="텔레그램 승인")
+                             by=str(uid), note="텔레그램 승인",
+                             previous=cur_value, previous_source=cur_source)
         await asyncio.to_thread(_ps.save, path, ledger)
     except ValueError as e:
         await query.message.reply_text(f"⛔ 반영하지 않았습니다 — {e}")

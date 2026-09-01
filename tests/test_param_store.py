@@ -175,3 +175,36 @@ def test_saving_and_loading_round_trips(tmp_path):
 def test_describe_says_when_it_cannot_be_changed():
     msg = ps.describe(_band([]), 50.0, "코드 초기값", [])
     assert "바꿀 수 없다" in msg
+
+
+# ─── 무엇을 대체했는지 남아야 한다 (2026-09-01) ─────
+#
+# 첫 승인이 `None → 15.7pt`로 기록됐다. 원장에 이전 항목이 없으면 previous가
+# None이 되는데, 그러면 기록만 보고는 "18.0에서 바꿨다"를 재현할 수 없다 —
+# 코드 초기값이 나중에 바뀌면 영영 모른다. 원장의 존재 이유가 재현이다.
+
+
+def test_the_first_approval_records_what_it_replaced():
+    led = ps.approve({"active": {}, "history": []}, _band(UNIFORM), 160.0, UNIFORM,
+                     approved_at="2026-09-01", previous=18.0,
+                     previous_source="코드 초기값")
+    e = led["active"]["t.band"]
+    assert e["previous"] == 18.0
+    assert e["previous_source"] == "코드 초기값"
+
+
+def test_a_later_approval_prefers_the_ledger_over_the_passed_previous():
+    """원장에 이전 승인이 있으면 그것이 진짜 이전 값이다."""
+    led = ps.approve({"active": {}, "history": []}, _band(UNIFORM), 160.0, UNIFORM,
+                     approved_at="2026-09-01", previous=18.0)
+    led2 = ps.approve(led, _band(UNIFORM), 170.0, UNIFORM,
+                      approved_at="2026-12-01", previous=999.0)
+    e = led2["active"]["t.band"]
+    assert e["previous"] == 160.0
+    assert "2026-09-01" in e["previous_source"]
+
+
+def test_previous_is_never_silently_empty_when_one_is_known():
+    led = ps.approve({"active": {}, "history": []}, _band(UNIFORM), 160.0, UNIFORM,
+                     previous=18.0)
+    assert led["history"][0]["previous"] is not None

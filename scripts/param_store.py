@@ -190,18 +190,30 @@ def active_value(ledger: dict, param: Param, fallback: float) -> tuple[float, st
 
 def approve(ledger: dict, param: Param, value: float, values: list, *,
             approved_at: Optional[str] = None, by: str = "user",
-            note: str = "") -> dict:
-    """검증을 통과한 값만 원장에 **추가**한다. 기존 기록은 지우지 않는다."""
+            note: str = "", previous: Optional[float] = None,
+            previous_source: str = "") -> dict:
+    """검증을 통과한 값만 원장에 **추가**한다. 기존 기록은 지우지 않는다.
+
+    **무엇을 대체했는지 반드시 남는다.** 첫 승인은 원장에 이전 항목이 없어
+    `previous`가 `None`이 되는데, 그러면 기록만 보고는 "18.0에서 15.7로
+    바꿨다"를 재현할 수 없다 — 코드 초기값이 나중에 바뀌면 영영 모른다.
+    (2026-09-01 첫 승인이 `None → 15.7`로 남아 이 인자가 생겼다.)
+    """
     check = validate(param, value, values)
     if not check.get("ok"):
         raise ValueError(f"{param.label}: {check.get('reason')}")
     when = approved_at or date.today().strftime("%Y-%m-%d")
     prev = ((ledger or {}).get("active") or {}).get(param.key)
+    prev_value = (prev or {}).get("value")
+    if prev_value is None:
+        prev_value = previous
     entry = {"key": param.key, "value": float(value), "approved_at": when,
              "by": by, "note": note, "n": check["n"],
              "coverage": check.get("coverage"),
              "per_year": check.get("per_year"),
-             "previous": (prev or {}).get("value")}
+             "previous": prev_value,
+             "previous_source": (prev and f"승인 {prev.get('approved_at')}")
+                                or previous_source or "코드 초기값"}
     act = dict((ledger or {}).get("active") or {})
     act[param.key] = entry
     return {"active": act,

@@ -35,9 +35,21 @@ NEUTRAL = "neutral"
 
 
 def _thresholds() -> tuple[float, float]:
-    import proxy_indicators as pi
+    """**지금 실제로 도는 값**을 읽는다.
 
-    return float(pi.VIX_CALM), float(pi.VIX_STRESS)
+    2026-09-01: 여기가 `pi.VIX_CALM`(코드 상수)을 읽고 있었는데 `vix_state`는
+    승인 원장을 읽는다. 승인이 한 번 일어난 뒤로 **측정 보고서가 봇이 쓰지도
+    않는 임계값을 「기존 임계값」이라고 출력**하고 있었다 — 재측정이 운영을
+    설명하지 못하는 상태다.
+    """
+    try:
+        import param_registry as pr
+
+        return pr.active_value("vix.calm"), pr.active_value("vix.stress")
+    except Exception:  # noqa: BLE001
+        import proxy_indicators as pi
+
+        return float(pi.VIX_CALM), float(pi.VIX_STRESS)
 
 
 # ─── 분포 (순수) ─────────────────────────────────────

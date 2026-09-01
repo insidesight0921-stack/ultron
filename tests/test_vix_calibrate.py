@@ -21,10 +21,14 @@ import vix_calibrate as vx  # noqa: E402
 
 
 def test_the_measurement_uses_the_same_operators_as_the_running_code():
-    """도는 쪽은 `<=`인데 재는 쪽이 `<`면 경계 값에서 둘이 갈린다."""
+    """도는 쪽은 `<=`인데 재는 쪽이 `<`면 경계 값에서 둘이 갈린다.
+
+    **임계값도 도는 쪽에서 가져온다.** 코드 상수를 쓰면 승인이 한 번 일어난
+    뒤로 이 검사가 운영과 무관해진다(2026-09-01 실제로 그랬다).
+    """
     import proxy_indicators as pi
 
-    calm, stress = pi.VIX_CALM, pi.VIX_STRESS
+    calm, stress = vx._thresholds()
     # 경계값 자체가 판정에 포함되어야 한다.
     assert pi.vix_state(calm) == "risk_on"
     assert pi.vix_state(stress) == "risk_off"
