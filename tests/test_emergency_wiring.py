@@ -135,3 +135,25 @@ def test_the_vkospi_ledger_writers_share_a_lock():
     for fn in ("vkospi_threshold_review_job", "handle_vkospi_threshold_callback"):
         body = _code_only(_func(BOT, fn))
         assert "_VKOSPI_LEDGER_LOCK" in body, fn
+
+
+# ─── 재확인에서 나온 것 (2026-09-01 2차) ────────────
+
+
+def test_an_identical_observation_is_always_silent():
+    """hold는 매 턴 kind가 나온다 — `kind is None` 게이트만으로는 수집이 끊긴
+    동안 30분마다 「판단 보류」가 간다. 내가 1차 리뷰에서 넣은 코드가 만든
+    버그이고, 상태 기계 시나리오 재생으로 잡았다."""
+    body = _func(BOT, "emergency_job")
+    code = _code_only(body)
+    assert "key == previous_key" in code.replace("==", " == ").replace("  ", " ")
+    # 게이트가 kind 조건과 결합돼 있으면 안 된다
+    idx = code.find("key == previous_key")
+    assert "kind is None and" not in code[max(0, idx - 60):idx]
+
+
+def test_a_held_block_line_still_names_a_reason():
+    """held 상태는 트리거가 비어 있다 — 사유 없는 차단 문구는 '왜 안 되지'를
+    만든다."""
+    body = _func(BOT, "_equity_block_line")
+    assert "미확보" in body

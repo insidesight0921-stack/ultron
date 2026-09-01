@@ -154,6 +154,8 @@ def test_the_emergency_is_rare_on_the_measured_sample():
     vk, kp = _cached()
     if not vk:
         pytest.skip("지수 캐시 없음 — 맥에서만 검증된다")
+    if len(vk) < 300:
+        pytest.skip(f"VKOSPI 이력 {len(vk)}일 — --collect 365로 복구 후 검증된다")
     days = sorted(vk)
     closes = [kp[d] for d in sorted(kp)]
     hit = sum(1 for d in days if vk[d] >= er.VKOSPI_EMERGENCY)
@@ -175,6 +177,8 @@ def test_entries_not_days_are_what_the_user_sees():
     vk, _ = _cached()
     if not vk:
         pytest.skip("지수 캐시 없음")
+    if len(vk) < 300:
+        pytest.skip(f"VKOSPI 이력 {len(vk)}일 — --collect 365로 복구 후 검증된다")
     days = sorted(vk)
     inside = [vk[d] >= er.VKOSPI_EMERGENCY for d in days]
     entries = sum(1 for i in range(1, len(inside)) if inside[i] and not inside[i - 1])

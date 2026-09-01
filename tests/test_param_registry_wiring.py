@@ -187,3 +187,16 @@ def test_approval_goes_through_validation_not_straight_to_the_ledger():
     body = _code_only(_func(SCRIPTS / "telegram_bot.py", "handle_param_callback"))
     assert "_ps . approve" in body
     assert "ValueError" in body
+
+
+def test_approving_the_same_value_twice_does_not_pollute_the_history():
+    """더블탭 멱등성 — 이력은 재현용이라 중복이 곧 오염이다."""
+    import ast as _ast
+
+    bot = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
+    for node in _ast.walk(_ast.parse(bot)):
+        if isinstance(node, _ast.AsyncFunctionDef) and node.name == "handle_param_callback":
+            body = _ast.get_source_segment(bot, node) or ""
+            assert "이미 반영되어 있습니다" in body
+            return
+    raise AssertionError("handle_param_callback 없음")

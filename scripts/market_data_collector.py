@@ -630,14 +630,49 @@ def write_market_index_cache(
     *,
     root: Path | str = PATHS.shareable_root,
 ) -> Path:
+    """지수 캐시 쓰기 — **기존 이력과 병합한다. 덮어쓰지 않는다.**
+
+    2026-09-01 사고: 아침에 `vkospi_calibrate --collect 365`가 만든 407일
+    이력을, 오후의 일간 수집기(20일 창)가 같은 파일명으로 **780바이트로
+    덮었다.** 임계값 검증·소급 평가가 전부 이 이력에 걸려 있는데, 매일 도는
+    잡이 1년치를 조용히 지우는 구조였다 — 짧은 창은 갱신용이지 이력의
+    대체물이 아니다.
+
+    그래서 같은 지수의 **가장 최신 기존 파일**을 읽어 날짜 기준으로 합친다
+    (같은 날짜는 새 값이 이긴다). 파일명이 as_of로 갈려도 읽는 쪽이
+    `sorted(glob)[-1]`을 쓰므로 최신 파일이 전체 이력을 담아야 한다.
+    """
     index_n = normalize_index_name(payload.get("index", ""))
     as_of_n = normalize_as_of(payload.get("as_of", ""))
     cache_dir = Path(root) / "cache" / "indices"
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    merged: dict[str, float] = {}
+    existing = sorted(cache_dir.glob(f"market_index_{index_n}_*.json"))
+    if existing:
+        try:
+            prior = json.loads(existing[-1].read_text(encoding="utf-8"))
+            series = prior.get("series") or {}
+            for d, c in zip(series.get("date") or [], series.get("close") or []):
+                merged[str(d)] = float(c)
+        except (OSError, ValueError, TypeError):
+            # 깨진 기존 파일은 병합만 포기한다 — 새 데이터 쓰기는 계속.
+            log.warning("기존 %s 캐시를 읽지 못해 병합 없이 씁니다", index_n)
+
+    series = payload.get("series") or {}
+    for d, c in zip(series.get("date") or [], series.get("close") or []):
+        merged[str(d)] = float(c)          # 같은 날짜는 새 값이 이긴다
+
+    days = sorted(merged)
+    out = {
+        "index": index_n,
+        "as_of": as_of_n,
+        "series": {"date": days, "close": [merged[d] for d in days]},
+    }
     target = cache_dir / f"market_index_{index_n}_{as_of_n}.json"
     temporary = target.with_suffix(".json.tmp")
     temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(out, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
     temporary.replace(target)

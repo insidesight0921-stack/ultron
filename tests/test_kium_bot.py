@@ -779,6 +779,12 @@ def test_neither_branch_is_dead_on_the_measured_distribution():
     closes = _cached_vkospi_closes()
     if not closes:
         pytest.skip("VKOSPI 캐시 없음 — 맥에서 --collect 후에만 검증된다")
+    if len(closes) < 300:
+        # 2026-09-01: 일간 수집기가 407일 이력을 20일 창으로 덮은 사고가 있었다.
+        # 지금은 병합 쓰기로 재발을 막았지만(test_market_data_collector 참조),
+        # 이력이 짧은 동안 이 검증은 의미가 없다 — 복구 방법을 이름으로 남긴다.
+        pytest.skip(f"VKOSPI 이력 {len(closes)}일 — "
+                    "`vkospi_calibrate.py --collect 365`로 복구 후 검증된다")
     n = len(closes)
     above = sum(1 for v in closes if v > kb.VKOSPI_HIGH)
     below = sum(1 for v in closes if v < kb.VKOSPI_LOW)

@@ -302,3 +302,67 @@ def test_consumer_modules_do_not_implement_shareable_file_writes():
     assert "from pykrx" not in (project / "scripts" / "quant_bot.py").read_text(
         encoding="utf-8"
     )
+
+
+# ─── 캐시는 병합한다 — 덮어쓰지 않는다 (2026-09-01 사고) ──
+#
+# 아침의 --collect 365(407일)를 오후의 일간 수집기(20일 창)가 같은 파일명으로
+# 780바이트로 덮었다. 임계값 검증·소급 평가 전부가 걸린 이력이 매일 도는 잡에
+# 조용히 지워지는 구조였다. 짧은 창은 갱신용이지 이력의 대체물이 아니다.
+
+import json as _json
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
+
+
+def _write(root, dates, closes, as_of):
+    import market_data_collector as mdc
+
+    return mdc.write_market_index_cache(
+        {"index": "VKOSPI", "as_of": as_of,
+         "series": {"date": dates, "close": closes}},
+        root=root)
+
+
+def _read(path):
+    d = _json.loads(_Path(path).read_text(encoding="utf-8"))
+    return d["series"]["date"], d["series"]["close"]
+
+
+def test_a_short_window_does_not_erase_the_long_history(tmp_path):
+    """사고 재현: 407일 위에 20일을 쓰면 407일이 남아야 한다."""
+    long_dates = [f"2025{m:02d}{d:02d}" for m in range(1, 11) for d in (2, 12, 22)]
+    _write(tmp_path, long_dates, [20.0] * len(long_dates), "20260831")
+    short = ["20260810", "20260820", "20260831"]
+    out = _write(tmp_path, short, [50.0, 51.0, 52.0], "20260901")
+    dates, closes = _read(out)
+    assert len(dates) == len(long_dates) + len(short)
+    assert dates == sorted(dates)
+
+
+def test_the_same_date_takes_the_newer_value(tmp_path):
+    _write(tmp_path, ["20260830", "20260831"], [40.0, 41.0], "20260831")
+    out = _write(tmp_path, ["20260831"], [99.0], "20260901")
+    dates, closes = _read(out)
+    assert closes[dates.index("20260831")] == 99.0
+    assert closes[dates.index("20260830")] == 40.0      # 옛 값은 보존
+
+
+def test_the_merge_reads_the_latest_file_even_across_as_of_names(tmp_path):
+    """읽는 쪽이 sorted(glob)[-1]을 쓴다 — 최신 파일이 전체 이력을 담아야 한다."""
+    _write(tmp_path, ["20260801"], [30.0], "20260801")
+    _write(tmp_path, ["20260815"], [35.0], "20260815")
+    out = _write(tmp_path, ["20260901"], [46.0], "20260901")
+    dates, _ = _read(out)
+    assert dates == ["20260801", "20260815", "20260901"]
+
+
+def test_a_corrupt_prior_file_does_not_block_the_write(tmp_path):
+    d = _Path(tmp_path) / "cache" / "indices"
+    d.mkdir(parents=True)
+    (d / "market_index_VKOSPI_20260830.json").write_text("{ 깨짐", encoding="utf-8")
+    out = _write(tmp_path, ["20260901"], [46.0], "20260901")
+    dates, _ = _read(out)
+    assert dates == ["20260901"]

@@ -1900,6 +1900,11 @@ def _equity_block_line(budget: dict) -> str:
     emg = (budget or {}).get("emergency")
     if emg and _er.blocks_new_buys(emg):
         detail = " · ".join(t["detail"] for t in emg.get("triggers") or [])
+        if not detail:
+            # held 상태(수집 끊김으로 판단 보류)면 트리거가 비어 있다 —
+            # 사유 없는 차단 문구는 "왜 안 되지"를 만든다.
+            detail = ("지표 미확보로 해제 판단 보류 중"
+                      f"(미확보: {', '.join(emg.get('unknown') or []) or '알 수 없음'})")
         return (f"🚨 긴급({emg['level']}) — 신규 매수를 건너뜁니다"
                 f"(기존 보유는 그대로 둡니다)\n   {detail}")
 
@@ -2041,6 +2046,13 @@ async def handle_param_callback(update, ctx) -> None:
         return
 
     param = _pr.PARAMS[key]
+    # **더블탭 멱등성.** 버튼이 이미 처리된 뒤 또 눌리면(마크업 제거 전 연타)
+    # 같은 값이 이력에 두 번 쌓인다 — 이력은 재현용이라 중복이 곧 오염이다.
+    cur_value, _cur_src = await asyncio.to_thread(_pr.active, key)
+    if cur_value == new_value:
+        await query.message.reply_text(
+            f"이미 반영되어 있습니다 — {param.label} = {new_value}{param.unit}")
+        return
     path = _pr.ledger_file()
     try:
         ledger = await asyncio.to_thread(_ps.load, path)
@@ -2055,7 +2067,7 @@ async def handle_param_callback(update, ctx) -> None:
         # **지금 실제로 도는 값**을 넘긴다. 원장에 이전 항목이 없으면 코드
         # 초기값이 이전 값인데, 그걸 안 넘기면 기록에 None이 남아 나중에
         # "무엇을 무엇으로 바꿨는지"를 재현할 수 없다.
-        cur_value, cur_source = await asyncio.to_thread(_pr.active, key)
+        cur_source = _cur_src
         ledger = _ps.approve(ledger, param, new_value, sample,
                              approved_at=_now_kst().strftime("%Y-%m-%d"),
                              by=str(uid), note="텔레그램 승인",
@@ -2145,7 +2157,11 @@ async def emergency_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
     kind = _er.transition(previous_level, assessment)
-    if kind is None and key == previous_key:
+    # **key가 같으면 무조건 침묵한다.** 직전 턴과 관측 상태가 동일하면 그 턴이
+    # 이미 알렸다. 처음엔 `kind is None`일 때만 침묵했는데, hold는 매 턴
+    # kind가 나오므로 수집이 끊긴 동안 30분마다 「판단 보류」가 갔다 —
+    # 2026-09-01 재확인(시나리오 재생)에서 발견. 내가 1시간 전에 넣은 코드다.
+    if key == previous_key:
         return
 
     # hold(경보 중 미확보)는 **이전 단계를 유지**한 채 저장한다 — 여기서
@@ -2350,6 +2366,11 @@ async def _vkospi_apply_locked(query, uid, action, parts) -> None:
     try:
         _rev, closes, cur_hi, cur_lo = await asyncio.to_thread(
             _vkospi_review_snapshot)
+        if (cur_hi, cur_lo) == (high, low):
+            # 더블탭 멱등성 — 파라미터 창구와 같은 이유(이력 오염 방지).
+            await query.message.reply_text(
+                f"이미 반영되어 있습니다 — >{high} / <{low}")
+            return
         ledger = _vtr.approve(ledger, high=high, low=low, values=closes,
                               approved_at=_now_kst().strftime("%Y-%m-%d"),
                               by=str(uid), note="분기 재측정 승인")
