@@ -212,10 +212,19 @@ def required_n(rate: float, base: float = 0.5, *, alpha: float = 0.05,
     return math.ceil(((za + zb) / h) ** 2)
 
 
-# 동시에 검정하는 지표 수(본페로니 보정용). v3.64에서 VKOSPI가 붙어 4→5.
+# 동시에 **검정하는** 지표 수(본페로니 보정용).
+#
 # **지표를 늘리면 필요 표본도 는다** — 여러 개를 동시에 보면 그중 하나가 우연히
 # 잘 나올 확률이 커지기 때문이다. 지표 추가는 공짜가 아니다.
-N_INDICATORS = 5
+#
+# 세는 것은 "수집하는 지표"가 아니라 **"가설을 검정하는 지표"**다.
+#   +1 VKOSPI (2026-09-01 추가)
+#   −1 원/달러 (2026-09-01 제외 — 아래)
+# 원/달러는 답이 나왔다. 매매기준율은 **주가의 후행 기록**이다:
+# 정렬 후 같은 날 상관 **−0.378**, 다음 날 **+0.029**(표본 361일). 같은 날
+# 관계는 뚜렷하지만 다음 날에는 없다 — 후행 계열은 구조적으로 예측할 수 없다.
+# 이미 답이 난 질문을 계속 검정하면 다른 지표의 표본만 축낸다. **수집은 계속한다.**
+N_INDICATORS = 4
 
 
 def progress(n: int, rate: float = 0.60, k: int = N_INDICATORS) -> dict:
@@ -262,6 +271,8 @@ def format_report(results: dict, truth: dict, *, target: str = "다음 거래일
     lines.append("_백분위 95 미만은 우연으로 설명되는 범위입니다._")
     lines.append("_'항상 상승'을 못 이기는 지표는 방향 정보를 담고 있지 않습니다._")
     lines.append("_상수 예측(늘 한 방향)은 순열검정으로 잡히지 않습니다 — 음성 대조가 잡습니다._")
+    lines.append("_원/달러는 후행 지표로 판명되어 검정 대상에서 빠졌습니다"
+                 "(같은 날 −0.378 · 다음 날 +0.029, 2026-09-01)._")
     return "\n".join(lines)
 
 
@@ -372,7 +383,8 @@ def _cli() -> int:
     except ImportError:
         logged = []
     # VKOSPI는 위에서 캐시로 소급했으므로 로그 대기 목록에 넣지 않는다.
-    for name in ("외국인 순매수(5일)", "원/달러 환율", "VIX"):
+    # 원/달러도 빠졌다 — 후행 지표로 판명되어 검정 대상이 아니다(위 주석).
+    for name in ("외국인 순매수(5일)", "VIX"):
         preds = _logged_predictions(name)
         results[name] = (evaluate(preds, truth) if preds
                          else {"n": 0, "verdict": f"로그 {len(logged)}일 — 적재 대기"})

@@ -72,11 +72,16 @@ def same_day_relation(fx: dict, kospi: dict, *, lag: int = 0) -> dict:
 
     부호가 음(-)이면 "원화 약세일 때 주가 하락"이다 — 교과서가 말하는 방향.
 
-    **왜 lag을 스캔해야 하는가.** ECOS 731Y001은 매매기준율이고, 그 값이
-    어느 날의 시장을 반영하는지는 우리가 확인한 적이 없다. 만약 T일 고시값이
-    T-1일 시장에서 나온 것이라면, "같은 날"이라고 부른 비교는 사실 하루 어긋난
-    비교다 — **정렬이 틀리면 진짜 -0.3이 +0.03으로 보인다.** 어느 lag에서
-    상관이 가장 강한지가 그 규약을 드러낸다.
+    **왜 lag을 스캔해야 하는가 — 그리고 실제로 어긋나 있었다.**
+    ECOS 731Y001은 매매기준율이고, 2026-09-01 실측 결과 **T일 고시값은
+    T-1일 시장을 담고 있다.**
+
+        corr(고시변화[i], 주가변화[i-1]) = **-0.378**   ← 진짜 동행
+        corr(고시변화[i], 주가변화[i])   = +0.029
+        corr(고시변화[i], 주가변화[i+1]) = +0.006
+
+    lag 0만 보고 "+0.029 → 관계 없음"이라고 결론 낼 뻔했다. **정렬이 틀리면
+    진짜 -0.378이 +0.029로 보인다.** 그래서 이 함수는 항상 스캔한다.
     """
     import vix_calibrate as vx
 
@@ -172,6 +177,12 @@ def next_day_predictions(fx: dict, *, window: int, threshold: float,
 
     원화 약세(환율 상승)를 하락 신호로 본다 — `proxy_indicators.fx_state`가
     부호를 뒤집어 쓰는 것과 같은 방향이다.
+
+    **정렬은 일부러 보수적으로 둔다.** 고시값 d는 d-1일 시장을 담으므로 이
+    예측기는 하루 묵은 정보를 쓴다. 제대로 맞춘 판(고시값 d+1 사용)은 종가
+    d 시점에는 아직 없는 값이라 미래를 보는 셈이 된다. 그리고 실측에서
+    **둘 다 0이다**(정렬 후 다음 날 상관 +0.029) — 보수적으로 두어도 결론이
+    달라지지 않는다.
     """
     import nowcast_eval as ne
 
@@ -239,12 +250,17 @@ def format_report(fx: dict, kospi: dict, *, window: int,
     else:
         for r in scan:
             mark = " ←" if abs(r["corr"]) == max(abs(x["corr"]) for x in scan) else ""
-            label = {0: "같은 날", 1: "환율이 하루 앞섬", -1: "주가가 하루 앞섬"}.get(
+            # **라벨이 규약을 반영해야 한다.** 고시값 T가 T-1일 시장을 담으므로
+            # 진짜 '같은 날'은 lag -1이다. lag 0을 '같은 날'이라 부르면
+            # 다음 사람이 정확히 같은 자리에서 다시 헛읽는다.
+            label = {-1: "같은 날(정렬됨)", 0: "환율이 하루 뒤",
+                     1: "환율이 이틀 뒤", -2: "주가가 하루 앞"}.get(
                 r["lag"], f"lag {r['lag']:+d}")
             lines.append(f"  lag {r['lag']:+d} ({label:<12}) 상관 {r['corr']:+.3f} "
                          f"· 표본 {r['n']}일{mark}")
         lines.append("  _음(−)이면 '원화 약세일 때 주가 하락'입니다._")
-        lines.append("  _lag 0이 아닌 곳이 가장 강하면 매매기준율의 기준일이 어긋나 있다는 뜻입니다._")
+        lines.append("  _매매기준율 T일 고시값은 T−1일 시장을 담습니다"
+                     "(2026-09-01 실측) — 그래서 lag −1이 '같은 날'입니다._")
     lines.append("")
 
     truth = dict(ne.direction_series(sorted(kospi), [kospi[k] for k in sorted(kospi)]))

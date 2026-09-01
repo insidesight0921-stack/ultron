@@ -149,10 +149,10 @@ def test_the_required_sample_matches_the_plan_figures():
 
 
 def test_progress_does_not_hide_how_far_it_is():
-    """v3.64: VKOSPI가 붙어 지표 4→5 → 필요 표본 276→289."""
+    """v3.64: VKOSPI +1, 원/달러 −1(후행 판명) → 검정 지표 4종, 필요 표본 276."""
     p = ne.progress(99)
-    assert p["need"] == 289 and p["pct"] == 34.3
-    assert p["trading_days_left"] == 190
+    assert p["need"] == 276 and p["pct"] == 35.9
+    assert p["trading_days_left"] == 177
 
 
 def test_adding_an_indicator_costs_sample():
@@ -160,7 +160,17 @@ def test_adding_an_indicator_costs_sample():
     잘 나올 확률이 커져 필요 표본이 는다. 늘려놓고 기준을 그대로 두면
     '우연히 잘 나온 지표'를 발견으로 오독한다."""
     assert ne.required_n(0.60, k=5) > ne.required_n(0.60, k=4)
-    assert ne.N_INDICATORS == 5
+
+
+def test_the_count_is_hypotheses_tested_not_indicators_collected():
+    """**세는 것은 수집이 아니라 검정이다.** 원/달러는 계속 수집하지만 답이
+    이미 나왔으므로(후행) 검정하지 않는다 — 이미 답이 난 질문을 계속 세면
+    다른 지표의 표본만 축낸다. 줄었다고 기준이 느슨해진 것이 아니다."""
+    import inspect
+
+    src = inspect.getsource(ne._cli)
+    assert "원/달러 환율" not in src, "검정 목록에 남아 있으면 k와 어긋난다"
+    assert ne.N_INDICATORS == 4
 
 
 def test_a_finished_sample_has_nothing_left():
