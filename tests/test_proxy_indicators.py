@@ -66,9 +66,11 @@ def test_slope_states():
 
 def test_weak_won_is_risk_off_not_risk_on():
     """환율은 부호가 뒤집힌다 — 여기서 자주 틀린다."""
-    assert pi.fx_state(3.0) == "risk_off"      # 환율 상승 = 원화 약세
-    assert pi.fx_state(-3.0) == "risk_on"
-    assert pi.fx_state(0.5) == "neutral"
+    # 여기도 임계값을 박지 않는다(위 test_vix_direction_is_inverted 주석 참조).
+    move = pi._param("fx.move", pi.FX_MOVE_PCT)
+    assert pi.fx_state(move + 1) == "risk_off"   # 환율 상승 = 원화 약세
+    assert pi.fx_state(-(move + 1)) == "risk_on"
+    assert pi.fx_state(move / 2) == "neutral"
     assert pi.fx_state(None) == "unknown"
 
 
@@ -80,9 +82,20 @@ def test_foreign_flow_direction():
 
 
 def test_vix_direction_is_inverted():
-    assert pi.vix_state(12.0) == "risk_on"
-    assert pi.vix_state(35.0) == "risk_off"
-    assert pi.vix_state(22.0) == "neutral"
+    """**임계값을 박아두지 않는다.**
+
+    2026-09-01에 이 테스트가 `vix_state(22.0) == "neutral"`로 실패했다.
+    승인 원장에서 임계값이 18/28 → 15.7/20.6으로 바뀌었기 때문인데, 검사하려던
+    것은 '방향이 뒤집혀 있는가'이지 22가 어느 밴드인가가 아니었다. 숫자를
+    박아두면 값이 바뀔 때마다 **멀쩡한 코드가 실패**하고, 그걸 몇 번 겪으면
+    숫자를 고쳐서 넘기게 된다 — 그때부터 이 테스트는 아무것도 안 지킨다.
+    """
+    calm, stress = pi._param("vix.calm", pi.VIX_CALM), pi._param(
+        "vix.stress", pi.VIX_STRESS)
+    assert calm < stress, "임계값 순서가 뒤집혔다"
+    assert pi.vix_state(calm - 1) == "risk_on"       # 낮으면 위험선호
+    assert pi.vix_state(stress + 1) == "risk_off"    # 높으면 위험회피
+    assert pi.vix_state((calm + stress) / 2) == "neutral"
     assert pi.vix_state(None) == "unknown"
 
 

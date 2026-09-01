@@ -82,9 +82,15 @@ def test_taste_parameters_are_not_registered():
 #   VIX는 분기 중앙값 15.8~20.8로 정상성이 있어 백분위가 무너지지 않는다
 #   (VKOSPI는 19.8→79.6으로 4배 올라 레벨 임계가 무너졌다 — 다른 경우다).
 #   **돈이 걸린 값이 아니라 자동으로 바꾸지 않고 `/파라미터` 승인에 맡긴다.**
-# 2026-09-01 12:06 vix.calm 승인(18.0 → 15.7, 발동 21.1%) — 목록에서 뺐다.
-# vix.stress는 한 메시지에 두 줄을 붙여 보내 **조용히 무시된 채** 남아 있었다.
-KNOWN_OUT_OF_BAND = {"vix.stress"}
+# **비어 있다 — 지금 도는 값은 전부 자기 검증을 통과한다.**
+#
+# 2026-09-01 이력:
+#   vix.calm   18.0 → 15.7  (58.1% → 21.1%)
+#   vix.stress 28.0 → 20.6  ( 3.4% → 20.9%)
+# 둘 다 `/params` 승인 경로로 바뀌었고 원장에 표본·발동률과 함께 남았다.
+# 여기에 뭔가 다시 들어온다면 그건 "고쳐야 하는데 아직 승인을 안 받은 값"이지
+# "괜찮은 값"이 아니다.
+KNOWN_OUT_OF_BAND: set = set()
 
 
 def _violations(getter) -> dict:
@@ -122,7 +128,10 @@ def test_the_code_fallbacks_are_known_even_when_out_of_band():
 
 
 def test_the_known_violations_are_still_violations():
-    """고쳐지면 목록에서 빼야 한다 — 안 빼면 목록이 낡아 아무것도 안 지킨다."""
+    """고쳐지면 목록에서 빼야 한다 — 안 빼면 목록이 낡아 아무것도 안 지킨다.
+
+    2026-09-01에 이 테스트가 두 번 실패시켜 목록을 비우게 만들었다.
+    """
     for key in KNOWN_OUT_OF_BAND:
         param = pr.PARAMS[key]
         sample = param.sample()
