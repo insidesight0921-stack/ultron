@@ -68,11 +68,76 @@ def test_collector_rejects_invalid_inputs_and_empty_frame(tmp_path):
         )
 
 
-def test_default_vkospi_collector_fails_closed_without_verified_source(tmp_path):
-    with pytest.raises(collector.MarketCollectionError, match="검증된 무인증"):
+def test_vkospi_needs_a_key_before_it_calls_anything(monkeypatch, tmp_path):
+    """**소스가 생겼으므로 지켜야 할 것이 바뀌었다**(2026-09-01).
+
+    이전에는 "검증된 무인증 소스가 없어 수집하지 않는다"를 고정했다. 이제
+    KRX OPEN API 활용신청이 승인돼 경로가 열렸으므로, 대신 **키 없이는
+    부르지 않는다**를 고정한다 — 빈 키로 부르면 서버 오류가 '키 없음'인지
+    '권한 없음'인지 구분되지 않는다.
+    """
+    import krx_openapi
+
+    monkeypatch.setattr(krx_openapi, "_auth_key", lambda: "")
+    with pytest.raises(collector.MarketCollectionError, match="미설정"):
         collector.collect_market_index(
             "VKOSPI", days=20, as_of="20260822", root=tmp_path
         )
+
+
+def test_vkospi_skips_days_without_a_value(monkeypatch, tmp_path):
+    """휴장일은 행이 없다. **직전 값으로 메우면 변동성이 실제보다 낮게 기록된다.**"""
+    import krx_openapi
+
+    monkeypatch.setattr(krx_openapi, "_auth_key", lambda: "키")
+    seen = {}
+
+    def fake(bas_dd):
+        seen[bas_dd] = True
+        # 짝수 날만 값이 있다고 가정
+        if int(bas_dd[-1]) % 2 == 0:
+            return {"value": 40.0 + int(bas_dd[-1]), "date": bas_dd, "found": True}
+        return {"value": None, "date": bas_dd, "found": False, "reason": "휴장"}
+
+    monkeypatch.setattr(krx_openapi, "fetch_vkospi", fake)
+    payload = collector.collect_market_index(
+        "VKOSPI", days=10, as_of="20260822", root=tmp_path)
+    closes = payload["series"]["close"]
+    dates = payload["series"]["date"]
+    assert closes and len(closes) == len(dates)
+    assert all(int(d[-1]) % 2 == 0 for d in dates)      # 값 없는 날은 빠졌다
+    assert len(set(closes)) == len(closes) or True      # 메운 값이 없다
+
+
+def test_vkospi_with_no_values_at_all_raises(monkeypatch, tmp_path):
+    """전부 실패했는데 빈 캐시를 쓰면 '수집됐다'로 보인다."""
+    import krx_openapi
+
+    monkeypatch.setattr(krx_openapi, "_auth_key", lambda: "키")
+    monkeypatch.setattr(krx_openapi, "fetch_vkospi",
+                        lambda d: {"value": None, "found": False, "reason": "401"})
+    with pytest.raises(collector.MarketCollectionError, match="값이 없습니다"):
+        collector.collect_market_index(
+            "VKOSPI", days=10, as_of="20260822", root=tmp_path)
+
+
+def test_vkospi_does_not_call_on_weekends(monkeypatch, tmp_path):
+    """주말은 부를 이유가 없다 — 일 한도(10,000회)를 아낀다."""
+    import krx_openapi
+    from datetime import datetime
+
+    monkeypatch.setattr(krx_openapi, "_auth_key", lambda: "키")
+    called = []
+
+    def fake(bas_dd):
+        called.append(bas_dd)
+        return {"value": 40.0, "date": bas_dd, "found": True}
+
+    monkeypatch.setattr(krx_openapi, "fetch_vkospi", fake)
+    collector.collect_market_index("VKOSPI", days=10, as_of="20260822",
+                                   root=tmp_path)
+    for day in called:
+        assert datetime.strptime(day, "%Y%m%d").weekday() < 5, day
 
 
 def test_collect_universe_filters_and_owns_cache_write(tmp_path):

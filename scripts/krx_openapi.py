@@ -453,3 +453,87 @@ def _cli() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_cli())
+
+
+# ─── VKOSPI (2026-09-01 실측 확정) ───────────────────
+#
+# 탐침 결과: `파생상품지수`(drvprod_dd_trd) 320개 중 이름이 정확히
+# **"코스피 200 변동성지수"** 인 행이 VKOSPI다.
+#
+# **키워드 매칭으로 고르면 안 된다.** 같은 응답에 "변동성"이 든 지수가 6개다:
+#
+#     코스피 200 변동성지수            ← 이것만 VKOSPI
+#     코스피 200 현선물 목표변동성 24% 지수
+#     KRX 최소변동성지수
+#     코스피 200 가치저변동성
+#     코스피 200 변동성매칭 양매도지수
+#     코스피 200 변동성추세 추종 양매도지수
+#
+# 뒤 다섯은 전략지수·팩터지수로 성격이 완전히 다르다. 이 프로젝트는 예전에
+# **거래소 코드를 추측했다가 다른 지수를 VKOSPI로 알고 쓴 적이 있다** —
+# 같은 실수를 부분 문자열 매칭으로 반복하지 않는다.
+VKOSPI_SERVICE = "파생상품지수"
+VKOSPI_INDEX_NAME = "코스피 200 변동성지수"
+
+# 응답 필드(실측): BAS_DD, IDX_NM, IDX_CLSS, OPNPRC_IDX, HGPRC_IDX,
+#                  LWPRC_IDX, CLSPRC_IDX, CMPPREVDD_IDX, FLUC_RT
+FIELD_DATE = "BAS_DD"
+FIELD_CLOSE = "CLSPRC_IDX"
+
+
+def _norm_name(value) -> str:
+    """지수명 정규화(순수) — 공백만 지운다. 글자는 건드리지 않는다."""
+    return str(value or "").replace(" ", "")
+
+
+def pick_index(rows: list, name: str) -> Optional[dict]:
+    """이름이 **정확히** 일치하는 지수 행(순수). 없으면 None.
+
+    공백 차이만 무시한다("코스피 200 변동성지수" == "코스피200변동성지수").
+    부분 일치는 하지 않는다 — 위 6개가 전부 걸린다.
+    """
+    want = _norm_name(name)
+    for row in rows or []:
+        field = pick_field(row, NAME_FIELDS)
+        if field and _norm_name(row.get(field)) == want:
+            return row
+    return None
+
+
+def _to_float(value) -> Optional[float]:
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def vkospi_close(payload: dict, *, name: str = VKOSPI_INDEX_NAME) -> dict:
+    """응답 → VKOSPI 종가(순수). 반환: {value, date, found}
+
+    **못 찾으면 값을 만들지 않는다.** 비슷한 이름으로 대체하면 다른 지수를
+    VKOSPI로 기록하게 된다.
+    """
+    rows = rows_of(payload)
+    if not rows:
+        return {"value": None, "date": None, "found": False,
+                "reason": "응답에 데이터 행이 없음"}
+    row = pick_index(rows, name)
+    if row is None:
+        return {"value": None, "date": None, "found": False,
+                "reason": f"'{name}' 지수를 찾지 못함 (행 {len(rows)}개) — "
+                          f"비슷한 이름으로 대체하지 않는다"}
+    value = _to_float(row.get(FIELD_CLOSE))
+    if value is None or value <= 0:
+        return {"value": None, "date": str(row.get(FIELD_DATE) or ""),
+                "found": True, "reason": f"{FIELD_CLOSE} 값이 비어 있음"}
+    return {"value": value, "date": str(row.get(FIELD_DATE) or ""),
+            "found": True, "reason": ""}
+
+
+def fetch_vkospi(bas_dd: str) -> dict:
+    """하루치 VKOSPI 종가. 실패는 예외 대신 reason으로 돌려준다."""
+    payload = fetch(INDEX_ENDPOINTS[VKOSPI_SERVICE], bas_dd)
+    if payload.get("error"):
+        return {"value": None, "date": bas_dd, "found": False,
+                "reason": payload["error"]}
+    return vkospi_close(payload)

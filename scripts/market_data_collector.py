@@ -60,9 +60,53 @@ def _fetch_index_frame(start: str, end: str, index_name: str):
         import FinanceDataReader as fdr
 
         return fdr.DataReader("KS11", start, end)
-    raise MarketCollectionError(
-        "VKOSPI는 현재 검증된 무인증 수집 소스가 없어 자동 수집하지 않습니다."
-    )
+    if index_name == "VKOSPI":
+        return _fetch_vkospi_frame(start, end)
+    raise MarketCollectionError(f"알 수 없는 지수: {index_name}")
+
+
+def _fetch_vkospi_frame(start: str, end: str):
+    """KRX OPEN API로 VKOSPI 일별 종가 수집(2026-09-01 개통).
+
+    **하루에 한 번씩 부른다.** 이 API는 `basDd` 하나만 받으므로 기간 조회가
+    안 된다. 320개 지수가 한 응답에 오고 그중 한 행만 쓰므로 낭비지만,
+    일 한도 10,000회에 견주면 문제되지 않는다(1년치 = 약 250회).
+
+    **거래일을 모르므로 달력 대신 실제 응답으로 판정한다.** 휴장일은 행이
+    없거나 지수가 없고, 그런 날은 그냥 건너뛴다 — 직전 값으로 메우면
+    변동성이 실제보다 낮게 기록된다.
+    """
+    import krx_openapi
+
+    if not krx_openapi._auth_key():
+        raise MarketCollectionError(
+            f"{krx_openapi.KEY_NAME} 미설정 — VKOSPI를 수집할 수 없습니다.")
+
+    start_d = datetime.strptime(normalize_as_of(start), "%Y%m%d")
+    end_d = datetime.strptime(normalize_as_of(end), "%Y%m%d")
+    rows: list[tuple[str, float]] = []
+    misses = 0
+    day = end_d
+    while day >= start_d:
+        if day.weekday() < 5:                     # 주말은 부르지 않는다
+            got = krx_openapi.fetch_vkospi(day.strftime("%Y%m%d"))
+            if got.get("value"):
+                rows.append((got["date"] or day.strftime("%Y%m%d"), got["value"]))
+            else:
+                misses += 1
+        day -= timedelta(days=1)
+
+    if not rows:
+        raise MarketCollectionError(
+            f"VKOSPI 응답에 값이 없습니다({start}~{end}, 미확보 {misses}일).")
+    rows.sort(key=lambda r: r[0])
+    log.info("VKOSPI 수집 %d일 (%s~%s) · 값 없는 날 %d",
+             len(rows), rows[0][0], rows[-1][0], misses)
+
+    import pandas as pd
+
+    return pd.DataFrame({"종가": [v for _, v in rows]},
+                        index=pd.to_datetime([d for d, _ in rows]))
 
 
 def _fetch_ohlcv_frame(ticker: str, start: str, end: str):
