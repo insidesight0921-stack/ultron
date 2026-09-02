@@ -402,8 +402,21 @@ def validation_line(record: Optional[dict]) -> str:
             f" · {record.get('at', '')[:10]} 측정)")
 
 
+def same_finding(a: Optional[dict], b: Optional[dict]) -> bool:
+    """시각을 빼고 **판정 내용이 같은가**(순수)."""
+    if not a or not b:
+        return False
+    keys = ("tests", "passed", "any_passed", "alpha")
+    return all(a.get(k) == b.get(k) for k in keys)
+
+
 def append_validation(record: dict, path) -> list:
-    """추가만 한다. 지난 판정을 고치지 않는다."""
+    """추가만 한다. 지난 판정을 고치지 않는다.
+
+    **같은 결과를 다시 적지는 않는다.** 원장의 존재 이유는 「무엇이 언제
+    바뀌었나」인데, 같은 값이 반복되면 변화 지점이 묻힌다. 새 표본이 없는
+    재실행은 새 판정이 아니다.
+    """
     import json as _json
     path = Path(path)
     try:
@@ -412,6 +425,8 @@ def append_validation(record: dict, path) -> list:
             log = []
     except (OSError, ValueError):
         log = []
+    if log and same_finding(log[-1], record):
+        return log                      # 고치지도, 더하지도 않는다
     log.append(record)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -531,9 +546,14 @@ def _cli() -> int:
                 note=f"lag={args.lag} · start={args.start} · key={args.key}")
             ledger = (Path(__file__).resolve().parents[1] / "data" / "private" /
                       "state" / VALIDATION_FILE)
+            before = latest_validation(ledger)
             append_validation(rec, ledger)
             print()
-            print(f"  원장에 기록했습니다 — {ledger.name}")
+            if same_finding(before, rec):
+                print(f"  원장은 그대로 둡니다 — 직전 기록({before.get('at', '')[:16]})과 "
+                      f"판정이 같습니다. 새 표본이 없으면 새 판정이 아닙니다.")
+            else:
+                print(f"  원장에 기록했습니다 — {ledger.name}")
             print(f"  화면 문구: {validation_line(rec)}")
         print()
         for key, (rows, expected, spec) in details.items():

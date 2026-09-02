@@ -403,14 +403,18 @@ def test_the_line_says_unverified_when_nothing_passed():
 
 
 def test_the_ledger_only_appends(tmp_path):
-    """**지난 판정을 고치지 않는다** — 임계값 원장과 같은 규칙."""
+    """**지난 판정을 고치지 않는다** — 임계값 원장과 같은 규칙.
+
+    판정이 달라지면 새 줄이 붙고, 먼저 있던 줄은 그대로 남는다.
+    """
     path = tmp_path / "v.json"
-    pf.append_validation({"at": "1", "tests": {}}, path)
-    pf.append_validation({"at": "2", "tests": {}}, path)
+    pf.append_validation({"at": "1", "tests": {"A": {"n": 18, "hits": 11}}}, path)
+    pf.append_validation({"at": "2", "tests": {"A": {"n": 18, "hits": 15}}}, path)
     got = pf.latest_validation(path)
     assert got["at"] == "2"
     import json
-    assert len(json.loads(path.read_text(encoding="utf-8"))) == 2
+    log = json.loads(path.read_text(encoding="utf-8"))
+    assert len(log) == 2 and log[0]["at"] == "1"
 
 
 def test_a_broken_ledger_is_not_fatal(tmp_path):
@@ -418,3 +422,44 @@ def test_a_broken_ledger_is_not_fatal(tmp_path):
     path.write_text("{망가진", encoding="utf-8")
     assert pf.latest_validation(path) is None
     assert len(pf.append_validation({"at": "1"}, path)) == 1
+
+
+def test_the_same_finding_is_not_written_twice(tmp_path):
+    """**같은 값이 반복되면 변화 지점이 묻힌다.**
+
+    원장은 「무엇이 언제 바뀌었나」를 위한 것이다. 새 표본 없이 다시 돌린
+    것은 새 판정이 아니다. (2026-09-02: 같은 결과가 2건 쌓여 발견)
+    """
+    path = tmp_path / "v.json"
+    rec = pf.validation_record(_fam(), None, at="2026-09-02T10:00:00")
+    later = pf.validation_record(_fam(), None, at="2026-09-02T18:00:00")
+    pf.append_validation(rec, path)
+    log = pf.append_validation(later, path)
+    assert len(log) == 1
+    assert pf.latest_validation(path)["at"] == "2026-09-02T10:00:00"
+
+
+def test_a_changed_finding_is_appended(tmp_path):
+    path = tmp_path / "v.json"
+    pf.append_validation(pf.validation_record(_fam(), None, at="1"), path)
+    log = pf.append_validation(
+        pf.validation_record(_fam("우위 확인"), None, at="2"), path)
+    assert len(log) == 2 and log[-1]["any_passed"] is True
+
+
+def test_the_time_alone_does_not_make_a_new_finding():
+    a = pf.validation_record(_fam(), None, at="2026-09-02T10:00:00")
+    b = pf.validation_record(_fam(), None, at="2027-01-01T00:00:00")
+    assert pf.same_finding(a, b) is True
+
+
+def test_a_different_number_makes_a_new_finding():
+    a = pf.validation_record(_fam(), None, at="1")
+    fam = _fam()
+    fam["results"]["Size(코스피)"] = {**fam["results"]["Size(코스피)"], "hits": 15}
+    assert pf.same_finding(a, pf.validation_record(fam, None, at="2")) is False
+
+
+def test_the_first_record_always_lands(tmp_path):
+    path = tmp_path / "v.json"
+    assert len(pf.append_validation(pf.validation_record(_fam(), None, at="1"), path)) == 1
