@@ -1017,6 +1017,7 @@ def recommend_top_n(
     weights: dict | None = None,
     fundamentals: dict | None = None,
     market_caps: dict | None = None,
+    log_path=None,
     *,
     momentum_lookback: int = 252,
     momentum_skip: int = 21,
@@ -1166,6 +1167,22 @@ def recommend_top_n(
             current_price=cur,
         ))
     scored.sort(key=lambda r: r.composite_score, reverse=True)
+    # **자르기 전에 남긴다(2026-09-02).** 예전에는 추천 종목이 텔레그램으로만
+    # 나가고 `quant_rebalance_last.json`에는 chat_id만 남아, 탭 B가 잴 원자료가
+    # 없었다. 선정 아래 같은 수를 대조군으로 함께 남긴다.
+    if log_path is not None:
+        try:
+            import bot_signal_log as _bsl
+            from datetime import datetime as _dt
+            _bsl.log_ranked("quant", scored,
+                            at=_dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                            top_n=int(top_n), path=log_path, phase=phase,
+                            score_of=lambda r: r.composite_score,
+                            extra_of=lambda r: {"주도": max(r.z_factors,
+                                                          key=lambda f: r.z_factors[f])
+                                                if r.z_factors else None})
+        except Exception as e:                                  # noqa: BLE001
+            log.warning(f"봇 신호 기록 실패(무시): {e}")
     return scored[:top_n]
 
 

@@ -293,6 +293,7 @@ def scan_universe(
     lookback_days: int = 252,
     skip_days: int = 21,
     universe: list[tuple[str, str]] | None = None,
+    log_path=None,
 ) -> list[dict]:
     """universe 전체 모멘텀 스캔 → Top N (점수 내림차순).
 
@@ -359,6 +360,19 @@ def scan_universe(
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)
+    # **자르기 전에 남긴다(2026-09-02).** Top N만 기록하면 「고른 것이 값을
+    # 더했나」를 영영 못 묻는다 — 바로 아래 순위를 대조군으로 함께 남긴다.
+    # 기록 실패는 스캔을 멈추지 않는다.
+    if log_path is not None:
+        try:
+            import bot_signal_log as _bsl
+            _bsl.log_ranked("kium", results,
+                            at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                            top_n=int(top_n), path=log_path,
+                            extra_of=lambda r: {"return_12m": r.get("return_12m"),
+                                                "return_1m": r.get("return_1m")})
+        except Exception as e:                                  # noqa: BLE001
+            log.warning(f"봇 신호 기록 실패(무시): {e}")
     return results[: int(top_n)]
 
 

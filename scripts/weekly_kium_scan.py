@@ -342,6 +342,15 @@ def save_reports(text: str, html: str, date_str: str) -> tuple[Path, Path]:
 
 # ─── 메인 ────────────────────────────────────────────
 
+def _bot_signal_path():
+    """봇 신호 기록 경로. 못 구하면 None — 기록 실패가 스캔을 막지 않는다."""
+    try:
+        import bot_signal_log
+        return bot_signal_log.default_path()
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="키움봇 v3 주간 스캔 러너 (v3.24)")
     ap.add_argument("--top",      type=int, default=20,       help="Top N 종목 (기본 20)")
@@ -383,7 +392,12 @@ def main() -> None:
 
     if with_crash:
         try:
-            results_for_html = kium_bot.scan_universe(market=args.market, top_n=args.top)
+            # **주간 스캔은 봇의 진짜 판단이다 — 남긴다(2026-09-02).**
+            # 화면에서 사람이 눌러 보는 임시 스캔은 남기지 않는다(top_n이
+            # 그때그때 달라 봇의 판단으로 오해된다).
+            results_for_html = kium_bot.scan_universe(
+                market=args.market, top_n=args.top,
+                log_path=_bot_signal_path())
             kospi_close = kium_bot.fetch_kospi_close()
             crash_signals = kium_bot.detect_crash_signals(
                 kospi_close=kospi_close, top_results=results_for_html

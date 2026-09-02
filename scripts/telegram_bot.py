@@ -3196,6 +3196,21 @@ def _save_rebalance_flag(data: dict) -> None:
         log.warning(f"리밸런싱 플래그 쓰기 실패 — 무시: {e}")
 
 
+def _bot_signal_path():
+    """봇 신호 기록 경로. 못 구하면 None — 기록 실패가 추천을 막지 않는다.
+
+    두 곳(월간 리밸런싱·/test_quant)에서 쓰므로 **한 벌만 둔다.** 같은
+    로직을 두 곳에 두면 한쪽만 바뀌는 날이 온다(2026-09-01에 겪었다).
+    """
+    try:
+        import bot_signal_log
+        return bot_signal_log.default_path()
+    except Exception:                                       # noqa: BLE001
+        log.warning("봇 신호 기록 경로 확인 실패 — 추천은 계속합니다",
+                    exc_info=True)
+        return None
+
+
 async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """24h 주기 호출. 매월 첫 영업일 09:30 직후만 ALLOWED_IDS chat_id별 콴텍봇 추천 푸시.
 
@@ -3274,7 +3289,12 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 # "캐시가 안 쌓였다"를 알게 된다.
                 log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
                             exc_info=True)
-        recs = await asyncio.to_thread(quant_recommend, phase) if phase else []
+        # **월간 리밸런싱은 콴텍봇의 진짜 판단이다 — 남긴다(2026-09-02).**
+        # 예전에는 추천이 텔레그램으로만 나가고 종목·점수가 어디에도 남지
+        # 않아 탭 B가 잴 원자료가 없었다.
+        recs = (await asyncio.to_thread(quant_recommend, phase,
+                                        log_path=_bot_signal_path())
+                if phase else [])
     except Exception:
         recs = []
 
@@ -4546,7 +4566,10 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 # "캐시가 안 쌓였다"를 알게 된다.
                 log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
                             exc_info=True)
-        recs = await asyncio.to_thread(quant_recommend, phase) if phase else []
+        # 강제 실행도 콴텍봇의 판단이다 — 같은 날은 원장에서 한 줄로 합쳐진다.
+        recs = (await asyncio.to_thread(quant_recommend, phase,
+                                        log_path=_bot_signal_path())
+                if phase else [])
     except Exception as e:
         await update.message.reply_text(f"❌ 콴텍봇 실패: {e}")
         log.exception("test_quant 실패")
