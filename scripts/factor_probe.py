@@ -113,6 +113,10 @@ def coverage(first: Optional[tuple[int, int]], last: tuple[int, int]) -> int:
 def format_availability(results: dict, *, phase_months: int = 0) -> str:
     """사람이 고르라고 내놓는 표(순수). **고르지 않는다.**"""
     lines = ["📏 팩터 지수 소급 깊이", ""]
+    edge = next((r.get("api_first") for r in results.values() if r.get("api_first")), None)
+    if edge:
+        lines.append(f"  (API가 목록을 주기 시작하는 달: {edge[0]}-{edge[1]:02d})")
+        lines.append("")
     if not results:
         lines.append("  잰 지수가 없습니다.")
         return "\n".join(lines)
@@ -128,6 +132,9 @@ def format_availability(results: dict, *, phase_months: int = 0) -> str:
         if phase_months:
             head += f" (국면 이력 {phase_months}개월의 {months * 100 // phase_months}%)"
         lines.append(head)
+        if r.get("at_api_edge"):
+            lines.append("      ⚠️ **API 제공 구간의 시작과 같습니다** — 산출 개시인지 "
+                         "API 한계인지 이 조회로는 구분할 수 없습니다")
         if r.get("violations"):
             lines.append(f"      ⚠️ 단조성 위반 {len(r['violations'])}건 — 경계를 신뢰하지 마세요: "
                          f"{r['violations'][:3]}")
@@ -183,10 +190,33 @@ def earliest_month(fetch_month, name: str, months: list[tuple[int, int]],
             "calls": len(cache) - calls_before}
 
 
+def api_first_month(fetch_month, months: list[tuple[int, int]],
+                    cache: Optional[dict] = None) -> Optional[tuple[int, int]]:
+    """**API가 목록을 주기 시작하는 달.** 지수의 나이가 아니라 서비스의 나이다."""
+    cache = {} if cache is None else cache
+    idx = bisect_first_true(
+        months, lambda ym: bool(month_rows(fetch_month, ym[0], ym[1], cache)))
+    return None if idx is None else months[idx]
+
+
 def probe_names(fetch_month, names: list[str], months: list[tuple[int, int]]) -> dict:
-    """여러 이름을 한 캐시로 잰다 — 달 조회를 공유한다."""
+    """여러 이름을 한 캐시로 잰다 — 달 조회를 공유한다.
+
+    **먼저 API 제공 구간의 시작을 잡는다.** 이것 없이 이름의 첫 등장만 보면,
+    API가 2010년부터 준다는 이유로 1996년생 지수도 「2010년 개시」로 보고된다
+    — 산출 개시와 서비스 한계가 같은 숫자로 나와 구분되지 않는다.
+    """
     cache: dict = {}
-    return {name: earliest_month(fetch_month, name, months, cache) for name in names}
+    api_first = api_first_month(fetch_month, months, cache)
+    out = {}
+    for name in names:
+        r = earliest_month(fetch_month, name, months, cache)
+        r["api_first"] = api_first
+        r["at_api_edge"] = bool(
+            r.get("first") is not None and api_first is not None
+            and r["first"] == api_first)
+        out[name] = r
+    return out
 
 
 def _cli() -> int:

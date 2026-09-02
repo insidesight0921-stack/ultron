@@ -157,13 +157,20 @@ def test_coverage_of_a_missing_index_is_zero():
 
 # ─── 통합(가짜 fetch) ─────────────────────────────────
 
-def _fake_service(birth: dict, *, api_from=(1995, 1)):
-    """birth: 이름 → 산출 개시 (year, month). api_from 이전은 목록 자체가 없다."""
+def _fake_service(birth: dict, *, api_from=(1995, 1), filler="코스피 200"):
+    """birth: 이름 → 산출 개시 (year, month). api_from 이전은 목록 자체가 없다.
+
+    **`filler`가 있어야 진짜를 흉내낸다.** 실제 KRX는 그 날짜를 제공하기만 하면
+    수백 개 지수가 함께 온다 — 목록이 비는 것은 오직 제공 구간 밖일 때다.
+    filler 없이 만들면 「아직 안 태어난 지수」와 「구간 밖」이 둘 다 빈 목록이
+    되어, 구간 경계를 가르려는 검사 자체가 무의미해진다.
+    """
     def fetch_month(bas_dd: str) -> list:
         y, m = int(bas_dd[:4]), int(bas_dd[4:6])
         if (y, m) < api_from:
             return []
-        return [{"IDX_NM": n} for n, b in birth.items() if (y, m) >= b]
+        rows = [{"IDX_NM": filler}] if filler else []
+        return rows + [{"IDX_NM": n} for n, b in birth.items() if (y, m) >= b]
     return fetch_month
 
 
@@ -220,7 +227,7 @@ def test_probing_several_names_shares_one_month_cache():
     apart = 0
     for name in ("A", "B"):
         seen, fetch_month = counting()
-        fp.earliest_month(fetch_month, name, months)
+        fp.probe_names(fetch_month, [name], months)   # 한 번에 하나씩 재면
         apart += len(set(seen))
 
     assert len(set(shared_seen)) < apart, "캐시를 공유해도 조회가 줄지 않는다"
@@ -256,3 +263,50 @@ def test_the_report_says_it_does_not_choose():
     msg = fp.format_availability(got)
     assert "사람이 정합니다" in msg
     assert "두 다리 모두" in msg
+
+
+# ─── API 구간 경계와 산출 개시를 가르기 ────────────────
+
+def test_the_api_window_start_is_found():
+    fetch = _fake_service({"X": (1995, 1)}, api_from=(2010, 1))
+    months = fp.months_between((1992, 9), (2026, 8))
+    assert fp.api_first_month(fetch, months) == (2010, 1)
+
+
+def test_an_index_older_than_the_api_is_flagged_not_reported_as_new():
+    """**이 테스트가 오늘 막은 구멍이다.**
+
+    1995년생 지수인데 API가 2010년부터 준다면 첫 등장은 2010-01이다.
+    그것을 「2010년 개시」로 적으면 거짓이 된다 — 구분 불가라고 말해야 한다.
+    """
+    fetch = _fake_service({"코스피 대형주": (1995, 1)}, api_from=(2010, 1))
+    got = fp.probe_names(fetch, ["코스피 대형주"], fp.months_between((1992, 9), (2026, 8)))
+    r = got["코스피 대형주"]
+    assert r["first"] == (2010, 1)
+    assert r["at_api_edge"] is True
+    msg = fp.format_availability(got)
+    assert "구분할 수 없습니다" in msg
+    assert "2010-01" in msg
+
+
+def test_an_index_born_after_the_api_window_is_not_flagged():
+    """API가 2010년부터인데 지수가 2024년생이면 그 개시는 진짜다."""
+    fetch = _fake_service({"코리아 밸류업 지수": (2024, 9)}, api_from=(2010, 1))
+    got = fp.probe_names(fetch, ["코리아 밸류업 지수"], fp.months_between((1992, 9), (2026, 8)))
+    r = got["코리아 밸류업 지수"]
+    assert r["first"] == (2024, 9) and r["at_api_edge"] is False
+    assert "구분할 수 없습니다" not in fp.format_availability(got)
+
+
+def test_the_api_window_is_probed_once_for_every_name():
+    """이름마다 구간을 다시 잡으면 조회가 배로 든다."""
+    seen = []
+    inner = _fake_service({"A": (2015, 1), "B": (2018, 1)}, api_from=(2010, 1))
+
+    def fetch_month(bas_dd):
+        seen.append(bas_dd[:6])
+        return inner(bas_dd)
+
+    got = fp.probe_names(fetch_month, ["A", "B"], fp.months_between((1992, 9), (2026, 8)))
+    assert got["A"]["api_first"] == got["B"]["api_first"] == (2010, 1)
+    assert len(set(seen)) <= 30
