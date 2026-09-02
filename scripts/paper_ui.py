@@ -2539,6 +2539,11 @@ document.querySelector(".tab[data-tab='tab-strategy']").addEventListener("click"
 });
 
 // ── 신호 정확도 탭 (v3.48) ───────────────────────────────────────────────────
+function sigaccDays(a) {
+  // **독립 단위는 건이 아니라 날이다.** 같은 날 신호는 같은 시장을 겪는다.
+  return (a && a.days !== undefined && a.days !== null) ? ` · ${a.days}일치` : "";
+}
+
 function sigaccCard(title, a) {
   const pct = v => (v === null || v === undefined) ? "—" : v + "%";
   const edge = a.avg_edge;
@@ -2547,7 +2552,7 @@ function sigaccCard(title, a) {
     <div class="slot-name">${title}</div>
     <div class="slot-capital delta ${cls}">${edge === null ? "—" : (edge > 0 ? "+" : "") + edge + "%p"}</div>
     <div class="stat-rows">
-      <span>표본</span><span>${a.n}건</span>
+      <span>표본</span><span>${a.n}건${sigaccDays(a)}</span>
       <span>적중률</span><span>${pct(a.hit_rate)}</span>
       <span>평균 수익률</span><span>${pct(a.avg_ret)}</span>
       <span>판정</span><span>${a.verdict}</span>

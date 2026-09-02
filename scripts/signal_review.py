@@ -156,18 +156,28 @@ def evaluate_signal(rec: dict, series: list[tuple[str, float]],
 # ─── 집계 (순수) ─────────────────────────────────────
 
 
+MIN_DAYS = 5               # 서로 다른 신호일이 이보다 적으면 판정하지 않는다
+
+
 def _agg(rows: list[dict], horizon: int) -> dict:
-    vals = [r[f"ret_{horizon}d"] for r in rows if r.get(f"ret_{horizon}d") is not None]
-    edges = [r[f"edge_{horizon}d"] for r in rows if r.get(f"edge_{horizon}d") is not None]
+    kept = [r for r in rows if r.get(f"ret_{horizon}d") is not None]
+    vals = [r[f"ret_{horizon}d"] for r in kept]
+    edges = [r[f"edge_{horizon}d"] for r in kept if r.get(f"edge_{horizon}d") is not None]
     n = len(vals)
+    # **독립 단위는 건이 아니라 날이다.** 같은 날 신호는 같은 시장을 겪는다 —
+    # 125건이라도 4일치면 사실상 표본 4다. 탭 D에서 시간축을 발견에서 뺀 것과
+    # 같은 이유이고, 탭 C에서 달 대신 에피소드를 센 것과 같은 이유다.
+    days = len({r.get("day") for r in kept if r.get("day")})
     hits = sum(1 for v in vals if v > 0)
     return {
         "n": n,
+        "days": days,
         "hit_rate": round(hits / n * 100, 1) if n else None,
         "avg_ret": round(sum(vals) / n, 3) if n else None,
         "avg_edge": round(sum(edges) / len(edges), 3) if edges else None,
         "verdict": ("표본 부족" if n < MIN_SAMPLE else
-                    ("우위 있음" if (edges and sum(edges) / len(edges) > 0) else "우위 없음")),
+                    ("날 부족" if days < MIN_DAYS else
+                     ("우위 있음" if (edges and sum(edges) / len(edges) > 0) else "우위 없음"))),
     }
 
 
@@ -220,10 +230,26 @@ def format_summary(s: dict) -> str:
     """사람이 읽는 요약(순수)."""
     h = s["horizon"]
     t = s["total"]
+    # **지평별로 몇 건이 찼는지 먼저 말한다(2026-09-02).** 화면에는 붙였는데
+    # 여기에 안 붙여서, CLI만 「표본이 없습니다」라고 했다 — 실제로는 1거래일
+    # 결과가 125건 있었다. 같은 결함을 한 곳만 고치면 다른 곳이 남는다.
+    avail = s.get("available") or {}
+    avail_line = ("   지평별 평가 완료: "
+                  + " · ".join(f"{k}거래일 {v}건" for k, v in sorted(avail.items()))
+                  ) if avail else ""
     if not t["n"]:
-        return ("📡 신호 적중률: 평가 가능한 표본이 아직 없습니다.\n"
-                f"   신호 발생 후 {h}거래일이 지나야 결과가 채워집니다.")
-    lines = [f"📡 *신호 적중률* ({h}거래일 기준)", "",
+        out = ["📡 신호 적중률: **이 지평에는** 평가 가능한 표본이 아직 없습니다.",
+               f"   신호 발생 후 {h}거래일이 지나야 결과가 채워집니다."]
+        if avail_line:
+            out.append(avail_line)
+            other = [k for k, v in avail.items() if v and k != h]
+            if other:
+                out.append(f"   → 지금 볼 수 있는 지평: --horizon {other[0]}")
+        return "\n".join(out)
+    lines = [f"📡 *신호 적중률* ({h}거래일 기준)"]
+    if avail_line:
+        lines.append(avail_line)
+    lines += ["",
              f"전체 {t['n']}건 · 적중 {t['hit_rate']}% · 평균 {t['avg_ret']}% "
              f"· 베이스라인 대비 {t['avg_edge']}%p → {t['verdict']}", ""]
     lines.append("전략별")
@@ -237,7 +263,12 @@ def format_summary(s: dict) -> str:
               f"  • 발송된 신호: {m['sent']['n']}건 · edge {m['sent']['avg_edge']}%p",
               f"  • 억제된 신호: {m['suppressed']['n']}건 · edge {m['suppressed']['avg_edge']}%p",
               "  _억제분이 더 좋으면 필터가 값을 빼고 있다는 뜻이다._"]
-    lines += ["", f"_표본 {MIN_SAMPLE}건 미만은 '표본 부족'으로만 표시한다. "
+    if t.get("days", 0) < MIN_DAYS:
+        lines += ["", f"⚠️ **{t['n']}건이지만 서로 다른 신호일은 {t.get('days')}일뿐이다.** "
+                      "같은 날 신호는 같은 시장을 겪으므로 독립 표본이 아니다 — "
+                      f"하루의 방향이 그날 신호 전체의 부호를 정한다. 서로 다른 날 "
+                      f"{MIN_DAYS}일이 모이기 전에는 위 숫자를 판정으로 읽지 않는다."]
+    lines += ["", f"_표본 {MIN_SAMPLE}건 미만은 '표본 부족', 신호일 {MIN_DAYS}일 미만은 '날 부족'. "
                   "체결·수수료·슬리피지 미반영._"]
     return "\n".join(lines)
 

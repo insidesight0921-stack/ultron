@@ -1091,3 +1091,10 @@ def test_signal_accuracy_reports_what_each_horizon_has(client, monkeypatch):
 def test_the_signal_tab_shows_the_horizon_counts(client):
     html = client.get("/").text
     assert "평가 완료:" in html and "거래일이 지나지 않음" in html
+
+
+def test_the_signal_card_shows_how_many_days_the_sample_spans(client):
+    """**125건이라도 4일치면 사실상 표본 4다.** 건수만 보이면 크게 오해한다."""
+    html = client.get("/").text
+    assert "sigaccDays" in html and "일치" in html
+    assert "독립 단위는 건이 아니라 날" in html

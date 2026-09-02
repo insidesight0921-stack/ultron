@@ -108,9 +108,21 @@ def test_evaluate_keeps_suppressed_flag():
 # ─── 집계 ────────────────────────────────────────────
 
 
-def _out(ret, edge, strategy="볼린저", action="매수", suppressed=False, pending=False):
+_DAY_SEQ = iter(range(1, 400))
+
+
+def _out(ret, edge, strategy="볼린저", action="매수", suppressed=False,
+         pending=False, day=None):
+    """기본은 **서로 다른 날**이다.
+
+    2026-09-02에 「신호일 5일 미만이면 판정하지 않는다」를 넣으면서, 날짜가
+    없던 이 헬퍼가 전부 같은 날로 취급돼 기존 테스트가 깨졌다. 여기 테스트들이
+    보려는 것은 edge·MTF 의미이지 날 수가 아니므로 날짜를 흩어 준다.
+    """
+    n = next(_DAY_SEQ)
     return {"strategy": strategy, "action": action, "suppressed": suppressed,
-            "pending": pending, "ret_5d": ret, "edge_5d": edge}
+            "pending": pending, "ret_5d": ret, "edge_5d": edge,
+            "day": day or f"2026-{(n % 12) + 1:02d}-{(n % 28) + 1:02d}"}
 
 
 def test_summarize_hit_rate_and_edge():
@@ -329,3 +341,59 @@ def test_the_mtf_split_also_uses_the_horizon(  ):
             + [_partial(key=f"h{i}", suppressed=True) for i in range(4)])
     got = sr.summarize(rows, horizon=1)
     assert got["mtf"]["sent"]["n"] == 6 and got["mtf"]["suppressed"]["n"] == 4
+
+
+def test_the_cli_summary_says_which_horizon_has_data():
+    """**같은 결함을 한 곳만 고치면 다른 곳이 남는다.**
+
+    화면에는 지평별 건수를 붙였는데 `format_summary`에 안 붙여서,
+    CLI만 「표본이 없습니다」라고 했다 — 실제로는 1거래일 결과가 125건
+    있었다(2026-09-02 실측).
+    """
+    rows = [_partial(key=f"k{i}") for i in range(12)]
+    msg = sr.format_summary(sr.summarize(rows, horizon=5))
+    assert "1거래일 12건" in msg
+    assert "--horizon 1" in msg
+
+
+def test_the_summary_shows_the_counts_even_when_it_has_a_verdict():
+    rows = [_partial(key=f"k{i}") for i in range(12)]
+    msg = sr.format_summary(sr.summarize(rows, horizon=1))
+    assert "지평별 평가 완료" in msg
+    assert "전체 12건" in msg
+
+
+# ─── 독립 단위는 건이 아니라 날이다 (2026-09-02) ────────
+
+def test_many_signals_on_few_days_is_not_a_verdict():
+    """**125건이라도 4일치면 사실상 표본 4다.**
+
+    같은 날 신호는 같은 시장을 겪는다 — 하루의 방향이 그날 신호 전체의
+    부호를 정한다. 탭 D에서 시간축을 발견에서 뺀 것, 탭 C에서 달 대신
+    에피소드를 센 것과 같은 이유다.
+    """
+    rows = [_partial(key=f"k{i}", day="2026-09-01") for i in range(20)]
+    got = sr.summarize(rows, horizon=1)
+    assert got["total"]["n"] == 20
+    assert got["total"]["days"] == 1
+    assert got["total"]["verdict"] == "날 부족"
+
+
+def test_enough_days_allows_a_verdict():
+    rows = [_partial(key=f"k{i}", day=f"2026-09-{(i % 6) + 1:02d}") for i in range(20)]
+    got = sr.summarize(rows, horizon=1)
+    assert got["total"]["days"] == 6
+    assert got["total"]["verdict"] in ("우위 있음", "우위 없음")
+
+
+def test_the_day_warning_is_printed():
+    rows = [_partial(key=f"k{i}", day="2026-09-01") for i in range(20)]
+    msg = sr.format_summary(sr.summarize(rows, horizon=1))
+    assert "독립 표본이 아니다" in msg
+    assert "1일뿐" in msg
+
+
+def test_sample_shortage_still_wins_over_day_shortage():
+    """건수가 모자라면 그것이 먼저다 — 두 결함을 한 문장에 섞지 않는다."""
+    rows = [_partial(key=f"k{i}", day=f"2026-09-{i+1:02d}") for i in range(5)]
+    assert sr.summarize(rows, horizon=1)["total"]["verdict"] == "표본 부족"
