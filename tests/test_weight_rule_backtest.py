@@ -135,3 +135,66 @@ def test_an_empty_series_does_not_crash():
     assert wb.rotate([], 3) == []
     assert wb.average_weight([None, None]) is None
     assert wb.max_drawdown([]) is None
+
+
+# ─── VKOSPI 오버레이(봇의 실제 규칙) ────────────────────
+
+def test_the_overlay_matches_the_bot_rule():
+    """`kium_bot.compute_weight_recommendation`과 같은 값을 내야 한다."""
+    assert wb.vkospi_adjust(0.70, 70.0) == 0.60      # > HIGH → 채권 +10%p
+    assert wb.vkospi_adjust(0.70, 15.0) == 0.80      # < LOW  → 주식 +10%p
+    assert wb.vkospi_adjust(0.70, 30.0) == 0.70      # 중립
+
+
+def test_an_unknown_vkospi_leaves_the_base_alone():
+    """**모르는 날을 중립으로 세면 「미확보」가 하나의 판정이 된다.**"""
+    assert wb.vkospi_adjust(0.50, None) == 0.50
+
+
+def test_the_overlay_respects_the_clamp():
+    assert wb.vkospi_adjust(0.85, 15.0) == 0.90      # 상한 90%
+    assert wb.vkospi_adjust(0.35, 70.0) == 0.30      # 하한 30%
+
+
+def test_no_base_means_no_weight():
+    assert wb.vkospi_adjust(None, 70.0) is None
+
+
+def test_the_combined_weight_uses_yesterdays_vkospi():
+    """**오늘 VKOSPI를 보고 오늘 비중을 정하는 것은 미래 참조다.**"""
+    closes = [10, 10, 10, 10, 10]
+    days = ["d1", "d2", "d3", "d4", "d5"]
+    vk = {"d4": 70.0}                     # d4에 공포 급등
+    got = wb.combined_weights(closes, days, vk, window=2)
+    assert got[4] == 0.60                 # d5 비중이 d4 값으로 정해진다
+    assert got[3] == 0.70                 # d4 비중은 d3 값(없음)으로
+
+
+def test_the_overlay_only_leg_keeps_the_same_eligible_days():
+    """두 다리를 비교하려면 **판정 가능한 날이 같아야** 한다."""
+    closes = [10, 11, 12, 13, 14]
+    days = ["d1", "d2", "d3", "d4", "d5"]
+    ma = wb.ma_weights(closes, window=3)
+    only = wb.overlay_only_weights(closes, days, {}, window=3)
+    assert [w is None for w in ma] == [w is None for w in only]
+
+
+def test_the_overlay_only_leg_ignores_the_moving_average():
+    """200일선 아래여도 VKOSPI만 보는 다리는 기준 비중을 유지한다."""
+    closes = [20, 18, 16, 14, 12]          # 계속 하락 → 200일선 아래
+    days = ["d1", "d2", "d3", "d4", "d5"]
+    only = wb.overlay_only_weights(closes, days, {}, window=3, base=0.70)
+    assert [w for w in only if w is not None] == [0.70, 0.70]
+
+
+def test_restrict_keeps_series_aligned():
+    days = ["a", "b", "c"]
+    got_days, got_x = wb.restrict(days, [1, 2, 3], keep=lambda d: d != "b")
+    assert got_days == ["a", "c"] and got_x == [1, 3]
+
+
+def test_the_weight_is_rounded_where_the_bot_rounds_it():
+    """봇은 `round(base_equity, 2)`로 내보낸다. 여기서 안 하면 0.7+0.1이
+    0.7999999999999999가 되어 **봇이 실제로 쓰는 값과 어긋난다.**"""
+    assert wb.vkospi_adjust(0.70, 15.0) == 0.80
+    assert isinstance(wb.vkospi_adjust(0.50, 70.0), float)

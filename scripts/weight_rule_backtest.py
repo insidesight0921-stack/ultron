@@ -106,6 +106,84 @@ def switches(weights: list[Optional[float]]) -> int:
     return sum(1 for i in range(1, len(vals)) if vals[i] != vals[i - 1])
 
 
+# ─── 순수: VKOSPI 오버레이(봇의 실제 규칙) ─────────────
+#
+# `kium_bot.compute_weight_recommendation`을 그대로 옮긴다.
+#   1차 200일선: 위 70% / 아래 50%
+#   2차 VKOSPI:  > HIGH → −10%p · < LOW → +10%p
+#   클램프 30~90%
+# **여기서도 전일 값으로 다음날 비중을 정한다.**
+
+VKOSPI_HIGH = 60.6         # kium_bot 실측 p80 (2026-09-01 확정)
+VKOSPI_LOW = 20.7          # p20
+OVERLAY_STEP = 0.10
+CLAMP = (0.30, 0.90)
+
+
+def vkospi_adjust(base: Optional[float], vkospi: Optional[float], *,
+                  high: float = VKOSPI_HIGH, low: float = VKOSPI_LOW,
+                  step: float = OVERLAY_STEP, clamp=CLAMP) -> Optional[float]:
+    """VKOSPI 오버레이(순수). 값이 없으면 **기본 비중을 그대로 둔다.**
+
+    모르는 날을 중립(mid)으로 세면 「미확보」가 하나의 판정이 된다 —
+    2026-09-01 경보 설계에서 정한 것과 같은 원칙이다.
+    """
+    if base is None:
+        return None
+    out = base
+    if vkospi is not None:
+        if vkospi > high:
+            out -= step
+        elif vkospi < low:
+            out += step
+    # **봇과 같은 자리에서 반올림한다.** `compute_weight_recommendation`이
+    # `round(base_equity, 2)`로 내보내므로, 여기서 안 하면 0.7+0.1이
+    # 0.7999999999999999가 되어 봇이 실제로 쓰는 값과 어긋난다.
+    return round(max(clamp[0], min(clamp[1], out)), 2)
+
+
+def combined_weights(closes: list[float], days: list[str],
+                     vkospi_by_day: dict, *, window: int = MA_WINDOW,
+                     above: float = ABOVE_WEIGHT, below: float = BELOW_WEIGHT,
+                     high: float = VKOSPI_HIGH, low: float = VKOSPI_LOW
+                     ) -> list[Optional[float]]:
+    """200일선 + VKOSPI를 합친 비중(순수). 봇이 실제로 내는 값."""
+    base = ma_weights(closes, window=window, above=above, below=below)
+    out: list[Optional[float]] = []
+    for i, b in enumerate(base):
+        prev_day = days[i - 1] if i > 0 else None
+        v = vkospi_by_day.get(prev_day) if prev_day else None
+        out.append(vkospi_adjust(b, v, high=high, low=low))
+    return out
+
+
+def overlay_only_weights(closes: list[float], days: list[str],
+                         vkospi_by_day: dict, *, window: int = MA_WINDOW,
+                         base: float = ABOVE_WEIGHT, **kw
+                         ) -> list[Optional[float]]:
+    """**VKOSPI 다리만** — 200일선을 끄고 고정 기준에 오버레이만 얹는다.
+
+    합친 규칙이 나아졌다면, 그것이 어느 다리 덕인지 갈라야 한다.
+    """
+    ma = ma_weights(closes, window=window)          # 판정 가능한 날만 맞춘다
+    out: list[Optional[float]] = []
+    for i, b in enumerate(ma):
+        if b is None:
+            out.append(None)
+            continue
+        prev_day = days[i - 1] if i > 0 else None
+        out.append(vkospi_adjust(base, vkospi_by_day.get(prev_day) if prev_day else None,
+                                 **kw))
+    return out
+
+
+def restrict(days: list[str], *series, keep) -> tuple:
+    """`keep(day)`가 참인 날만 남긴다(순수). 계열들의 길이를 맞춰 자른다."""
+    idx = [i for i, d in enumerate(days) if keep(d)]
+    return ([days[i] for i in idx],
+            *[[s[i] for i in idx] for s in series])
+
+
 # ─── 순수: 성과 ──────────────────────────────────────
 
 def max_drawdown(values: list[float]) -> Optional[float]:
@@ -245,6 +323,23 @@ def format_compare(table: dict, *, mdd_test: dict = None,
 
 # ─── I/O ─────────────────────────────────────────────
 
+def load_vkospi(path=None) -> dict:
+    """VKOSPI 일별 캐시 → {날짜: 값}. 없으면 빈 dict."""
+    import json
+    from pathlib import Path as _P
+
+    if path is None:
+        import price_sanity as ps
+        files = sorted((ps._cache_root() / "indices").glob("market_index_VKOSPI_*.json"))
+        if not files:
+            return {}
+        path = files[-1]
+    payload = json.loads(_P(path).read_text(encoding="utf-8"))
+    series = payload.get("series") or {}
+    return {str(d): float(c)
+            for d, c in zip(series.get("date") or [], series.get("close") or [])}
+
+
 def load_kospi(path=None) -> tuple[list[str], list[float]]:
     """로컬 KOSPI 일봉 캐시 → (날짜, 종가). 네트워크를 쓰지 않는다."""
     import json
@@ -269,6 +364,8 @@ def _cli() -> int:
     ap.add_argument("--below", type=float, default=BELOW_WEIGHT)
     ap.add_argument("--window", type=int, default=MA_WINDOW)
     ap.add_argument("--from", dest="start", default=None, help="YYYYMMDD")
+    ap.add_argument("--combined", action="store_true",
+                    help="VKOSPI 오버레이까지 합친 봇의 실제 규칙을 잰다")
     args = ap.parse_args()
 
     days, closes = load_kospi()
@@ -280,6 +377,46 @@ def _cli() -> int:
         days = [days[i] for i in keep]
         closes = [closes[i] for i in keep]
     rets = daily_returns(closes)
+    if args.combined:
+        vk = load_vkospi()
+        if not vk:
+            print("❌ VKOSPI 캐시가 없습니다 — collect_history.py --vkospi 로 먼저 받으세요.")
+            return 1
+        # **VKOSPI가 있는 구간으로만 자른다.** 없는 날을 중립으로 채우면
+        # 「미확보」가 하나의 판정이 되고, 두 다리의 비교 구간도 어긋난다.
+        span = sorted(vk)
+        first, last = span[0], span[-1]
+        keep = set(d for d in days if first <= d <= last)
+        idx = [i for i, d in enumerate(days) if d in keep]
+        if len(idx) < MIN_DAYS:
+            print(f"❌ 겹치는 구간이 {len(idx)}일뿐입니다 — {MIN_DAYS}일 미만이면 판정하지 않습니다.")
+            return 1
+        combined = combined_weights(closes, days, vk, window=args.window,
+                                    above=args.above, below=args.below)
+        ma_only = ma_weights(closes, window=args.window,
+                             above=args.above, below=args.below)
+        vk_only = overlay_only_weights(closes, days, vk, window=args.window,
+                                       base=args.above)
+        cut = lambda seq: [seq[i] for i in idx]           # noqa: E731
+        rets_c, comb_c = cut(rets), cut(combined)
+        table = {"합친 규칙(200일선+VKOSPI)": performance(rets_c, comb_c),
+                 "200일선만": performance(rets_c, cut(ma_only)),
+                 "VKOSPI만": performance(rets_c, cut(vk_only))}
+        avg = average_weight(comb_c)
+        table[f"고정 {args.above:.0%}"] = performance(
+            rets_c, constant_weights(comb_c, args.above))
+        if avg is not None:
+            table[f"고정 {avg:.1%}(같은 평균 비중)"] = performance(
+                rets_c, constant_weights(comb_c, avg))
+        print(f"  겹치는 구간 {len(idx)}일 ({days[idx[0]]} ~ {days[idx[-1]]}) · "
+              f"VKOSPI {len(vk)}일 · 창 {args.window}일")
+        print(f"  ⚠️ VKOSPI 이력이 {len(vk)}일뿐이라 이 판정의 구간은 그만큼 짧습니다.")
+        print()
+        print(format_compare(
+            table,
+            mdd_test=rotation_test(rets_c, comb_c, _mdd_metric, larger_is_better=False),
+            ret_test=rotation_test(rets_c, comb_c, _return_metric)))
+        return 0
     weights = ma_weights(closes, window=args.window,
                          above=args.above, below=args.below)
     print(f"  KOSPI {len(closes)}일 ({days[0]} ~ {days[-1]}) · "
