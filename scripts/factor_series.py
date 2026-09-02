@@ -196,58 +196,89 @@ def pearson(xs: list, ys: list) -> Optional[float]:
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (dx * dy) ** 0.5
 
 
-def jumps(series: dict, *, threshold: float = 0.25) -> list:
-    """한 달에 threshold 넘게 움직인 달(순수) — 지수 교체·오조회는 여기서 튄다."""
-    out = []
+# `jumps()`는 지웠다(2026-09-02). 「월 25% 급변 = 오염」이라는 이 검사가
+# 멀쩡한 200개월을 실격시킨 장본인이다. 지금 시장은 KOSPI 자체가 한 달에
+# +30%, −22% 움직인다. 아무도 부르지 않는 검사를 남겨두면 다음 사람이
+# 그것을 다시 쓴다 — 죽은 가지는 남기지 않는다.
+
+
+def impossible(series: dict) -> list:
+    """**있을 수 없는 값**만 모은다(순수). 이상해 보이는 것과 다르다."""
+    bad = []
     for month in sorted(series):
-        prev = _prev_month(month)
-        if prev in series and series[prev]:
-            change = series[month] / series[prev] - 1.0
-            if abs(change) >= threshold:
-                out.append((month, series[prev], series[month], change))
-    return out
+        value = series[month]
+        if value is None or not isinstance(value, (int, float)):
+            bad.append((month, "숫자가 아니다", value))
+        elif value <= 0:
+            bad.append((month, "0 이하", value))
+    return bad
 
 
-def audit(series_by_name: dict, *, corr_floor: float = 0.7,
-          jump: float = 0.25) -> dict:
-    """스프레드를 만들기 **전에** 원자료를 의심한다(순수).
+def excess_moves(series: dict, benchmark: dict, *, top: int = 5) -> list:
+    """벤치마크 대비 초과 움직임이 큰 달(순수). 큰 순서로 top개.
 
-    2026-09-02: 이 검사가 없어서 오염된 200개월을 그대로 국면 분석에 넣을
-    뻔했다. 누적 −89.9%p·표준편차 6.07%p는 전혀 이상해 보이지 않았다.
+    **이것은 오염의 증거가 아니다.** 2026-05 소형주는 KOSPI가 +28%인 달에
+    −14%였다(초과 −43%p). 진짜였다.
+    """
+    rl, rb = monthly_returns(series), monthly_returns(benchmark)
+    common = sorted(set(rl) & set(rb))
+    rows = [(m, rl[m], rb[m], rl[m] - rb[m]) for m in common]
+    return sorted(rows, key=lambda r: -abs(r[3]))[:top]
+
+
+def audit(series_by_name: dict, *, benchmark: Optional[dict] = None) -> dict:
+    """원자료를 **대조군과 나란히 놓는다. 판정하지 않는다.**
+
+    2026-09-02 이 함수의 첫 판본은 「두 다리 상관 <0.70」과 「월 25% 급변」을
+    자동 실격 사유로 삼았고, **멀쩡한 200개월을 오염으로 판정했다.** 실제로는
+    KOSPI 자체가 1년 만에 3,071 → 8,476으로 간 대형주 주도 장세였고,
+    코스피 대형주와 KOSPI의 상관은 **+0.996**이었다.
+
+    임계값으로 진짜와 가짜를 가를 수 없다. 가른 것은 **독립된 대조군**이었다.
+    그래서 여기서는 있을 수 없는 값만 막고, 나머지는 사람이 보도록 낸다.
     """
     names = list(series_by_name)
     rets = {n: monthly_returns(series_by_name[n]) for n in names}
     common = sorted(set.intersection(*[set(r) for r in rets.values()])) if rets else []
-    corr = None
-    if len(names) == 2 and common:
-        corr = pearson([rets[names[0]][m] for m in common],
-                       [rets[names[1]][m] for m in common])
-    bad = {n: jumps(series_by_name[n], threshold=jump) for n in names}
-    problems = []
-    if corr is not None and corr < corr_floor:
-        problems.append(f"두 다리의 상관이 {corr:+.3f} — {corr_floor:+.2f} 미만이면 "
-                        f"같은 시장의 대·소형이라 보기 어렵다")
-    for n, js in bad.items():
-        if js:
-            problems.append(f"{n}: 월 {jump:.0%} 넘는 급변 {len(js)}회 "
-                            f"({', '.join(m for m, *_ in js[:4])}…)")
-    return {"months": len(common), "corr": corr, "jumps": bad,
-            "problems": problems, "ok": not problems}
+    blocking = []
+    for n in names:
+        for month, why, value in impossible(series_by_name[n]):
+            blocking.append(f"{n} {month}: {why} ({value})")
+    report = {}
+    if benchmark:
+        rb = monthly_returns(benchmark)
+        for n in names:
+            shared = sorted(set(rets[n]) & set(rb))
+            report[n] = {
+                "corr": pearson([rets[n][m] for m in shared], [rb[m] for m in shared]),
+                "months": len(shared),
+                "excess": excess_moves(series_by_name[n], benchmark),
+            }
+    return {"months": len(common), "blocking": blocking, "benchmark": report,
+            "ok": not blocking}
 
 
 def format_audit(result: dict) -> str:
-    """감사 결과(순수). **문제가 있으면 스프레드를 만들지 않는다.**"""
-    lines = ["🔍 원자료 감사", ""]
+    """대조 보고(순수). **합격/불합격이 아니라 나란히 보여준다.**"""
+    lines = ["🔍 원자료 대조", ""]
     lines.append(f"  겹치는 달: {result.get('months', 0)}")
-    if result.get("corr") is not None:
-        lines.append(f"  두 다리 상관: {result['corr']:+.3f}")
-    lines.append("")
-    if result.get("ok"):
-        lines.append("  ✅ 걸린 것 없음 — 스프레드를 만들어도 됩니다.")
+    if result.get("blocking"):
+        lines.append("")
+        lines.append("  ❌ 있을 수 없는 값 — 여기서 멈춥니다:")
+        for item in result["blocking"]:
+            lines.append(f"   · {item}")
         return chr(10).join(lines)
-    lines.append("  ❌ 이 원자료로는 스프레드를 만들지 않습니다:")
-    for problem in result.get("problems", []):
-        lines.append(f"   · {problem}")
+    for name, info in (result.get("benchmark") or {}).items():
+        corr = info.get("corr")
+        corr_s = f"{corr:+.3f}" if corr is not None else "N/A"
+        lines.append("")
+        lines.append(f"  {name}: 벤치마크 상관 {corr_s} ({info.get('months', 0)}개월)")
+        for month, leg, bench, diff in info.get("excess", [])[:3]:
+            lines.append(f"      {month}: 지수 {leg * 100:+6.2f}% / 벤치마크 "
+                         f"{bench * 100:+6.2f}% → 초과 {diff * 100:+6.2f}%p")
+    lines.append("")
+    lines.append("_상관이 낮다고 오염은 아닙니다 — 진짜 국면일 수 있습니다._")
+    lines.append("_판정하지 않습니다. 대조군과 나란히 놓을 뿐입니다._")
     return chr(10).join(lines)
 
 
@@ -354,6 +385,8 @@ def _cli() -> int:
     ap.add_argument("--service", default="KOSPI 시리즈", choices=sorted(k.INDEX_ENDPOINTS))
     ap.add_argument("--from", dest="start", default="2010-01")
     ap.add_argument("--to", dest="end", default=None)
+    ap.add_argument("--benchmark", default="KOSPI",
+                    help="대조군 지수(기본 KOSPI 일봉 캐시). 'none'이면 대조 없이")
     ap.add_argument("--audit", action="store_true",
                     help="이미 받은 캐시만 검사한다(네트워크 없이)")
     ap.add_argument("--forget", nargs="+", metavar="NAME",
@@ -361,6 +394,25 @@ def _cli() -> int:
     ap.add_argument("--dump", metavar="YYYYMMDD",
                     help="그 날짜에 같은 이름의 행이 몇 개인지 그대로 보여준다")
     args = ap.parse_args()
+
+    def _benchmark(which: str) -> Optional[dict]:
+        """KOSPI 일봉 캐시에서 월말 종가를 만든다. 없으면 None(대조 없이 진행)."""
+        if not which or which.lower() == "none":
+            return None
+        import glob
+        files = sorted(glob.glob(str(Path(root) / ".." / "shareable" / "cache" /
+                                     "indices" / f"market_index_{which}_*.json")))
+        if not files:
+            files = sorted(glob.glob(str(Path(root).parent / "shareable" / "cache" /
+                                         "indices" / f"market_index_{which}_*.json")))
+        if not files:
+            print(f"  (대조군 {which} 캐시를 찾지 못했습니다 — 대조 없이 진행)")
+            return None
+        raw = json.loads(Path(files[-1]).read_text(encoding="utf-8")).get("series", {})
+        out: dict = {}
+        for day, close in zip(raw.get("date", []), raw.get("close", [])):
+            out[f"{day[:4]}-{day[4:6]}"] = float(close)   # 그 달 마지막 값이 남는다
+        return out
 
     path0 = cache_path(args.service, root)
     if args.forget:
@@ -373,8 +425,8 @@ def _cli() -> int:
         picked = {n: cached.get(n, {}) for n in args.names if cached.get(n)}
         if len(picked) < len(args.names):
             print(f"  캐시에 없는 이름: {[n for n in args.names if n not in picked]}")
-        print(format_audit(audit(picked)))
-        return 0 if audit(picked)["ok"] else 1
+        print(format_audit(audit(picked, benchmark=_benchmark(args.benchmark))))
+        return 0
 
     if not k._auth_key():
         print(f"❌ {k.KEY_NAME}가 없습니다.")
@@ -430,11 +482,13 @@ def _cli() -> int:
             print(f"    {name}: {len(months)}개월 ({months[0]} ~ {months[-1]})")
         print("    --dump 으로 무엇이 섞였는지 보세요.")
 
-    checked = audit({n: series.get(n, {}) for n in args.names[:2]})
+    checked = audit({n: series.get(n, {}) for n in args.names[:2]},
+                    benchmark=_benchmark(args.benchmark))
     print()
     print(format_audit(checked))
     if not checked["ok"]:
-        print("\n  스프레드를 만들지 않았습니다. 원자료를 먼저 해결하세요.")
+        print()
+        print("  있을 수 없는 값이 있어 스프레드를 만들지 않았습니다.")
         return 1
 
     long_name, short_name = args.names[0], args.names[1]

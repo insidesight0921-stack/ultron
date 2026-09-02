@@ -259,34 +259,58 @@ def test_collect_refuses_an_ambiguous_month_instead_of_guessing():
     assert got["__ambiguous__"]["A"] == ["2026-05"]
 
 
-def test_a_low_correlation_between_the_legs_is_a_problem():
-    """**이것이 그날 유일한 낌새였다.** 대·소형이 +0.52로 움직일 수는 없다."""
-    import math
-    small = {f"2010-{m:02d}": 100 * (1.01 ** m) for m in range(1, 13)}
-    large = {f"2010-{m:02d}": 100 * (1 + 0.3 * math.sin(m)) for m in range(1, 13)}
-    got = fs.audit({"소형": small, "대형": large})
+def test_a_real_market_regime_is_not_called_contamination():
+    """**2026-09-02에 내가 저지른 반대 방향의 실패.**
+
+    소형-대형 상관 +0.52와 월 33% 급변을 자동 실격 사유로 삼아 멀쩡한
+    200개월을 「전부 못 쓴다」고 판정했다. 실제로는 KOSPI 자체가 1년 만에
+    3,071 → 8,476으로 간 대형주 주도 장세였고, 코스피 대형주와 KOSPI의
+    상관은 +0.996이었다. **임계값은 진짜와 가짜를 가르지 못한다.**
+    """
+    kospi = {"2026-04": 6598.87, "2026-05": 8476.15, "2026-06": 8476.48}
+    large = {"2026-04": 7022.94, "2026-05": 9341.25, "2026-06": 9421.19}
+    small = {"2026-04": 3022.74, "2026-05": 2585.47, "2026-06": 2299.17}
+    got = audit_pair(large, small, kospi)
+    assert got["ok"], got["blocking"]
+    assert "판정하지 않습니다" in fs.format_audit(got)
+
+
+def audit_pair(large, small, benchmark):
+    return fs.audit({"대형": large, "소형": small}, benchmark=benchmark)
+
+
+def test_the_benchmark_correlation_is_reported_for_each_leg():
+    kospi = {f"2010-{m:02d}": 100 + 3 * m for m in range(1, 13)}
+    tracks = {f"2010-{m:02d}": 200 + 6 * m for m in range(1, 13)}
+    got = fs.audit({"추종": tracks}, benchmark=kospi)
+    assert got["benchmark"]["추종"]["corr"] is not None
+    assert "벤치마크 상관" in fs.format_audit(got)
+
+
+def test_a_big_divergence_is_shown_not_judged():
+    """초과 −43%p여도 실격이 아니다 — 2026-05 소형주가 실제로 그랬다."""
+    kospi = {"2026-04": 6598.87, "2026-05": 8476.15}
+    small = {"2026-04": 3022.74, "2026-05": 2585.47}
+    got = fs.audit({"소형": small}, benchmark=kospi)
+    assert got["ok"]
+    month, leg, bench, diff = got["benchmark"]["소형"]["excess"][0]
+    assert month == "2026-05" and diff < -0.40
+
+
+def test_an_impossible_value_still_blocks():
+    """**있을 수 없는 값**은 여전히 막는다 — 이상해 보이는 것과 다르다."""
+    got = fs.audit({"X": {"2010-01": 100.0, "2010-02": -5.0}})
     assert not got["ok"]
-    assert any("상관" in p for p in got["problems"])
+    assert "0 이하" in fs.format_audit(got)
 
 
-def test_a_monthly_jump_is_a_problem():
-    series = {"2025-06": 3068.0, "2025-07": 9421.0}
-    got = fs.audit({"대형": series})
-    assert not got["ok"]
-    assert any("급변" in p for p in got["problems"])
+def test_a_non_number_blocks():
+    assert not fs.audit({"X": {"2010-01": "없음"}})["ok"]
 
 
-def test_a_clean_pair_passes():
-    small = {f"2010-{m:02d}": 100 + m for m in range(1, 13)}
-    large = {f"2010-{m:02d}": 200 + 2 * m for m in range(1, 13)}
-    got = fs.audit({"소형": small, "대형": large})
-    assert got["ok"], got["problems"]
-    assert "스프레드를 만들어도 됩니다" in fs.format_audit(got)
-
-
-def test_the_audit_report_refuses_out_loud():
-    got = fs.audit({"대형": {"2025-06": 3068.0, "2025-07": 9421.0}})
-    assert "스프레드를 만들지 않습니다" in fs.format_audit(got)
+def test_audit_works_without_a_benchmark():
+    got = fs.audit({"X": {"2010-01": 100.0, "2010-02": 101.0}})
+    assert got["ok"] and got["benchmark"] == {}
 
 
 def test_pearson_needs_variation():
