@@ -91,7 +91,8 @@ def test_a_constant_predictor_is_flagged():
 
 
 def test_a_varying_predictor_is_not_flagged_constant():
-    r = ne.evaluate(_preds("udud"), _truth("uudd"))
+    # 표본은 MIN_PREDICTIONS 이상이어야 순열검정까지 간다(v3.64에서 게이트 추가).
+    r = ne.evaluate(_preds("udud" * 10), _truth("uudd" * 10))
     assert r["constant"] is False and r["percentile"] is not None
 
 
@@ -364,3 +365,70 @@ def test_the_report_says_the_sample_count_is_not_the_blocker():
     msg = ne.format_report({}, _one_sided())
     assert "지금은 표본 수가 문제가 아니다" in msg
     assert msg.index("표본 수가 문제가 아니다") < msg.index("기준선 +5%p")
+
+
+# ─── 소급 가능한 지표는 로그를 기다리지 않는다 (2026-09-01) ──
+#
+# VIX는 494일 캐시가 있는데도 화면에 "로그 1일 — 적재 대기"가 떴다. 이미
+# 359일을 평가할 수 있는 상태였다. **표본이 없는 것과 안 가져온 것은 다르다.**
+
+
+def test_vix_is_evaluated_from_cache_not_from_the_log(tmp_path, monkeypatch):
+    import json
+
+    import price_sanity as ps
+
+    d = tmp_path / "vix"
+    d.mkdir(parents=True)
+    (d / "vix_20260301.json").write_text(json.dumps({
+        "series": {"date": ["20260101", "20260102", "20260103"],
+                   "close": [12.0, 18.0, 30.0]}}), encoding="utf-8")
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+    out = dict(ne._vix_predictions(thresholds=(15.7, 20.6)))
+    assert out["20260101"] == ne.UP      # 낮은 VIX = 위험선호
+    assert out["20260103"] == ne.DOWN
+    assert out["20260102"] is None       # 중립 밴드는 예측하지 않는다
+
+
+def test_the_vix_predictor_is_empty_without_a_cache(tmp_path, monkeypatch):
+    import price_sanity as ps
+
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+    assert ne._vix_predictions(thresholds=(15.7, 20.6)) == []
+
+
+def test_a_tiny_sample_gets_no_hit_rate():
+    """1건에서 100%는 결과가 아니라 잡음이다 — 외국인 순매수가 그렇게 떴다.
+
+    (상수가 아닌 예측기로 검사한다 — 상수면 그쪽 진단이 먼저다.)
+    """
+    truth = {f"d{i}": ne.UP for i in range(50)}
+    r = ne.evaluate([("d0", ne.UP), ("d1", ne.DOWN)], truth)
+    assert r["n"] == 2
+    assert r["constant"] is False
+    assert r["rate"] is None
+    assert "30건 미만" in r["verdict"]
+
+
+def test_a_sufficient_sample_still_gets_a_rate():
+    truth = {f"d{i}": (ne.UP if i % 2 else ne.DOWN) for i in range(80)}
+    preds = [(f"d{i}", truth[f"d{i}"]) for i in range(80)]
+    assert ne.evaluate(preds, truth)["rate"] == 100.0
+
+
+def test_the_report_survives_a_none_rate():
+    """표본 미달로 rate=None인 결과가 포맷 오류를 냈다(2026-09-01)."""
+    truth = {f"d{i}": ne.UP for i in range(50)}
+    results = {"작은 지표": ne.evaluate([("d0", ne.UP), ("d1", ne.DOWN)], truth)}
+    msg = ne.format_report(results, truth)
+    assert "30건 미만" in msg
+
+
+def test_a_constant_diagnosis_is_not_hidden_by_a_thin_sample():
+    """상수 여부는 예측기의 성질이라 표본 수와 무관하게 진단된다.
+    게이트 순서를 뒤집었더니 이 진단이 '표본 미달'에 가려졌다(2026-09-01)."""
+    truth = _truth("uuuud")
+    r = ne.evaluate(_preds("uuuuu"), truth)
+    assert r["constant"] is True
+    assert "상수 예측" in r["verdict"]
+    assert r["rate"] is None      # 다만 적중률은 표본 미달이라 감춘다

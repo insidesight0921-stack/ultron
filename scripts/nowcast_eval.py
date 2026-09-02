@@ -32,10 +32,14 @@ from __future__ import annotations
 import math
 import random
 from statistics import NormalDist
-from typing import Iterable
+from typing import Iterable, Optional
 
 TRIALS = 2000
 SEED = 20260831
+# 예측이 이보다 적으면 적중률을 내지 않는다. 1건에서 100%는
+# 결과가 아니라 잡음이다 — 2026-09-01에 외국인 순매수가 로그
+# 1일치로 '적중 100%'로 표시됐다.
+MIN_PREDICTIONS = 30
 
 UP, DOWN, NONE = "up", "down", None
 
@@ -140,9 +144,21 @@ def evaluate(predictions: list[tuple], truth: dict, *,
                 "baseline_mean": None, "constant": constant}
     if constant:
         # 상수 예측은 시장 편향을 그대로 되풀이할 뿐이다 — 순열검정에 태우지 않는다.
-        return {**actual, "percentile": None, "baseline_mean": None,
-                "constant": True,
+        #
+        # **표본 미달 검사보다 먼저 본다.** 「늘 한 방향만 찍는다」는 예측기의
+        # 성질이라 5건에서도 참이고, 표본을 늘려도 상수면 여전히 정보가 없다.
+        # 순서를 뒤집었더니 상수 진단이 "표본 미달"에 가려졌다(2026-09-01).
+        thin = actual["n"] < MIN_PREDICTIONS
+        return {**actual,
+                "rate": None if thin else actual["rate"],
+                "percentile": None, "baseline_mean": None, "constant": True,
                 "verdict": "상수 예측 — 방향 정보 없음"}
+    if actual["n"] < MIN_PREDICTIONS:
+        # **표본이 적으면 적중률을 내지 않는다.** 숫자가 보이면 읽는 사람은
+        # 그것을 결과로 받아들인다.
+        return {**actual, "rate": None, "percentile": None,
+                "baseline_mean": None, "constant": constant,
+                "verdict": f"예측 {actual['n']}건 — {MIN_PREDICTIONS}건 미만이라 판정 안 함"}
     sims = [score(p, truth)["rate"] for p in permuted(predictions, trials=trials,
                                                       seed=seed)]
     sims = [s for s in sims if s is not None]
@@ -329,8 +345,11 @@ def format_report(results: dict, truth: dict, *, target: str = "다음 거래일
         return "\n".join(lines)
     lines.append(f"{'지표':22}{'예측':>6}{'적중률':>8}{'항상상승':>8}{'백분위':>8}  판정")
     for name, r in results.items():
-        if not r.get("n"):
-            lines.append(f"{name:22}{'—':>6}{'—':>8}{'—':>8}{'—':>8}  {r.get('verdict','')}")
+        # rate가 None인 경우도 여기서 걸러야 한다 — 표본 미달로 적중률을
+        # 내지 않기로 한 결과가 포맷 오류를 냈다(2026-09-01).
+        if not r.get("n") or r.get("rate") is None:
+            lines.append(f"{name:22}{r.get('n') or '—':>6}"
+                         f"{'—':>8}{'—':>8}{'—':>8}  {r.get('verdict','')}")
             continue
         # **무작위 대조가 아니라 '항상 상승'을 나란히 놓는다.** 읽는 사람이
         # 이겨야 할 상대는 무작위가 아니라 시장 상승 편향이다.
@@ -433,6 +452,72 @@ def _vkospi_predictions(thresholds=None):
     return out
 
 
+def _cached_series(subdir: str, pattern: str) -> dict:
+    """캐시된 일별 계열 → {날짜: 값}. 없으면 빈 dict(순수하지 않은 얇은 I/O)."""
+    import json
+
+    import price_sanity as ps
+
+    try:
+        files = sorted((ps._cache_root() / subdir).glob(pattern))
+        if not files:
+            return {}
+        payload = json.loads(files[-1].read_text(encoding="utf-8"))
+        series = payload.get("series") or {}
+        return {str(d): float(c)
+                for d, c in zip(series.get("date") or [], series.get("close") or [])}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _vix_predictions(thresholds=None):
+    """VIX도 **캐시로 소급된다** — 로그가 쌓이길 기다릴 필요가 없다.
+
+    2026-09-01: `vix_calibrate`가 494일 원자료를 캐시에 남겼는데도 이 함수가
+    없어서 화면에는 "로그 1일 — 적재 대기"가 떴다. 이미 359일을 평가할 수
+    있는 상태였다. **표본이 없는 것과 안 가져온 것은 다르다.**
+
+    낮은 VIX를 위험선호로 본다(`proxy_indicators.vix_state`와 같은 방향).
+    """
+    vix = _cached_series("vix", "vix_*.json")
+    if not vix:
+        return []
+    if thresholds is None:
+        try:
+            import proxy_indicators as pi
+
+            calm = pi._param("vix.calm", pi.VIX_CALM)
+            stress = pi._param("vix.stress", pi.VIX_STRESS)
+        except Exception:  # noqa: BLE001
+            return []
+    else:
+        calm, stress = float(thresholds[0]), float(thresholds[1])
+    return [(d, UP if v <= calm else (DOWN if v >= stress else None))
+            for d, v in sorted(vix.items())]
+
+
+def _flow_predictions(window: int = 5):
+    """외국인 순매수도 캐시가 있으면 소급된다.
+
+    pykrx의 `get_market_trading_value_by_date`는 **임의 기간 조회**인데
+    `proxy_indicators._foreign_net`은 최근 5일만 부른다 — 소급 수집으로
+    캐시를 만들면 이 함수가 그때부터 평가한다.
+    """
+    import proxy_indicators as pi
+
+    flow = _cached_series("flow", "foreign_net_*.json")
+    if not flow:
+        return []
+    days = sorted(flow)
+    out = []
+    for i in range(window, len(days)):
+        total = sum(flow[d] for d in days[i - window:i])
+        state = pi.flow_state(total)
+        out.append((days[i], UP if state == "risk_on"
+                    else (DOWN if state == "risk_off" else None)))
+    return out
+
+
 def _logged_predictions(name: str):
     """적재된 지표 로그에서 예측을 만든다(지표별 시계열이 쌓인 뒤에 쓴다)."""
     import indicator_log as il
@@ -461,21 +546,28 @@ def _cli() -> int:
     vkospi = _vkospi_predictions()
     if vkospi:
         results["VKOSPI 밴드"] = evaluate(vkospi, truth)
+    vix_preds = _vix_predictions()
+    if vix_preds:
+        results["VIX 밴드"] = evaluate(vix_preds, truth)
+    flow_preds = _flow_predictions()
+    if flow_preds:
+        results["외국인 순매수(5일)"] = evaluate(flow_preds, truth)
     days = [d for d, _ in slope]
     results["대조: 항상 상승"] = evaluate(always(UP, days), truth)
     results["대조: 항상 하락"] = evaluate(always(DOWN, days), truth)
 
-    try:
-        import indicator_log as il
-        logged = il.load()
-    except ImportError:
-        logged = []
-    # VKOSPI는 위에서 캐시로 소급했으므로 로그 대기 목록에 넣지 않는다.
-    # 원/달러도 빠졌다 — 후행 지표로 판명되어 검정 대상이 아니다(위 주석).
-    for name in ("외국인 순매수(5일)", "VIX"):
+    # **캐시로 소급되는 지표는 로그를 기다리지 않는다.** VKOSPI·VIX·외국인
+    # 순매수는 위에서 이미 평가했다. 원/달러는 후행 지표로 판명되어 검정
+    # 대상이 아니다. 여기 남는 것은 소급할 캐시가 아직 없는 지표뿐이고,
+    # 그런 지표는 "적재 대기"가 아니라 **"소급 수집하면 지금 잴 수 있다"**로
+    # 말해야 한다(2026-09-01: VIX가 494일 캐시를 두고 '적재 대기'로 떴다).
+    for name, hint in (("외국인 순매수(5일)", "collect_history.py --flow"),):
+        if name in results:
+            continue
         preds = _logged_predictions(name)
         results[name] = (evaluate(preds, truth) if preds
-                         else {"n": 0, "verdict": f"로그 {len(logged)}일 — 적재 대기"})
+                         else {"n": 0,
+                               "verdict": f"캐시 없음 — `{hint}`로 소급 가능"})
     print(format_report(results, truth))
     return 0
 
