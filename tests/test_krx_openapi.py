@@ -366,3 +366,22 @@ def test_the_candidate_list_says_it_does_not_choose():
 def test_duplicate_names_are_collapsed():
     rows = [{"IDX_NM": "KRX 모멘텀"}] * 3
     assert k.find_factor_indices(rows)["Momentum"] == ["KRX 모멘텀"]
+
+
+def test_the_size_factor_has_a_counter_leg():
+    """**소형주 단독은 시장 상승을 그대로 탄다.**
+
+    2026-09-01 nowcast에서 배운 것과 같다 — 「늘 오른다」가 63.4%인 시장에서
+    한쪽 다리만 보면 무엇이든 좋아 보인다. 국면별 우위는 대형 대비 초과분으로
+    본다. 후보 목록에 반대 다리가 없으면 사람이 고를 수조차 없다.
+    """
+    rows = [{"IDX_NM": "코스피 소형주"}, {"IDX_NM": "코스피 대형주"}]
+    found = k.find_factor_indices(rows)
+    assert "코스피 소형주" in found["Size"]
+    assert "코스피 대형주" in found["Size(대형)"]
+
+
+def test_dividend_is_its_own_factor_not_growth():
+    """'배당성장'이 '성장'에 걸려 Growth로만 보이면 배당 팩터를 놓친다."""
+    found = k.find_factor_indices([{"IDX_NM": "코스피 고배당 50"}])
+    assert "코스피 고배당 50" in found["Dividend"]

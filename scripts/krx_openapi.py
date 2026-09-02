@@ -509,6 +509,10 @@ FACTOR_HINTS = {
     "LowVol": ("저변동", "로우볼", "minimum volatility", "low vol"),
     "Size": ("중소형", "소형", "size", "smallcap"),
     "Growth": ("성장", "growth"),
+    # 스프레드의 **반대 다리**. 소형주 단독 수익률은 시장 상승을 그대로 탄다 —
+    # 국면별 우위를 보려면 대형 대비 초과분을 봐야 한다(2026-09-01 base_rate 교훈).
+    "Size(대형)": ("대형", "largecap", "large cap"),
+    "Dividend": ("배당", "dividend"),
 }
 
 
