@@ -648,6 +648,9 @@ async def api_quant_snapshot(months: int = 24):
                 "confidence": snap.confidence,
                 "needs_recheck": snap.needs_recheck,
                 "summary_text": qb.format_snapshot(snap),
+                # **국면은 미검증이다(2026-09-02).** 화면이 판정만 보여주면
+                # 사람은 검증된 것으로 읽는다 — 근거를 같이 내보낸다.
+                "validation": qb.validation_note(),
                 "months": months,
             }
         )
@@ -2027,6 +2030,13 @@ async function loadQuantPhase() {
         · 미국 CLI ${d.cli_us_level !== null ? d.cli_us_level.toFixed(2) : "N/A"}
         (${d.cli_us_momentum !== null ? (d.cli_us_momentum >= 0 ? "+" : "") + d.cli_us_momentum.toFixed(3) : "N/A"})
         · BSI 추세 ${d.bsi_trend !== null ? (d.bsi_trend >= 0 ? "+" : "") + d.bsi_trend.toFixed(3) : "N/A"}
+      </div>
+      <div class="crash-mid" style="margin-top: 0.5rem; font-size: 0.85rem;">
+        ${(d.validation || "").replace(/\*\*/g, "")}
+      </div>
+      <div class="muted" style="margin-top: 0.3rem; font-size: 0.8rem;">
+        국면은 종목 <b>팩터 가중</b>과 <b>Top N</b>(8/8/6/4)을 바꿉니다. 매수 금액은 바꾸지 않습니다.
+        키움봇은 국면을 쓰지 않습니다.
       </div>`;
   } catch (e) {
     card.innerHTML = `<div class="crash-warn">❌ 거시 국면 실패: ${e.message}</div>`;

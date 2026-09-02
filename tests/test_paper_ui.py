@@ -769,6 +769,26 @@ def test_quant_snapshot_endpoint(client, monkeypatch):
     assert "한국 CLI" in d["summary_text"]
 
 
+def test_quant_snapshot_carries_the_unverified_notice(client, monkeypatch):
+    """**화면이 국면만 보여주면 사람은 검증된 판정이라고 읽는다.**
+
+    2026-09-02 실측: 팩터 3종·시장 방향 1종 모두 우연 기대 미달
+    (에피소드 18개). 근거를 판정과 같은 자리에 내보낸다.
+    """
+    _stub_quant_snapshot(monkeypatch)
+    d = client.get("/api/paper/quant-snapshot").json()
+    assert "validation" in d
+    assert "미검증" in d["validation"] or "미측정" in d["validation"]
+
+
+def test_the_screen_says_what_the_phase_actually_changes(client):
+    """국면이 매수 금액을 바꾼다고 오해하면 위험을 잘못 읽는다."""
+    html = client.get("/").text
+    assert "팩터 가중" in html and "Top N" in html
+    assert "매수 금액은 바꾸지 않습니다" in html
+    assert "키움봇은 국면을 쓰지 않습니다" in html
+
+
 def test_quant_snapshot_clamps_months(client, monkeypatch):
     _stub_quant_snapshot(monkeypatch)
     r = client.get("/api/paper/quant-snapshot?months=10")

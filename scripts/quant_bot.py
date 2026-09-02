@@ -504,6 +504,26 @@ PHASE_EMOJI = {
 }
 
 
+_VALIDATION_LEDGER = PATHS.private_state_file("phase_validation.json")
+
+
+def validation_note(path=None) -> str:
+    """국면 판정이 검증됐는지 한 줄(2026-09-02).
+
+    **기록이 없는 것과 검증된 것은 다르다.** 화면이 국면을 그냥 보여주면
+    사람은 그것이 검증된 판정이라고 읽는다. 실측은 그 반대다 — 팩터 3종과
+    시장 방향 1종 모두 우연 기대를 넘지 못했다(에피소드 18개).
+
+    문구 생성은 `phase_factor_eval`에 한 벌만 둔다. 두 곳에서 만들면
+    한쪽만 바뀌는 날이 온다.
+    """
+    try:
+        import phase_factor_eval as pfe
+        return pfe.validation_line(pfe.latest_validation(path or _VALIDATION_LEDGER))
+    except Exception:                       # 원장이 없거나 모듈이 없어도 화면은 뜬다
+        return "⚠️ 국면 판정 검증 기록이 없습니다 — 미측정 상태입니다."
+
+
 def format_snapshot(snap: PhaseSnapshot) -> str:
     """텔레그램/웹UI 출력 텍스트."""
     lines = ["📊 콴텍봇 거시 국면 스냅샷 (MSCI 4분면)"]
@@ -522,6 +542,7 @@ def format_snapshot(snap: PhaseSnapshot) -> str:
                          f"{snap.phase_us} — 갈립니다. 위 판정은 한국 기준입니다.")
         if snap.needs_recheck:
             lines.append("⚠️ 확신도 60% 미만 — 2주 재진단 필요. 직전 국면 가중 유지 권장.")
+        lines.append(validation_note())
     else:
         # **원인을 정확히 말한다.** 예전에는 늘 "키 또는 네트워크 점검"이라고
         # 했는데, 2026-09-01 실제 원인은 **시리즈가 2024-01에서 멈춘 것**이었다.

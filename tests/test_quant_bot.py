@@ -1408,3 +1408,37 @@ def test_no_divergence_line_when_the_two_agree():
         bsi_trend=None, consensus_phase="Expansion", confidence=0.8,
         needs_recheck=False)
     assert "갈립니다" not in qb.format_snapshot(snap)
+
+
+# ─── 국면 판정은 미검증이다 (2026-09-02) ───────────────
+
+def _snap(phase="Expansion", us="Expansion"):
+    return qb.PhaseSnapshot(
+        phase_kr=phase, phase_us=us, cli_kr_level=101.0, cli_kr_momentum=0.5,
+        cli_us_level=101.0, cli_us_momentum=0.5, bsi_trend=None,
+        consensus_phase=phase, confidence=0.8, needs_recheck=False)
+
+
+def test_the_screen_says_the_phase_is_unverified(tmp_path):
+    """**기록이 없는 것과 검증된 것은 다르다.**
+
+    화면이 국면을 그냥 보여주면 사람은 검증된 판정이라고 읽는다.
+    실측은 반대다 — 팩터 3종·시장 방향 1종 모두 우연 기대 미달.
+    """
+    out = qb.format_snapshot(_snap())
+    assert "미검증" in out or "미측정" in out
+
+
+def test_the_note_reads_the_ledger(tmp_path):
+    import json
+    path = tmp_path / "v.json"
+    path.write_text(json.dumps([{
+        "at": "2026-09-02T10:00:00", "any_passed": False, "passed": [],
+        "tests": {"Size(코스피)": {"n": 18, "hits": 11}}}]), encoding="utf-8")
+    line = qb.validation_note(path)
+    assert "미검증" in line and "11/18" in line
+
+
+def test_a_missing_ledger_says_unmeasured_not_verified(tmp_path):
+    line = qb.validation_note(tmp_path / "없음.json")
+    assert "미측정" in line

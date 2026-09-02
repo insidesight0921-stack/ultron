@@ -363,3 +363,58 @@ def test_the_report_uses_the_words_of_the_question_being_asked():
     assert "소형" not in msg and "대형" not in msg
     assert "하락" in msg          # 이 표본의 예측은 둘 다 하락이다
     assert "시장 방향을 예측한다는 근거" in msg
+
+
+# ─── 판정 원장 ───────────────────────────────────────
+
+def _fam(verdict_word="우위 확인 불가"):
+    single = {"n": 18, "hits": 11, "bar": {"p0": 0.556, "need": 15},
+              "p": 0.41, "family_need": 15, "family_verdict": verdict_word}
+    return {"k": 3, "alpha": 0.0167, "results": {"Size(코스피)": single}}
+
+
+def test_the_record_keeps_what_was_measured():
+    rec = pf.validation_record(_fam(), None, at="2026-09-02T10:00:00")
+    assert rec["tests"]["Size(코스피)"]["hits"] == 11
+    assert rec["any_passed"] is False and rec["passed"] == []
+
+
+def test_a_passing_test_is_named():
+    rec = pf.validation_record(_fam("우위 확인"), None, at="2026-09-02T10:00:00")
+    assert rec["any_passed"] is True and rec["passed"] == ["Size(코스피)"]
+
+
+def test_the_market_test_joins_the_record():
+    market = {"n": 18, "hits": 13, "bar": {"p0": 0.667, "need": 16},
+              "p": 0.412, "verdict": "우위 확인 불가"}
+    rec = pf.validation_record(_fam(), market, at="2026-09-02T10:00:00")
+    assert rec["tests"]["시장 방향"]["hits"] == 13
+
+
+def test_no_record_means_unmeasured_not_verified():
+    """**기록이 없는 것과 검증된 것은 다르다.**"""
+    line = pf.validation_line(None)
+    assert "미측정" in line and "검증" in line
+
+
+def test_the_line_says_unverified_when_nothing_passed():
+    line = pf.validation_line(pf.validation_record(_fam(), None, at="2026-09-02T10:00:00"))
+    assert "미검증" in line and "11/18" in line
+
+
+def test_the_ledger_only_appends(tmp_path):
+    """**지난 판정을 고치지 않는다** — 임계값 원장과 같은 규칙."""
+    path = tmp_path / "v.json"
+    pf.append_validation({"at": "1", "tests": {}}, path)
+    pf.append_validation({"at": "2", "tests": {}}, path)
+    got = pf.latest_validation(path)
+    assert got["at"] == "2"
+    import json
+    assert len(json.loads(path.read_text(encoding="utf-8"))) == 2
+
+
+def test_a_broken_ledger_is_not_fatal(tmp_path):
+    path = tmp_path / "v.json"
+    path.write_text("{망가진", encoding="utf-8")
+    assert pf.latest_validation(path) is None
+    assert len(pf.append_validation({"at": "1"}, path)) == 1

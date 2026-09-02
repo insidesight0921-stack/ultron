@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 LAG_DEFAULT = 2          # 개월. CLI 발표 시차 — 봇이 실제로 보는 값의 나이
@@ -356,6 +357,79 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
     return chr(10).join(lines)
 
 
+# ─── 판정 원장 ───────────────────────────────────────
+#
+# 화면과 텔레그램이 매번 다시 계산하지 않게, 잰 결과를 **추가만 되는**
+# 원장에 남긴다. 임계값 원장과 같은 규칙이다 — 지난 판정을 고치지 않는다.
+
+VALIDATION_FILE = "phase_validation.json"
+
+
+def validation_record(family: dict, market: Optional[dict], *,
+                      at: str, note: str = "") -> dict:
+    """원장에 남길 한 건(순수)."""
+    tests = {}
+    for key, r in (family or {}).get("results", {}).items():
+        tests[key] = {"n": r.get("n", 0), "hits": r.get("hits", 0),
+                      "p0": (r.get("bar") or {}).get("p0"),
+                      "need": r.get("family_need"), "p": r.get("p"),
+                      "verdict": r.get("family_verdict") or r.get("verdict")}
+    if market:
+        tests["시장 방향"] = {"n": market.get("n", 0), "hits": market.get("hits", 0),
+                           "p0": (market.get("bar") or {}).get("p0"),
+                           "need": (market.get("bar") or {}).get("need"),
+                           "p": market.get("p"), "verdict": market.get("verdict")}
+    passed = [k for k, t in tests.items() if t.get("verdict") == "우위 확인"]
+    return {"at": at, "alpha": (family or {}).get("alpha"), "tests": tests,
+            "any_passed": bool(passed), "passed": passed, "note": note}
+
+
+def validation_line(record: Optional[dict]) -> str:
+    """화면에 한 줄로(순수). **없으면 '미측정'이라고 말한다.**"""
+    if not record:
+        return "⚠️ 국면 판정 검증 기록이 없습니다 — 미측정 상태입니다."
+    tests = record.get("tests") or {}
+    if record.get("any_passed"):
+        names = ", ".join(record["passed"])
+        return f"✅ 국면 판정 일부 검증됨({names}) · {record.get('at', '')[:10]}"
+    best = ""
+    for key, t in tests.items():
+        if t.get("n"):
+            best = f"{key} {t['hits']}/{t['n']}"
+            break
+    return (f"⚠️ **미검증** — 국면이 팩터·시장 방향을 예측한다는 근거가 아직 없습니다"
+            f"(검정 {len(tests)}종 전부 우연 기대 미달, 예: {best}"
+            f" · {record.get('at', '')[:10]} 측정)")
+
+
+def append_validation(record: dict, path) -> list:
+    """추가만 한다. 지난 판정을 고치지 않는다."""
+    import json as _json
+    path = Path(path)
+    try:
+        log = _json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(log, list):
+            log = []
+    except (OSError, ValueError):
+        log = []
+    log.append(record)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
+    return log
+
+
+def latest_validation(path) -> Optional[dict]:
+    """마지막 판정. 없으면 None."""
+    import json as _json
+    try:
+        log = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return log[-1] if isinstance(log, list) and log else None
+
+
 def run_one(spec: dict, load_pair, phases: dict, weights: dict, *,
             start: str = "2010-01") -> tuple[dict, list, dict]:
     """한 짝을 잰다. `load_pair(service, name) -> {월: 종가}`."""
@@ -394,6 +468,8 @@ def _cli() -> int:
     ap.add_argument("--key", default="consensus")
     ap.add_argument("--long-service", dest="long_service", default=None)
     ap.add_argument("--short-service", dest="short_service", default=None)
+    ap.add_argument("--record", action="store_true",
+                    help="--family와 함께: 판정을 원장에 남겨 화면이 읽게 한다")
     ap.add_argument("--market", action="store_true",
                     help="국면이 시장 방향이라도 맞히는가(팩터보다 앞선 질문)")
     ap.add_argument("--family", action="store_true",
@@ -441,6 +517,24 @@ def _cli() -> int:
             details[spec["key"]] = (rows, expected, spec)
         fam = family_verdict(results)
         print(format_family(fam))
+        if args.record:
+            from datetime import datetime
+            market_series = load_pair(*MARKET_TEST["long"])
+            market = None
+            if market_series:
+                mrows = episode_rows(fs.monthly_returns(market_series),
+                                     episodes(phases, start=args.start))
+                market = verdict(mrows, MARKET_TEST["expected"])
+            rec = validation_record(
+                fam, market,
+                at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                note=f"lag={args.lag} · start={args.start} · key={args.key}")
+            ledger = (Path(__file__).resolve().parents[1] / "data" / "private" /
+                      "state" / VALIDATION_FILE)
+            append_validation(rec, ledger)
+            print()
+            print(f"  원장에 기록했습니다 — {ledger.name}")
+            print(f"  화면 문구: {validation_line(rec)}")
         print()
         for key, (rows, expected, spec) in details.items():
             miss = results[key].get("missing")
