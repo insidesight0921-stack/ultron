@@ -888,6 +888,29 @@ async def api_benchmark(rf: float = 0.0):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/paper/phase-validation")
+async def api_phase_validation():
+    """탭 C — 국면 판정이 검증됐는가. **원장을 읽을 뿐 다시 재지 않는다.**
+
+    측정은 `phase_factor_eval.py --family --record`가 한다(수 분 걸린다).
+    화면이 매번 재면 열 때마다 숫자가 흔들리고, 언제 잰 것인지도 사라진다.
+    """
+    try:
+        import phase_factor_eval as pfe
+
+        ledger = PATHS.private_state_file(pfe.VALIDATION_FILE)
+        record = pfe.latest_validation(ledger)
+        return JSONResponse({
+            "record": record,
+            "line": pfe.validation_line(record),
+            "measured_at": (record or {}).get("at"),
+            "how": "scripts/phase_factor_eval.py --family --record",
+        })
+    except Exception as e:
+        log.exception("phase-validation 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/failure-analysis")
 async def api_failure_analysis(llm: int = 0):
     """v3.58: 실패 원인 분석(탭 D).
@@ -1163,6 +1186,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-perf">성과</button>
     <button class="tab" data-tab="tab-bench">벤치마크</button>
+    <button class="tab" data-tab="tab-phase-acc">국면 정확도</button>
     <button class="tab" data-tab="tab-failure">실패 원인</button>
   </div>
 
@@ -1510,6 +1534,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+  </div>
+
+  <!-- 탭 C: 국면 판단 정확도 (2026-09-02) -->
+  <div id="tab-phase-acc" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-phase-acc-refresh">새로고침</button>
+        <span id="phase-acc-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:0.4rem;border-left:3px solid #888;padding-left:0.6rem;">
+        <b>이 화면은 국면 판정이 맞는지를 재지 않습니다 — 맞다고 말할 근거가 있는지를 봅니다.</b>
+        검정 단위는 달이 아니라 <b>국면 에피소드</b>입니다. 17개월 이어진 국면은 한 사건이고,
+        달로 세면 표본이 4배로 부풀어 무엇이든 유의해집니다.<br>
+        <b>우연 기대는 50%가 아닙니다.</b> 스프레드가 한쪽으로 치우친 시장에서는
+        「늘 같은 쪽」으로 찍어도 맞습니다. 그 성적을 넘어야 국면이 무언가를 더한 것입니다.<br>
+        <b>가설은 봇이 씁니다.</b> 국면별 팩터 가중(<code>PHASE_FACTOR_WEIGHT</code>)에서
+        기대 부호를 기계적으로 끌어냅니다. 사후에 방향을 정하면 무엇이든 맞습니다.
+      </p>
+    </div>
+    <div id="phase-acc-verdict" class="card" style="margin-bottom:20px;">
+      <p class="muted">불러오는 중…</p>
+    </div>
+    <div id="phase-acc-table"></div>
   </div>
 
   <!-- 탭 D: 실패 원인 분석 (v3.58) -->
@@ -2675,6 +2722,65 @@ async function loadFailureAnalysis() {
     status.textContent = "실패: " + e.message;
   }
 }
+// ── 탭 C: 국면 정확도 (2026-09-02) ───────────────────────────────────────────
+async function loadPhaseAccuracy() {
+  const status = document.getElementById("phase-acc-status");
+  const box = document.getElementById("phase-acc-verdict");
+  const wrap = document.getElementById("phase-acc-table");
+  status.textContent = "로딩 중...";
+  try {
+    const d = await (await fetch("/api/paper/phase-validation")).json();
+    if (d.error) throw new Error(d.error);
+    const line = (d.line || "").replace(/\*\*/g, "");
+    if (!d.record) {
+      box.innerHTML = `<div class="crash-warn">${line}</div>
+        <p class="muted" style="margin-top:0.5rem;">측정하려면: <code>${d.how}</code></p>`;
+      wrap.innerHTML = "";
+      status.textContent = "";
+      return;
+    }
+    const passed = d.record.any_passed;
+    box.innerHTML = `
+      <div class="${passed ? "crash-ok" : "crash-mid"}">${line}</div>
+      <p class="muted" style="margin-top:0.5rem;">
+        측정 ${d.measured_at || "-"} · ${d.record.note || ""} ·
+        합격선 α=${d.record.alpha !== null && d.record.alpha !== undefined ? d.record.alpha.toFixed(4) : "-"}
+        <br>다시 재려면: <code>${d.how}</code> (원장에 남고 이 화면이 그것을 읽습니다)
+      </p>`;
+    const rows = Object.entries(d.record.tests || {});
+    wrap.innerHTML = `
+      <div class="card">
+        <table>
+          <thead><tr>
+            <th>검정</th><th class="num">적중</th><th class="num">에피소드</th>
+            <th class="num">우연 기대</th><th class="num">합격선</th><th class="num">p</th><th>판정</th>
+          </tr></thead>
+          <tbody>${rows.map(([k, t]) => `
+            <tr>
+              <td>${k}</td>
+              <td class="num">${t.hits}</td>
+              <td class="num">${t.n}</td>
+              <td class="num">${t.p0 === null || t.p0 === undefined ? "—" : (t.p0 * 100).toFixed(1) + "%"}</td>
+              <td class="num">${t.need === null || t.need === undefined ? "도달 불가" : t.need + "/" + t.n}</td>
+              <td class="num">${t.p === null || t.p === undefined ? "—" : t.p.toFixed(3)}</td>
+              <td>${t.verdict || "-"}</td>
+            </tr>`).join("")}</tbody>
+        </table>
+        <p class="muted" style="margin-top:0.6rem;">
+          <b>「우위 확인 불가」는 없다는 증명이 아닙니다.</b> 이 크기(에피소드 18개)로는 가릴 수 없다는 뜻입니다.
+          국면 에피소드는 1년에 한 번쯤 늘어납니다 — 10년을 기다려도 28개입니다.<br>
+          <b>Momentum과 Quality는 아예 잴 수 없습니다.</b> KRX 승인분에 해당 지수가 없는데,
+          봇 가중치의 큰 쪽이 거기 걸려 있습니다(Expansion Momentum 0.533 · Contraction Quality 0.375).
+        </p>
+      </div>`;
+    status.textContent = `업데이트: ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+document.getElementById("btn-phase-acc-refresh").addEventListener("click", loadPhaseAccuracy);
+document.querySelector(".tab[data-tab='tab-phase-acc']").addEventListener("click", loadPhaseAccuracy);
+
 document.getElementById("btn-failure-refresh").addEventListener("click", loadFailureAnalysis);
 document.querySelector(".tab[data-tab='tab-failure']").addEventListener("click", loadFailureAnalysis);
 

@@ -1026,3 +1026,46 @@ def test_index_html_ipo_no_undefined_showtoast(client):
     """v3.35 버그 수정 — 정의되지 않은 showToast() 호출 제거."""
     html = client.get("/").text
     assert "showToast" not in html
+
+
+# ─── 탭 C: 국면 정확도 (2026-09-02) ────────────────────
+
+def test_phase_validation_endpoint_reads_the_ledger(client, monkeypatch):
+    """**화면은 다시 재지 않는다.** 측정은 몇 분 걸리고, 열 때마다 재면
+    숫자가 흔들리며 언제 잰 것인지도 사라진다."""
+    import phase_factor_eval as pfe
+    monkeypatch.setattr(pfe, "latest_validation", lambda p: {
+        "at": "2026-09-02T02:37:43", "alpha": 0.0167, "any_passed": False,
+        "passed": [], "note": "lag=2",
+        "tests": {"Size(코스피)": {"n": 18, "hits": 11, "p0": 0.556,
+                                 "need": 15, "p": 0.41,
+                                 "verdict": "우위 확인 불가"}}})
+    d = client.get("/api/paper/phase-validation").json()
+    assert d["record"]["tests"]["Size(코스피)"]["hits"] == 11
+    assert d["measured_at"] == "2026-09-02T02:37:43"
+    assert "미검증" in d["line"]
+    assert "--family --record" in d["how"]
+
+
+def test_phase_validation_says_unmeasured_when_no_ledger(client, monkeypatch):
+    import phase_factor_eval as pfe
+    monkeypatch.setattr(pfe, "latest_validation", lambda p: None)
+    d = client.get("/api/paper/phase-validation").json()
+    assert d["record"] is None
+    assert "미측정" in d["line"]
+
+
+def test_the_phase_tab_exists_and_explains_the_bar(client):
+    """탭 C는 「맞는가」가 아니라 「맞다고 말할 근거가 있는가」를 본다."""
+    html = client.get("/").text
+    assert 'data-tab="tab-phase-acc"' in html
+    assert "국면 정확도" in html
+    assert "우연 기대는 50%가 아닙니다" in html
+    assert "국면 에피소드" in html
+
+
+def test_the_phase_tab_names_what_cannot_be_measured(client):
+    """**Momentum·Quality는 지수가 없어 영원히 못 잰다** — 화면이 그걸 숨기면 안 된다."""
+    html = client.get("/").text
+    assert "Momentum과 Quality는 아예 잴 수 없습니다" in html
+    assert "없다는 증명이 아닙니다" in html
