@@ -468,10 +468,6 @@ def _cli() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(_cli())
-
-
 # ─── VKOSPI (2026-09-01 실측 확정) ───────────────────
 #
 # 탐침 결과: `파생상품지수`(drvprod_dd_trd) 320개 중 이름이 정확히
@@ -610,3 +606,8 @@ def fetch_vkospi(bas_dd: str) -> dict:
         return {"value": None, "date": bas_dd, "found": False,
                 "reason": payload["error"]}
     return vkospi_close(payload)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
+
