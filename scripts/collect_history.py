@@ -272,6 +272,26 @@ def format_status() -> str:
                 lines.append("  ⚠️ 한 국면에 쏠려 있습니다. **기다릴 게 아니라 더 소급하면 됩니다.**")
                 lines.append("     예: `collect_history.py --kospi 2000` (약 8년)")
     lines.append("")
+    lines.append("■ 거시 국면 이력 (탭 C)")
+    try:
+        import json as _json
+
+        from storage_paths import PATHS
+
+        pf = PATHS.private_state_dir / "phase_history.json"
+        if pf.exists():
+            rows = _json.loads(pf.read_text(encoding="utf-8"))
+            import phase_history as ph
+
+            d = ph.describe(rows)
+            lines.append(f"  {d['n']}개월 · 국면 {d['distinct']}종 · 전환 {d['flips']}회"
+                         + ("  ✅ 측정 가능" if d["usable"] else "  ⚠️ 아직 부족"))
+        else:
+            lines.append("  없음 — `phase_history.py --months 120 --save`로 소급 재구성")
+    except Exception:  # noqa: BLE001
+        lines.append("  확인 실패")
+
+    lines.append("")
     lines.append("소급 불가(시계를 기다려야 하는 것): 봇 실제 거래 기록 · mode 판정 · 사용자 행동")
     return "\n".join(lines)
 
