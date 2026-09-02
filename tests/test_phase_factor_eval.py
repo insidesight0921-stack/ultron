@@ -273,3 +273,60 @@ def test_a_thin_factor_is_reported_not_silently_dropped():
     thin = pf.verdict(_rows([1] * 5), {"Expansion": 1})
     msg = pf.format_family(pf.family_verdict({"Value": thin}))
     assert "표본 부족" in msg
+
+
+# ─── 검정 가족은 재기 전에 고정한다 ────────────────────
+
+def test_the_family_is_declared_in_code_not_chosen_later():
+    """**목록을 나중에 정하면 좋아 보이는 것만 남긴다.**"""
+    assert len(pf.FAMILY) == 3
+    keys = [s["key"] for s in pf.FAMILY]
+    assert keys == ["Size(코스피)", "Size(KRX TMI)", "Value+LowVol"]
+
+
+def test_every_pair_names_a_service_for_each_leg():
+    """가치저변동성은 파생상품지수에, 코스피 200은 KOSPI 시리즈에 있다."""
+    for spec in pf.FAMILY:
+        for leg in ("long", "short"):
+            service, name = spec[leg]
+            assert service and name
+
+
+def test_no_tr_index_is_paired_with_a_price_index():
+    """**TR과 가격지수를 비교하면 배당만큼 가짜 초과수익이 생긴다.**"""
+    for spec in pf.FAMILY:
+        tr = ["TR" in spec[leg][1] for leg in ("long", "short")]
+        assert tr[0] == tr[1], spec["key"]
+
+
+def test_only_factors_the_bot_actually_bets_on_are_tested():
+    """가설이 없는 팩터를 재면 방향을 내가 정하게 된다 — 사후 맞춤이다."""
+    import quant_bot as qb
+    for spec in pf.FAMILY:
+        for factor in spec["factors"]:
+            assert factor in qb.SCORING_FACTORS, factor
+
+
+def test_two_factors_average_into_one_prediction():
+    """가치저변동성은 한 지수가 Value와 LowVol을 겸한다."""
+    weights = {"A": {"Value": 0.4, "LowVol": 0.0},
+               "B": {"Value": 0.0, "LowVol": 0.0}}
+    got = pf.expected_signs(weights, ("Value", "LowVol"))
+    assert got == {"A": 1, "B": -1}
+
+
+def test_a_single_factor_still_works_as_a_string():
+    weights = {"A": {"Size": 0.2}, "B": {"Size": 0.0}}
+    assert pf.expected_signs(weights, "Size") == {"A": 1, "B": -1}
+
+
+def test_the_note_names_both_factors():
+    weights = {"A": {"Value": 0.4, "LowVol": 0.2}}
+    assert "Value+LowVol" in pf.hypothesis_note(weights, ("Value", "LowVol"))
+
+
+def test_a_missing_index_is_reported_as_thin_not_as_a_result():
+    """캐시에 없는 지수를 0으로 세면 없는 결과가 생긴다."""
+    got, rows, expected = pf.run_one(
+        pf.FAMILY[0], lambda service, name: {}, {}, {})
+    assert got["verdict"] == "표본 부족" and got["missing"]

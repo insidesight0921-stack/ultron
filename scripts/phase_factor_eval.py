@@ -33,8 +33,36 @@ MIN_EPISODES = 12        # 이보다 적으면 비율을 내지 않는다
 
 # ─── 순수: 가설 ───────────────────────────────────────
 
-def expected_signs(weights: dict, factor: str = "Size",
-                   *, tol: float = 1e-9) -> dict:
+# ─── 검정 가족 (2026-09-02 재기 전에 고정) ──────────────
+#
+# 411개 지수 목록을 보고 **측정 가능한 짝만** 골랐다. 셋뿐이다.
+#
+#   · Momentum · Quality — **지수가 없다.** 봇 가중치의 대부분이 여기에
+#     걸려 있는데(Expansion Momentum 0.533, Contraction Quality 0.375)
+#     검증할 원자료 자체가 KRX 승인분에 없다.
+#   · 배당·동일가중 — 지수는 있지만 **봇이 걸지 않는 팩터**다. 가설이
+#     없는 것을 재면 방향을 내가 정하게 되고, 그건 사후 맞춤이다.
+#   · TR 지수는 TR끼리만 짝짓는다. 가격지수와 비교하면 배당만큼 가짜
+#     초과수익이 생긴다.
+#
+# 셋을 재므로 합격선은 α = 0.05/3. 나중에 하나 더 붙이면 다시 낮아진다.
+FAMILY = (
+    {"key": "Size(코스피)",
+     "long": ("KOSPI 시리즈", "코스피 소형주"),
+     "short": ("KOSPI 시리즈", "코스피 대형주"),
+     "factors": ("Size",)},
+    {"key": "Size(KRX TMI)",          # 같은 팩터를 **다른 지수 계열로 재현**
+     "long": ("KRX 시리즈", "KRX 소형 TMI"),
+     "short": ("KRX 시리즈", "KRX 중대형 TMI"),
+     "factors": ("Size",)},
+    {"key": "Value+LowVol",           # 한 지수가 두 팩터를 겸한다
+     "long": ("파생상품지수", "코스피 200 가치저변동성"),
+     "short": ("KOSPI 시리즈", "코스피 200"),
+     "factors": ("Value", "LowVol")},
+)
+
+
+def expected_signs(weights: dict, factor="Size", *, tol: float = 1e-9) -> dict:
     """국면별 기대 부호(순수). **봇의 가중치에서 기계적으로 끌어낸다.**
 
     그 국면의 팩터 비중이 전체 평균보다 크면 그 팩터가 이길 것으로 본
@@ -43,7 +71,9 @@ def expected_signs(weights: dict, factor: str = "Size",
     `tol` 없이 부동소수 비교를 하면 **완전히 평평한 가중치에서도 부호가
     생긴다**(0.1의 평균이 0.1이 아니다). 없는 예측을 만들어내는 셈이다.
     """
-    values = {phase: w.get(factor, 0.0) for phase, w in (weights or {}).items()}
+    names = (factor,) if isinstance(factor, str) else tuple(factor)
+    values = {phase: sum(w.get(f, 0.0) for f in names) / len(names)
+              for phase, w in (weights or {}).items()}
     if not values:
         return {}
     mean = sum(values.values()) / len(values)
@@ -56,15 +86,18 @@ def expected_signs(weights: dict, factor: str = "Size",
     return out
 
 
-def hypothesis_note(weights: dict, factor: str) -> str:
+def hypothesis_note(weights: dict, factor) -> str:
     """그날 쓴 가중치를 문장으로 남긴다(순수).
 
     가중치는 wiki에서 오고 사람이 고칠 수 있다. 바뀐 줄 모르고 옛 가설로
     판정하면 사후 맞춤과 구분되지 않는다 — **쓴 값을 그대로 적어둔다.**
     """
-    items = [f"{phase} {w.get(factor, 0.0):.3f}"
-             for phase, w in sorted((weights or {}).items())]
-    return f"{factor} 가중: " + " · ".join(items)
+    names = (factor,) if isinstance(factor, str) else tuple(factor)
+    items = []
+    for phase, w in sorted((weights or {}).items()):
+        value = sum(w.get(f, 0.0) for f in names) / len(names)
+        items.append(f"{phase} {value:.3f}")
+    return f"{'+'.join(names)} 가중: " + " · ".join(items)
 
 
 # ─── 순수: 국면 이력 ──────────────────────────────────
@@ -300,6 +333,24 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
     return chr(10).join(lines)
 
 
+def run_one(spec: dict, load_pair, phases: dict, weights: dict, *,
+            start: str = "2010-01") -> tuple[dict, list, dict]:
+    """한 짝을 잰다. `load_pair(service, name) -> {월: 종가}`."""
+    import factor_series as fs
+    long_series = load_pair(*spec["long"])
+    short_series = load_pair(*spec["short"])
+    if not long_series or not short_series:
+        return ({"n": 0, "hits": 0, "rate": None, "verdict": "표본 부족",
+                 "bar": {"n": 0, "p0": 0.5, "need": None}, "p": None,
+                 "missing": [name for (svc, name), got in
+                             ((spec["long"], long_series), (spec["short"], short_series))
+                             if not got]}, [], {})
+    sp = fs.spread(fs.monthly_returns(long_series), fs.monthly_returns(short_series))
+    rows = episode_rows(sp, episodes(phases, start=start))
+    expected = expected_signs(weights, spec["factors"])
+    return verdict(rows, expected), rows, expected
+
+
 def _cli() -> int:
     import argparse
     import json
@@ -318,16 +369,47 @@ def _cli() -> int:
     ap.add_argument("--lag", type=int, default=LAG_DEFAULT)
     ap.add_argument("--from", dest="start", default="2010-01")
     ap.add_argument("--key", default="consensus")
+    ap.add_argument("--long-service", dest="long_service", default=None)
+    ap.add_argument("--short-service", dest="short_service", default=None)
+    ap.add_argument("--family", action="store_true",
+                    help="사전 고정된 검정 가족 전체를 재고 합격선을 나눈다")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parents[1] / "data" / "cache"
-    cache = fs.load_cache(fs.cache_path(args.service, root))
-    for name in (args.long, args.short):
-        if not cache.get(name):
+
+    def load_pair(service: str, name: str) -> dict:
+        return fs.load_cache(fs.cache_path(service, root)).get(name, {})
+
+    if args.family:
+        hist_path = (Path(__file__).resolve().parents[1] / "data" / "private" /
+                     "state" / "phase_history.json")
+        history = json.loads(hist_path.read_text(encoding="utf-8"))
+        phases = shift(phase_by_month(history, args.key), args.lag)
+        weights = qb.parse_phase_weights_from_wiki()
+        results, details = {}, {}
+        for spec in FAMILY:
+            got, rows, expected = run_one(spec, load_pair, phases, weights,
+                                          start=args.start)
+            results[spec["key"]] = got
+            details[spec["key"]] = (rows, expected, spec)
+        fam = family_verdict(results)
+        print(format_family(fam))
+        print()
+        for key, (rows, expected, spec) in details.items():
+            miss = results[key].get("missing")
+            if miss:
+                print(f"  {key}: 캐시에 없는 지수 {miss} — factor_series.py로 먼저 받으세요")
+                continue
+            print(f"  [{key}] 에피소드 {len(rows)}개 · "
+                  f"{hypothesis_note(weights, spec['factors'])}")
+        return 0
+    long_series = load_pair(args.long_service or args.service, args.long)
+    short_series = load_pair(args.short_service or args.service, args.short)
+    for name, got in ((args.long, long_series), (args.short, short_series)):
+        if not got:
             print(f"❌ 캐시에 「{name}」이 없습니다. factor_series.py로 먼저 받으세요.")
             return 1
-    sp = fs.spread(fs.monthly_returns(cache[args.long]),
-                   fs.monthly_returns(cache[args.short]))
+    sp = fs.spread(fs.monthly_returns(long_series), fs.monthly_returns(short_series))
 
     hist_path = Path(__file__).resolve().parents[1] / "data" / "private" / "state" / "phase_history.json"
     history = json.loads(hist_path.read_text(encoding="utf-8"))
