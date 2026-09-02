@@ -324,3 +324,45 @@ def test_working_styles_is_empty_when_nothing_carried_the_key():
     diag = {"variants": {"헤더 AUTH_KEY": BAD_KEY},
             "controls": {"키 없음": BAD_KEY, "엉터리 키": BAD_KEY}}
     assert k.working_auth_styles(diag) == []
+
+
+# ─── 팩터 지수 탐색 (탭 C 검증용, 2026-09-01) ───────
+#
+# 국면별 팩터 가중 가설을 검증하려면 팩터 수익률 시계열이 필요하다.
+# KRX가 스타일 지수를 준다면 종목 단위 구성(무겁고 생존편향 있음)을
+# 피할 수 있다. **다만 이름으로 자동 선택하지 않는다.**
+
+
+def test_factor_hints_find_candidates():
+    rows = [{"IDX_NM": "KRX 모멘텀"}, {"IDX_NM": "코스피 200 가치"},
+            {"IDX_NM": "KRX 저변동성"}, {"IDX_NM": "KRX 중소형주"}]
+    found = k.find_factor_indices(rows)
+    assert "KRX 모멘텀" in found["Momentum"]
+    assert "코스피 200 가치" in found["Value"]
+    assert "KRX 저변동성" in found["LowVol"]
+    assert "KRX 중소형주" in found["Size"]
+
+
+def test_the_volatility_index_is_not_mistaken_for_a_low_vol_factor():
+    """**VKOSPI는 저변동성 팩터가 아니다.** '변동성'이 든 지수가 6개였던
+    2026-09-01 사례 — 부분일치로 자동 선택하면 엉뚱한 것을 집는다."""
+    rows = [{"IDX_NM": "코스피 200 변동성지수"}]
+    found = k.find_factor_indices(rows)
+    assert "LowVol" not in found or "코스피 200 변동성지수" not in found.get("LowVol", [])
+
+
+def test_no_candidates_says_what_to_do_instead():
+    msg = k.format_factor_candidates({}, total=300)
+    assert "종목 단위로" in msg
+
+
+def test_the_candidate_list_says_it_does_not_choose():
+    """고르는 것은 사람이다 — 도구는 후보만 낸다."""
+    msg = k.format_factor_candidates({"Momentum": ["KRX 모멘텀"]}, total=1)
+    assert "사람이 정하고" in msg
+    assert "정확일치" in msg
+
+
+def test_duplicate_names_are_collapsed():
+    rows = [{"IDX_NM": "KRX 모멘텀"}] * 3
+    assert k.find_factor_indices(rows)["Momentum"] == ["KRX 모멘텀"]

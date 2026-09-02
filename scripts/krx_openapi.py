@@ -435,6 +435,8 @@ def _cli() -> int:
     ap.add_argument("--auth", action="store_true",
                     help="인증 방식 진단(음성 대조 — 헤더 문제인지 권한 문제인지)")
     ap.add_argument("--date", help="기준일 YYYYMMDD (기본: 어제)")
+    ap.add_argument("--factors", action="store_true",
+                    help="팩터/스타일 지수 후보를 찾는다(탭 C 검증용)")
     args = ap.parse_args()
 
     bas = args.date or (date.today() - timedelta(days=1)).strftime("%Y%m%d")
@@ -443,6 +445,21 @@ def _cli() -> int:
         return 1
     if args.auth:
         print(format_auth_diagnose(auth_diagnose(bas)))
+        return 0
+    if args.factors:
+        # 모든 지수 서비스를 훑어 후보를 모은다 — 어느 서비스에 있는지 모른다.
+        allrows, total = [], 0
+        for label, path in INDEX_ENDPOINTS.items():
+            payload = fetch(path, bas)
+            if payload.get("error"):
+                print(f"  {label}: 조회 실패 ({payload['error']})")
+                continue
+            rows = rows_of(payload)
+            total += len(rows)
+            allrows.extend(rows)
+            print(f"  {label}: {len(rows)}개 지수")
+        print()
+        print(format_factor_candidates(find_factor_indices(allrows), total=total))
         return 0
     if args.probe:
         print(format_probe(probe(bas), bas))
@@ -484,6 +501,62 @@ FIELD_CLOSE = "CLSPRC_IDX"
 def _norm_name(value) -> str:
     """지수명 정규화(순수) — 공백만 지운다. 글자는 건드리지 않는다."""
     return str(value or "").replace(" ", "")
+
+
+# 팩터/스타일 지수를 찾을 때 쓰는 단서. **부분일치로 고르지 않는다** —
+# 이름에 '변동성'이 든 지수가 6개였던 VKOSPI 사례처럼, 후보를 사람에게
+# 보여주고 정확일치로 고른다.
+FACTOR_HINTS = {
+    "Momentum": ("모멘텀", "momentum"),
+    "Value": ("가치", "밸류", "value"),
+    "Quality": ("퀄리티", "품질", "quality"),
+    "LowVol": ("저변동", "로우볼", "minimum volatility", "low vol"),
+    "Size": ("중소형", "소형", "size", "smallcap"),
+    "Growth": ("성장", "growth"),
+}
+
+
+def find_factor_indices(rows: list) -> dict:
+    """지수 목록에서 팩터 후보를 이름 단서로 추린다(순수).
+
+    **고르지 않는다. 후보를 보여줄 뿐이다.** 어느 것을 쓸지는 사람이 정하고,
+    정해진 뒤에는 `pick_index`가 정확일치로 집는다 — 부분일치로 자동 선택하면
+    엉뚱한 지수를 집는다(2026-09-01 VKOSPI: '변동성'이 든 지수가 6개였다).
+    """
+    out: dict = {factor: [] for factor in FACTOR_HINTS}
+    for row in rows or []:
+        name = None
+        for field in NAME_FIELDS:
+            if row.get(field):
+                name = str(row[field])
+                break
+        if not name:
+            continue
+        low = name.lower()
+        for factor, hints in FACTOR_HINTS.items():
+            if any(h.lower() in low for h in hints):
+                out[factor].append(name)
+    return {k: sorted(set(v)) for k, v in out.items() if v}
+
+
+def format_factor_candidates(found: dict, total: int = 0) -> str:
+    """사람이 고르라고 내놓는 목록(순수)."""
+    lines = [f"🔎 팩터 지수 후보 (전체 {total}개 중)", ""]
+    if not found:
+        lines.append("  이름 단서로 걸린 지수가 없습니다.")
+        lines.append("  KRX가 팩터/스타일 지수를 제공하지 않거나 이름이 다릅니다")
+        lines.append("  → 종목 단위로 팩터를 직접 구성해야 합니다(무겁습니다).")
+        return "\n".join(lines)
+    for factor, names in found.items():
+        lines.append(f"  {factor}")
+        for n in names[:8]:
+            lines.append(f"    · {n}")
+        if len(names) > 8:
+            lines.append(f"    … 외 {len(names) - 8}개")
+    lines.append("")
+    lines.append("_후보일 뿐입니다. 어느 것을 쓸지는 사람이 정하고,_")
+    lines.append("_정해진 뒤에는 **정확일치**로 집습니다(부분일치 금지)._")
+    return "\n".join(lines)
 
 
 def pick_index(rows: list, name: str) -> Optional[dict]:
