@@ -1069,3 +1069,25 @@ def test_the_phase_tab_names_what_cannot_be_measured(client):
     html = client.get("/").text
     assert "Momentum과 Quality는 아예 잴 수 없습니다" in html
     assert "없다는 증명이 아닙니다" in html
+
+
+def test_signal_accuracy_reports_what_each_horizon_has(client, monkeypatch):
+    """**「아직 없습니다」만 뜨면 사람은 수집이 고장난 줄 안다.**
+
+    5거래일이 안 지났을 뿐인데 1거래일 결과까지 없는 것처럼 보였다.
+    """
+    import signal_review as sr
+    rows = [{"key": f"k{i}", "ret_1d": 1.0, "edge_1d": 0.5, "base_1d": 0.5,
+             "ret_5d": None, "edge_5d": None, "base_5d": None,
+             "strategy": "MACD", "action": "매수", "suppressed": False,
+             "shadow": False, "pending": True} for i in range(12)]
+    monkeypatch.setattr(sr, "load_outcomes",
+                        lambda *a, **k: {r["key"]: r for r in rows})
+    d = client.get("/api/signal/accuracy?horizon=1").json()
+    assert d["summary"]["total"]["n"] == 12
+    assert d["summary"]["available"]["1"] == 12 or d["summary"]["available"][1] == 12
+
+
+def test_the_signal_tab_shows_the_horizon_counts(client):
+    html = client.get("/").text
+    assert "평가 완료:" in html and "거래일이 지나지 않음" in html

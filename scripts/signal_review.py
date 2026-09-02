@@ -171,9 +171,27 @@ def _agg(rows: list[dict], horizon: int) -> dict:
     }
 
 
+def available_counts(outcomes: Iterable[dict],
+                     horizons: tuple[int, ...] = HORIZONS) -> dict:
+    """지평별로 **평가가 끝난 행이 몇 건인지**(순수).
+
+    5거래일이 안 지났다고 1거래일 결과까지 없는 것은 아니다. 화면이
+    「아직 없습니다」라고만 하면 사람은 수집이 고장난 줄 안다.
+    """
+    rows = list(outcomes)
+    return {h: sum(1 for r in rows if r.get(f"ret_{h}d") is not None) for h in horizons}
+
+
 def summarize(outcomes: Iterable[dict], horizon: int = 5) -> dict:
-    """전략×액션, MTF 억제 여부별 집계. **볼 조합을 미리 정해 둔다.**"""
-    rows = [o for o in outcomes if not o.get("pending")]
+    """전략×액션, MTF 억제 여부별 집계. **볼 조합을 미리 정해 둔다.**
+
+    **행 선택은 지평별로 한다(2026-09-02 수정).** 전에는 `pending`을 통째로
+    버렸는데, `evaluate_signal`은 지평 **하나라도** 비면 pending을 세운다.
+    그래서 1거래일 결과가 39건 채워져 있는데도 1일 화면이 n=0으로 떴다 —
+    **있는 데이터를 못 쓰고 있었다.** 지금은 그 지평의 값이 있는 행만 본다.
+    """
+    outcomes = list(outcomes)
+    rows = [o for o in outcomes if o.get(f"ret_{horizon}d") is not None]
     by_strategy: dict[str, list[dict]] = {}
     by_action: dict[str, list[dict]] = {}
     for r in rows:
@@ -189,6 +207,8 @@ def summarize(outcomes: Iterable[dict], horizon: int = 5) -> dict:
     held = [r for r in mtf_rows if r["suppressed"]]
     return {
         "horizon": horizon,
+        "available": available_counts(outcomes),
+        "waiting": sum(1 for o in outcomes if o.get(f"ret_{horizon}d") is None),
         "total": _agg(rows, horizon),
         "by_strategy": {k: _agg(v, horizon) for k, v in sorted(by_strategy.items())},
         "by_action": {k: _agg(v, horizon) for k, v in sorted(by_action.items())},

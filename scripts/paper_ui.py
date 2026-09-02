@@ -2569,7 +2569,17 @@ async function loadSignalAccuracy() {
                    sigaccCard("발송된 신호", s.mtf.sent),
                    sigaccCard("MTF 억제분", s.mtf.suppressed)];
     for (const [k, a] of Object.entries(s.by_strategy)) cards.push(sigaccCard(k, a));
-    box.innerHTML = cards.join("");
+    // **지평별로 몇 건이 평가됐는지 먼저 말한다.** 「아직 없습니다」만 뜨면
+    // 사람은 수집이 고장난 줄 안다 — 5거래일이 안 지난 것뿐일 수 있다.
+    const avail = s.available || {};
+    const availText = Object.keys(avail).length
+      ? Object.entries(avail).map(([h, n]) => `${h}거래일 ${n}건`).join(" · ")
+      : "";
+    box.innerHTML = (availText
+      ? `<p class="muted" style="margin:0 0 0.6rem;">평가 완료: ${availText}` +
+        (s.waiting ? ` · 이 지평 대기 ${s.waiting}건(아직 ${horizon}거래일이 지나지 않음)` : "") +
+        `</p>`
+      : "") + cards.join("");
 
     const rows = d.recent || [];
     const key = `ret_${horizon}d`, bkey = `base_${horizon}d`, ekey = `edge_${horizon}d`;

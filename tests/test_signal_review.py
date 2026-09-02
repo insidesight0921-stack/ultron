@@ -274,3 +274,58 @@ def test_evaluate_signal_carries_the_shadow_flag():
            "suppressed": True, "shadow": True, "trend": "up"}
     out = sr.evaluate_signal(rec, [])
     assert out["shadow"] is True
+
+
+# ─── 있는 데이터를 못 쓰고 있었다 (2026-09-02) ──────────
+
+def _partial(**kw):
+    base = {"key": "k", "at": "2026-09-01 10:00", "day": "2026-09-01",
+            "ticker": "005930", "strategy": "MACD", "action": "매수",
+            "suppressed": False, "shadow": False, "pending": True,
+            "ret_1d": 1.0, "base_1d": 0.2, "edge_1d": 0.8,
+            "ret_5d": None, "base_5d": None, "edge_5d": None}
+    base.update(kw)
+    return base
+
+
+def test_a_one_day_result_counts_even_while_five_days_is_pending():
+    """**5거래일이 안 지났다고 1거래일 결과까지 버리면 안 된다.**
+
+    `evaluate_signal`은 지평 하나라도 비면 pending을 세운다. 예전
+    `summarize`는 pending을 통째로 버려서, 1일 결과가 39건 채워져 있는데도
+    1일 화면이 n=0이었다. 화면은 「아직 평가된 신호가 없습니다」라고만 했다.
+    """
+    rows = [_partial(key=f"k{i}") for i in range(12)]
+    got = sr.summarize(rows, horizon=1)
+    assert got["total"]["n"] == 12
+    assert got["total"]["verdict"] != "표본 부족"
+
+
+def test_the_five_day_view_still_shows_nothing_when_it_has_nothing():
+    """지평별로 고른다 — 없는 것을 있는 척하지 않는다."""
+    rows = [_partial(key=f"k{i}") for i in range(12)]
+    assert sr.summarize(rows, horizon=5)["total"]["n"] == 0
+
+
+def test_the_summary_says_how_many_each_horizon_has():
+    """「아직 없습니다」만 뜨면 사람은 수집이 고장난 줄 안다."""
+    rows = [_partial(key=f"k{i}") for i in range(12)]
+    rows.append(_partial(key="done", ret_5d=2.0, base_5d=0.5, edge_5d=1.5,
+                         pending=False))
+    got = sr.summarize(rows, horizon=5)
+    assert got["available"] == {1: 13, 5: 1}
+    assert got["waiting"] == 12
+
+
+def test_a_row_with_no_result_at_all_is_counted_nowhere():
+    rows = [_partial(ret_1d=None, base_1d=None, edge_1d=None)]
+    got = sr.summarize(rows, horizon=1)
+    assert got["total"]["n"] == 0 and got["available"][1] == 0
+
+
+def test_the_mtf_split_also_uses_the_horizon(  ):
+    """억제분도 같은 규칙으로 골라야 한쪽만 표본이 다르지 않다."""
+    rows = ([_partial(key=f"s{i}", suppressed=False) for i in range(6)]
+            + [_partial(key=f"h{i}", suppressed=True) for i in range(4)])
+    got = sr.summarize(rows, horizon=1)
+    assert got["mtf"]["sent"]["n"] == 6 and got["mtf"]["suppressed"]["n"] == 4
