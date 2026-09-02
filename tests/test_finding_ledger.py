@@ -44,18 +44,27 @@ def test_nothing_is_not_a_match():
     assert fl.same_finding({"x": 1}, None) is False
 
 
-def test_a_broken_ledger_is_not_fatal(tmp_path):
+def test_a_broken_ledger_is_read_as_empty_but_never_overwritten(tmp_path):
+    """**추가만 한다의 유일한 예외 경로를 막는다.**
+
+    리뷰(2026-09-02): 깨진 파일을 빈 목록으로 읽고 그 위에 1건짜리 새 파일을
+    써서 이력 전체가 사라졌다. 읽기는 빈 목록이되, 쓰기는 멈춘다.
+    """
     p = tmp_path / "l.json"
-    p.write_text("{망가진", encoding="utf-8")
+    broken = '[{"at":"a","v":1}, {"at":"b","v":2}'      # 닫는 괄호 없음
+    p.write_text(broken, encoding="utf-8")
     assert fl.load(p) == [] and fl.latest(p) is None
-    rows, added = fl.append({"at": "1"}, p)
-    assert added is True and len(rows) == 1
+    rows, added = fl.append({"at": "c", "v": 3}, p)
+    assert added is False and rows == []
+    assert p.read_text(encoding="utf-8") == broken      # 손대지 않았다
 
 
-def test_a_non_list_ledger_is_treated_as_empty(tmp_path):
+def test_a_non_list_ledger_is_treated_as_empty_and_protected(tmp_path):
     p = tmp_path / "l.json"
     p.write_text('{"not": "a list"}', encoding="utf-8")
     assert fl.load(p) == []
+    _, added = fl.append({"at": "1"}, p)
+    assert added is False and '"not"' in p.read_text(encoding="utf-8")
 
 
 def test_a_missing_ledger_reads_as_empty(tmp_path):

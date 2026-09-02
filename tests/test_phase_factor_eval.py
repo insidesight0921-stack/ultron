@@ -417,11 +417,13 @@ def test_the_ledger_only_appends(tmp_path):
     assert len(log) == 2 and log[0]["at"] == "1"
 
 
-def test_a_broken_ledger_is_not_fatal(tmp_path):
+def test_a_broken_ledger_is_not_fatal_and_not_overwritten(tmp_path):
+    """깨진 원장은 빈 것으로 읽되 **그 위에 쓰지 않는다**(이력 보호)."""
     path = tmp_path / "v.json"
     path.write_text("{망가진", encoding="utf-8")
     assert pf.latest_validation(path) is None
-    assert len(pf.append_validation({"at": "1"}, path)) == 1
+    assert pf.append_validation({"at": "1"}, path) == []
+    assert path.read_text(encoding="utf-8") == "{망가진"
 
 
 def test_the_same_finding_is_not_written_twice(tmp_path):
@@ -463,3 +465,54 @@ def test_a_different_number_makes_a_new_finding():
 def test_the_first_record_always_lands(tmp_path):
     path = tmp_path / "v.json"
     assert len(pf.append_validation(pf.validation_record(_fam(), None, at="1"), path)) == 1
+
+
+# ─── 검정력 — α와 같다 (리뷰 2026-09-02) ───────────────
+
+def _episodes(lengths, phase="Expansion"):
+    return [{"phase": phase, "start": "s", "end": "e", "months": L,
+             "mean": 0.01, "sign": 1} for L in lengths]
+
+
+def test_power_is_near_alpha_for_a_realistic_effect():
+    """**월 sd 6%p·18개 에피소드에서 0.5%p/월 우위를 알아볼 확률은 α 수준이다.**
+
+    「우위 확인 불가」가 진위와 무관하게 거의 항상 나온다는 뜻이다.
+    """
+    rows = _episodes([8, 10, 17, 20, 4, 17, 2, 18, 6, 23, 3, 16, 6, 17, 16, 4, 3, 9])
+    power = pf.sign_power(rows, {"Expansion": 1}, sd_month=0.0607, need=15)
+    assert power is not None and power < 0.10
+
+
+def test_a_large_effect_is_detectable():
+    rows = _episodes([12] * 18)
+    power = pf.sign_power(rows, {"Expansion": 1}, sd_month=0.0607, need=15,
+                          effect=0.03)
+    assert power > 0.6
+
+
+def test_a_lower_bar_or_lower_noise_raises_power():
+    rows = _episodes([12] * 18)
+    base = pf.sign_power(rows, {"Expansion": 1}, sd_month=0.06, need=15)
+    assert pf.sign_power(rows, {"Expansion": 1}, sd_month=0.06, need=13) > base
+    assert pf.sign_power(rows, {"Expansion": 1}, sd_month=0.03, need=15) > base
+
+
+def test_longer_episodes_raise_power():
+    short = pf.sign_power(_episodes([2] * 18), {"Expansion": 1}, sd_month=0.06, need=15)
+    long_ = pf.sign_power(_episodes([24] * 18), {"Expansion": 1}, sd_month=0.06, need=15)
+    assert long_ > short
+
+
+def test_power_needs_the_inputs():
+    assert pf.sign_power([], {"Expansion": 1}, sd_month=0.06, need=15) is None
+    assert pf.sign_power(_episodes([5]), {"Expansion": 1}, sd_month=0, need=15) is None
+    assert pf.sign_power(_episodes([5]), {"Expansion": 1}, sd_month=0.06, need=None) is None
+
+
+def test_the_report_says_it_cannot_measure_when_power_is_low():
+    rows = _episodes([2] * 13) + [{"phase": "Contraction", "start": "s", "end": "e",
+                                   "months": 2, "mean": -0.01, "sign": -1}] * 5
+    expected = {"Expansion": 1, "Contraction": -1}
+    msg = pf.format_verdict(pf.verdict(rows, expected), expected, rows, sd_month=0.06)
+    assert "잴 수 없다" in msg and "검정력" in msg

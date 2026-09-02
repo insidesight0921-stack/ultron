@@ -221,3 +221,21 @@ def test_both_bots_can_take_a_log_path():
                   if isinstance(n, ast.FunctionDef) and n.name == func)
         names = [a.arg for a in fn.args.args + fn.args.kwonlyargs]
         assert "log_path" in names, f"{mod}:{func}"
+
+
+def test_a_different_top_n_on_the_same_day_is_a_different_judgment(tmp_path):
+    """**판단 조건이 다르면 다른 판단이다.** 같은 조건의 재실행만 한 줄로."""
+    p = tmp_path / "b.jsonl"
+    bsl.append_records(bsl.build_records("kium", _ranked(6), at="2026-09-02T16:40", top_n=3), p)
+    n = bsl.append_records(bsl.build_records("kium", _ranked(6), at="2026-09-02T18:00", top_n=5), p)
+    assert n > 0
+    assert len({r["top_n"] for r in bsl.load_records(p)}) == 2
+
+
+def test_a_different_phase_on_the_same_day_is_a_different_judgment(tmp_path):
+    p = tmp_path / "b.jsonl"
+    bsl.append_records(bsl.build_records("quant", _ranked(2), at="2026-09-02", top_n=1,
+                                         phase="Expansion"), p)
+    n = bsl.append_records(bsl.build_records("quant", _ranked(2), at="2026-09-02", top_n=1,
+                                             phase="Contraction"), p)
+    assert n == 2

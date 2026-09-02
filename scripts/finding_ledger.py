@@ -35,13 +35,31 @@ def same_finding(a: Optional[dict], b: Optional[dict],
     return all(a.get(k) == b.get(k) for k in keys)
 
 
-def load(path) -> list:
-    """원장 전체. 없거나 깨졌으면 빈 목록."""
-    try:
-        got = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+class CorruptLedger(RuntimeError):
+    """파일은 있는데 원장으로 읽을 수 없다. **그 위에 쓰면 이력이 사라진다.**"""
+
+
+def _read(path) -> list:
+    """원장 전체. 없으면 빈 목록, **있는데 깨졌으면 예외.**"""
+    path = Path(path)
+    if not path.exists():
         return []
-    return got if isinstance(got, list) else []
+    try:
+        got = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise CorruptLedger(f"{path.name}: {e}") from e
+    if not isinstance(got, list):
+        raise CorruptLedger(f"{path.name}: 목록이 아니다({type(got).__name__})")
+    return got
+
+
+def load(path) -> list:
+    """원장 전체. 없거나 깨졌으면 빈 목록(읽기 전용 호출부용)."""
+    try:
+        return _read(path)
+    except CorruptLedger as e:
+        log.warning("원장을 읽을 수 없다: %s", e)
+        return []
 
 
 def latest(path) -> Optional[dict]:
@@ -53,7 +71,14 @@ def latest(path) -> Optional[dict]:
 def append(record: dict, path, *, ignore=TIME_KEYS) -> tuple[list, bool]:
     """새 판정이면 붙이고, 같으면 그대로 둔다. 반환: (원장, 붙였는가)."""
     path = Path(path)
-    rows = load(path)
+    try:
+        rows = _read(path)
+    except CorruptLedger as e:
+        # **추가만 한다**의 유일한 예외 경로였다(2026-09-02 리뷰): 깨진 파일을
+        # 빈 목록으로 읽고 그 위에 1건짜리 새 파일을 써서 이력을 통째로 지웠다.
+        # 쓰지 않고 멈춘다. 사람이 파일을 보고 정한다.
+        log.error("원장이 깨져 있어 쓰지 않는다(이력 보호): %s", e)
+        return [], False
     if rows and same_finding(rows[-1], record, ignore=ignore):
         return rows, False
     rows = rows + [record]

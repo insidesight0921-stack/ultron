@@ -284,6 +284,16 @@ def format_audit(result: dict) -> str:
 
 # ─── I/O ─────────────────────────────────────────────
 
+def cache_root() -> Path:
+    """팩터 지수 캐시 루트 — **한 벌.**
+
+    리뷰(2026-09-02): 여기는 존재하지 않는 `paths` 모듈을 import하다 항상
+    fallback으로 빠졌고, `phase_factor_eval`은 같은 경로를 따로 박아뒀다.
+    누가 오타를 「고치면」 두 파일이 다른 곳을 보게 된다. 그래서 한 함수로.
+    """
+    return Path(__file__).resolve().parents[1] / "data" / "cache"
+
+
 def cache_path(service: str, root: Path) -> Path:
     safe = "".join(ch if ch.isalnum() else "_" for ch in service)
     return Path(root) / f"factor_index_{safe}.json"
@@ -374,11 +384,7 @@ def _cli() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import krx_openapi as k
     from factor_probe import months_between
-    try:
-        from paths import PATHS
-        root = PATHS.shareable_cache_dir
-    except Exception:
-        root = Path(__file__).resolve().parents[1] / "data" / "cache"
+    root = cache_root()
 
     ap = argparse.ArgumentParser(description="팩터 지수 월말 종가 수집")
     ap.add_argument("--names", nargs="+", required=True, help="정확한 지수명 2개 이상(롱 먼저)")

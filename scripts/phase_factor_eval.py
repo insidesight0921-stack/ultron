@@ -5,8 +5,12 @@
 최소 검출 차이가 월 4.91~5.48%p다. 현실적인 국면-팩터 효과(월 0.3~0.5%p)의
 10배다. **평균 차이는 이 표본으로 잴 수 없다.**
 
-부호는 다르다. 「이 국면에서 소형이 대형을 이기는가」는 에피소드당 하나의
-예/아니오이고, 18개면 이항검정이 선다 — 여전히 얇지만 판정선이 현실적이다.
+부호는 검정이 서기는 한다. 「이 국면에서 소형이 대형을 이기는가」는 에피소드당
+하나의 예/아니오이고 18개면 이항검정이 돈다. **그러나 검정력은 없다**(리뷰
+2026-09-02): 월 sd 6%p에서 0.5%p/월짜리 우위가 에피소드 부호를 뒤집을 확률은
+0.56~0.60뿐이라, 15/18 합격선을 넘을 확률이 1.5~3.4% — α와 같다. 그래서
+보고서가 검정력을 함께 낸다. 「우위 확인 불가」는 「없다」가 아니라 대부분
+「잴 수 없다」다.
 
 세 가지를 지킨다:
 
@@ -315,10 +319,53 @@ def format_family(family: dict) -> str:
     return chr(10).join(lines)
 
 
+# ─── 순수: 검정력 ─────────────────────────────────────
+
+REALISTIC_EFFECT = 0.005       # 월 0.5%p — 국면-팩터 효과의 현실적 크기(리뷰 2026-09-02)
+
+
+def _phi(z: float) -> float:
+    """표준정규 CDF(순수)."""
+    from math import erf, sqrt
+    return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+
+
+def sign_power(rows: list, expected: dict, *, sd_month: float, need: int,
+               effect: float = REALISTIC_EFFECT) -> Optional[float]:
+    """이 표본으로 `effect`만큼의 우위를 **알아볼 확률**(순수).
+
+    리뷰(2026-09-02)가 짚은 것: 월 sd 6%p에서 에피소드 평균의 부호가 맞을
+    확률은 Φ(effect·√L / sd)다. 0.5%p/월이면 0.56~0.60이고, n=18에서
+    15/18을 넘을 확률은 **1.5~3.4%** — α와 같다. 즉 「우위 확인 불가」는
+    진위와 무관하게 거의 항상 나온다. 판정은 정직하되 정보량이 0에 가깝다는
+    것을 보고서가 스스로 말해야 한다.
+    """
+    if not rows or not sd_month or sd_month <= 0 or need is None:
+        return None
+    probs = []
+    for r in rows:
+        if expected.get(r["phase"], 0) == 0:
+            continue
+        months = max(1, int(r.get("months") or 1))
+        probs.append(_phi(effect * (months ** 0.5) / sd_month))
+    if not probs:
+        return None
+    # 포아송 이항(에피소드마다 확률이 다르다) — 정확 DP
+    dist = [1.0]
+    for q in probs:
+        nxt = [0.0] * (len(dist) + 1)
+        for k, v in enumerate(dist):
+            nxt[k] += v * (1 - q)
+            nxt[k + 1] += v * q
+        dist = nxt
+    return round(sum(dist[need:]), 4)
+
+
 def format_verdict(result: dict, expected: dict, rows: list, *,
                    label: str = "", lag: int = LAG_DEFAULT,
                    words: tuple = ("소형 우위", "대형 우위"),
-                   subject: str = "팩터 방향") -> str:
+                   subject: str = "팩터 방향",
+                   sd_month: Optional[float] = None) -> str:
     lines = [f"🎯 국면 → 팩터 방향 검정{(' — ' + label) if label else ''}", ""]
     lines.append(f"  발표 시차 {lag}개월 반영 · 에피소드 {len(rows)}개")
     lines.append("")
@@ -349,6 +396,14 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
     elif (result.get("bar") or {}).get("degenerate"):
         lines.append("  모든 에피소드의 부호가 같습니다 — 「늘 같은 쪽」이 100%이므로")
         lines.append("  국면이 무엇을 더했는지 이 표본으로는 가릴 수 없습니다.")
+    if sd_month and line.get("need") is not None:
+        power = sign_power(rows, expected, sd_month=sd_month, need=line["need"])
+        if power is not None:
+            lines.append(f"  검정력: 우위가 월 {REALISTIC_EFFECT * 100:.1f}%p라면 이 표본이 "
+                         f"그것을 알아볼 확률 **{power * 100:.1f}%**")
+            if power < 0.2:
+                lines.append("  → **이 표본으로는 팩터 방향을 판정할 수 없습니다.** 「없다」가 "
+                             "아니라 「잴 수 없다」입니다.")
     lines.append("")
     lines.append(f"  판정: **{result['verdict']}**")
     if result.get("verdict") == "우위 확인 불가":
@@ -368,19 +423,24 @@ VALIDATION_FILE = "phase_validation.json"
 def validation_record(family: dict, market: Optional[dict], *,
                       at: str, note: str = "") -> dict:
     """원장에 남길 한 건(순수)."""
+    def fix(v, places=6):
+        # **원장에 넣는 실수는 자리를 고정한다.** 3.12의 sum()은 보정 합산이라
+        # 3.10과 마지막 비트가 달라, 같은 판정이 원장에 또 쌓였다(2026-09-02).
+        return None if v is None else round(float(v), places)
+
     tests = {}
     for key, r in (family or {}).get("results", {}).items():
         tests[key] = {"n": r.get("n", 0), "hits": r.get("hits", 0),
-                      "p0": (r.get("bar") or {}).get("p0"),
-                      "need": r.get("family_need"), "p": r.get("p"),
+                      "p0": fix((r.get("bar") or {}).get("p0")),
+                      "need": r.get("family_need"), "p": fix(r.get("p")),
                       "verdict": r.get("family_verdict") or r.get("verdict")}
     if market:
         tests["시장 방향"] = {"n": market.get("n", 0), "hits": market.get("hits", 0),
-                           "p0": (market.get("bar") or {}).get("p0"),
+                           "p0": fix((market.get("bar") or {}).get("p0")),
                            "need": (market.get("bar") or {}).get("need"),
-                           "p": market.get("p"), "verdict": market.get("verdict")}
+                           "p": fix(market.get("p")), "verdict": market.get("verdict")}
     passed = [k for k, t in tests.items() if t.get("verdict") == "우위 확인"]
-    return {"at": at, "alpha": (family or {}).get("alpha"), "tests": tests,
+    return {"at": at, "alpha": fix((family or {}).get("alpha")), "tests": tests,
             "any_passed": bool(passed), "passed": passed, "note": note}
 
 
@@ -440,7 +500,9 @@ def run_one(spec: dict, load_pair, phases: dict, weights: dict, *,
     sp = fs.spread(fs.monthly_returns(long_series), fs.monthly_returns(short_series))
     rows = episode_rows(sp, episodes(phases, start=start))
     expected = expected_signs(weights, spec["factors"])
-    return verdict(rows, expected), rows, expected
+    got = verdict(rows, expected)
+    got["sd_month"] = fs.stdev(list(sp.values()))
+    return got, rows, expected
 
 
 def _cli() -> int:
@@ -471,7 +533,7 @@ def _cli() -> int:
                     help="사전 고정된 검정 가족 전체를 재고 합격선을 나눈다")
     args = ap.parse_args()
 
-    root = Path(__file__).resolve().parents[1] / "data" / "cache"
+    root = fs.cache_root()          # factor_series와 **같은 곳**을 본다
 
     def load_pair(service: str, name: str) -> dict:
         return fs.load_cache(fs.cache_path(service, root)).get(name, {})
@@ -541,8 +603,16 @@ def _cli() -> int:
             if miss:
                 print(f"  {key}: 캐시에 없는 지수 {miss} — factor_series.py로 먼저 받으세요")
                 continue
-            print(f"  [{key}] 에피소드 {len(rows)}개 · "
+            r = results[key]
+            need = fam["results"][key].get("family_need")
+            power = sign_power(rows, expected, sd_month=r.get("sd_month") or 0,
+                               need=need) if need is not None else None
+            power_s = (f" · 검정력(월 {REALISTIC_EFFECT * 100:.1f}%p 우위 기준) "
+                       f"{power * 100:.1f}%" if power is not None else "")
+            print(f"  [{key}] 에피소드 {len(rows)}개{power_s} · "
                   f"{hypothesis_note(weights, spec['factors'])}")
+        print()
+        print("  _검정력이 α(5%) 수준이면 「우위 확인 불가」는 「없다」가 아니라 「잴 수 없다」입니다._")
         return 0
     long_series = load_pair(args.long_service or args.service, args.long)
     short_series = load_pair(args.short_service or args.service, args.short)
@@ -564,7 +634,7 @@ def _cli() -> int:
     result = verdict(rows, expected)
     print(format_verdict(result, expected, rows,
                          label=f"{args.long} − {args.short} ({args.factor})",
-                         lag=args.lag))
+                         lag=args.lag, sd_month=fs.stdev(list(sp.values()))))
     print()
     print(f"  가설 출처: {source} · {hypothesis_note(weights, args.factor)}")
     print(f"  스프레드 {len(sp)}개월 · 국면 키 {args.key} · 시작 {args.start}")

@@ -90,9 +90,16 @@ def build_records(bot: str, ranked: Iterable, *, at: str, top_n: int,
 
 
 def record_key(rec: dict) -> str:
-    """같은 판단인지 가르는 열쇠(순수) — 날·봇·종목."""
+    """같은 판단인지 가르는 열쇠(순수) — 날·봇·종목·**top_n·국면**.
+
+    리뷰(2026-09-02): 날·봇·종목만 보면 같은 날 `/test_quant`(또는 --top을
+    바꾼 재실행)가 먼저 돌았을 때 그날 진짜 월간 판단이 0건 기록되고 먼저
+    남은 행의 top_n·국면이 그날 판단으로 남는다. 판단 조건이 다르면 다른
+    판단이다 — 같은 조건의 재실행만 한 줄로 합친다.
+    """
     day = str(rec.get("at") or "")[:10]
-    return f"{day}|{rec.get('bot')}|{rec.get('ticker')}"
+    return (f"{day}|{rec.get('bot')}|{rec.get('ticker')}"
+            f"|{rec.get('top_n')}|{rec.get('phase') or ''}")
 
 
 def merge_records(existing: Iterable[dict], new: Iterable[dict]) -> list[dict]:

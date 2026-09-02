@@ -103,19 +103,27 @@ def always(direction: str, days: Iterable[str]) -> list[tuple]:
 
 def permuted(predictions: list[tuple], *, trials: int = TRIALS,
              seed: int = SEED) -> list[list[tuple]]:
-    """예측 **빈도와 방향 구성은 그대로 두고 날짜만 섞은** 대조군(순수).
+    """예측 **빈도·방향 구성·뭉침은 그대로 두고 정렬만 깬** 대조군(순수).
 
     상승 예측 개수를 보존하는 것이 핵심이다 — 안 그러면 상승장에서 '상승을 많이
-    찍는 지표'가 유리해진 것을 실력으로 오독한다.
+    찍는 지표'가 유리해진 것을 실력으로 오독한다. `trials`는 회전 간격을
+    정하는 상한이고, `seed`는 호환을 위해 남겨둔다(회전은 결정적이다).
     """
-    rng = random.Random(seed)
     days = [d for d, _ in predictions]
     labels = [p for _, p in predictions]
+    n = len(labels)
+    if n < 2:
+        return []
+    # **날짜를 무작위로 섞지 않는다 — 회전시킨다(2026-09-02 리뷰).**
+    # 200일선 기울기 예측은 1,950일에 run이 23개뿐이다. iid 셔플은 그 뭉침을
+    # 깨서 귀무분포의 폭을 줄이고(sd 1.28 vs 회전 2.15%p) 백분위를 97.4로
+    # 부풀렸다 — 회전이면 86.6이다. 비중 규칙 백테스트가 회전을 택한 것과
+    # 같은 이유다: 뭉침은 보존하고 정답과의 정렬만 깬다.
+    step = max(1, (n - 1) // trials)
     out = []
-    for _ in range(trials):
-        shuffled = labels[:]
-        rng.shuffle(shuffled)
-        out.append(list(zip(days, shuffled)))
+    for k in range(step, n, step):
+        rotated = labels[k:] + labels[:k]
+        out.append(list(zip(days, rotated)))
     return out
 
 
@@ -540,8 +548,12 @@ def _flow_predictions(window: int = 5):
         return []
     days = sorted(flow)
     out = []
-    for i in range(window, len(days)):
-        total = sum(flow[d] for d in days[i - window:i])
+    # **봇과 같은 창.** `proxy_indicators._foreign_net`은 `tail(5)`로 당일을
+    # 포함한다. 여기가 `days[i-window:i]`로 당일을 빼면 하루 더 낡은 다른
+    # 예측기를 재는 것이다(2026-09-02 리뷰). 정답은 t일 정보로 t+1을 맞히는
+    # 것이므로 t일 값을 포함하는 것은 미래 참조가 아니다.
+    for i in range(window - 1, len(days)):
+        total = sum(flow[d] for d in days[i - window + 1:i + 1])
         state = pi.flow_state(total)
         out.append((days[i], UP if state == "risk_on"
                     else (DOWN if state == "risk_off" else None)))
@@ -570,6 +582,24 @@ def _logged_predictions(name: str):
 VALIDATION_FILE = "nowcast_validation.json"
 CONTROL_PREFIX = "대조: "
 
+# **이름은 한 벌이다.** `proxy_indicators.snapshot()`은 "VIX"·"VKOSPI"로 부르고
+# 이 파일은 "VIX 밴드"·"VKOSPI 밴드"로 판정했다 — 화면은 둘을 정확일치로
+# 맞추다 실패해 「미측정」을 띄웠다(2026-09-02 리뷰). 화면 이름 → 판정 이름.
+DISPLAY_TO_TEST = {
+    "VIX": "VIX 밴드",
+    "VKOSPI": "VKOSPI 밴드",
+}
+
+
+def test_name(display_name: str) -> str:
+    """화면 지표 이름 → 원장 판정 이름(순수). 매핑 없으면 그대로."""
+    return DISPLAY_TO_TEST.get(display_name, display_name)
+
+
+def _fix(value, places: int = 6):
+    """원장용 반올림(순수). None은 None."""
+    return None if value is None else round(float(value), places)
+
 
 def validation_record(results: dict, *, at: str, base: Optional[float] = None) -> dict:
     """원장에 남길 한 건(순수). **대조군 행은 판정이 아니므로 뺀다.**"""
@@ -577,12 +607,15 @@ def validation_record(results: dict, *, at: str, base: Optional[float] = None) -
     for name, r in (results or {}).items():
         if name.startswith(CONTROL_PREFIX):
             continue
-        tests[name] = {"n": r.get("n", 0), "rate": r.get("rate"),
-                       "control_rate": r.get("control_rate"),
-                       "percentile": r.get("percentile"),
+        # **원장에 넣는 실수는 자리를 고정한다.** Python 3.12의 sum()은 보정
+        # 합산이라 3.10과 마지막 비트가 다르다 — 그 차이로 「같은 판정」이
+        # 다른 판정으로 보여 원장이 또 쌓였다(2026-09-02 리뷰).
+        tests[name] = {"n": r.get("n", 0), "rate": _fix(r.get("rate")),
+                       "control_rate": _fix(r.get("control_rate")),
+                       "percentile": _fix(r.get("percentile")),
                        "verdict": r.get("verdict")}
     findings = [k for k, v in tests.items() if v.get("verdict") == VERDICT_FINDING]
-    return {"at": at, "base_rate": base, "tests": tests, "findings": findings}
+    return {"at": at, "base_rate": _fix(base), "tests": tests, "findings": findings}
 
 
 def indicator_note(name: str, record: Optional[dict]) -> str:
@@ -593,7 +626,7 @@ def indicator_note(name: str, record: Optional[dict]) -> str:
     """
     if not record:
         return "미측정"
-    t = (record.get("tests") or {}).get(name)
+    t = (record.get("tests") or {}).get(test_name(name))
     if not t or not t.get("n"):
         return "미측정"
     verdict = str(t.get("verdict") or "")
@@ -606,6 +639,15 @@ def indicator_note(name: str, record: Optional[dict]) -> str:
 
 
 def _cli() -> int:
+    import argparse
+
+    # 리뷰(2026-09-02): argparse가 없어 `--help`가 2.7초짜리 평가를 통째로
+    # 돌렸고, `--record`는 sys.argv 문자열 검색이었다(오타는 조용히 무시).
+    ap = argparse.ArgumentParser(description="나우캐스팅 지표 평가(다음 거래일 코스피 방향)")
+    ap.add_argument("--record", action="store_true",
+                    help="판정을 원장에 남겨 대리 지표 화면이 읽게 한다")
+    args = ap.parse_args()
+
     truth, dates, closes = _kospi_truth()
     if not truth:
         print("코스피 지수 캐시가 없어 정답 시계열을 만들 수 없습니다.")
@@ -639,7 +681,7 @@ def _cli() -> int:
                          else {"n": 0,
                                "verdict": f"캐시 없음 — `{hint}`로 소급 가능"})
     print(format_report(results, truth))
-    if "--record" in __import__("sys").argv:
+    if args.record:
         from datetime import datetime
         import finding_ledger as fl
         try:

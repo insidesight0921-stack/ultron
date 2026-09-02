@@ -119,10 +119,27 @@ def test_the_permutation_preserves_the_prediction_mix():
         assert sorted(p for _, p in sim) == sorted(p for _, p in preds)
 
 
-def test_a_real_signal_beats_the_shuffle():
-    truth = _truth("ud" * 20)
-    r = ne.evaluate(_preds("ud" * 20), truth, trials=300)
+def test_a_real_signal_beats_the_rotation():
+    """**비주기적** 정답을 완벽히 맞히는 예측은 회전 대조를 이긴다.
+
+    「ud」 반복 같은 완전 주기 신호는 짝수 회전에서 자기 자신과 같아져
+    백분위가 50%대로 나온다 — 회전 검정의 성질이지 결함이 아니다(실제
+    시장에 완전 주기는 없다). 픽스처를 비주기적으로 둔다.
+    """
+    pattern = "uuduudduuddduuudduduuddudduuudduudddu"
+    truth = _truth(pattern)
+    r = ne.evaluate(_preds(pattern), truth, trials=300)
     assert r["rate"] == 100.0 and r["percentile"] >= 95
+
+
+def test_the_null_preserves_runs():
+    """**뭉침을 깨지 않는다.** iid 셔플은 200일선 기울기(run 23개)의 귀무분포
+    폭을 줄여 백분위를 97.4로 부풀렸다 — 회전이면 86.6이다."""
+    preds = [(f"d{i}", ne.UP if i < 20 else ne.DOWN) for i in range(40)]
+    for null in ne.permuted(preds, trials=10):
+        labels = [l for _, l in null]
+        runs = sum(1 for i in range(1, len(labels)) if labels[i] != labels[i - 1]) + 1
+        assert runs <= 3            # 회전은 run을 최대 하나만 더 만든다
 
 
 def test_noise_stays_in_the_chance_range():

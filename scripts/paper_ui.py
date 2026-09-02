@@ -843,9 +843,13 @@ async def api_signal_accuracy(horizon: int = 5):
         import signal_review as sv
         outcomes = sv.load_outcomes()
         summary = sv.summarize(outcomes.values(), horizon=int(horizon))
-        pending = sum(1 for o in outcomes.values() if o.get("pending"))
+        # **지평별로 고른다 — summarize와 같은 규칙.** 리뷰(2026-09-02)에서
+        # 카드는 125건인데 표는 「평가된 신호 없음」·상태줄은 「평가 0건」이었다.
+        # 같은 응답 안에서 세 숫자가 서로 다른 규칙을 쓰고 있었다.
+        key = f"ret_{int(horizon)}d"
+        pending = sum(1 for o in outcomes.values() if o.get(key) is None)
         recent = sorted(
-            (o for o in outcomes.values() if not o.get("pending")),
+            (o for o in outcomes.values() if o.get(key) is not None),
             key=lambda o: str(o.get("at") or ""), reverse=True,
         )[:30]
         return JSONResponse({"summary": summary, "pending": pending,

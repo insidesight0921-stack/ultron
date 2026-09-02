@@ -213,7 +213,7 @@ def _table():
 
 def test_the_record_keeps_every_leg():
     """어느 다리가 일했는지가 이 측정의 결론이다 — 합계만 남기면 사라진다."""
-    rec = wb.validation_record(_table(), at="2026-09-02T15:00:00",
+    rec = wb.validation_record(_table(), at="2026-09-02T15:00:00", rule="combined",
                                mdd_test={"percentile": 89.2},
                                ret_test={"percentile": 59.2})
     assert set(rec["legs"]) == set(_table())
@@ -221,20 +221,23 @@ def test_the_record_keeps_every_leg():
 
 
 def test_a_percentile_below_95_is_not_passed():
-    rec = wb.validation_record(_table(), at="t", mdd_test={"percentile": 89.2})
+    rec = wb.validation_record(_table(), at="t", rule="combined",
+                               mdd_test={"percentile": 89.2})
     assert rec["passed"] is False
     assert "미검증" in wb.verification_note(rec)
 
 
 def test_a_percentile_at_95_passes():
-    rec = wb.validation_record(_table(), at="t", mdd_test={"percentile": 95.0})
+    rec = wb.validation_record(_table(), at="t", rule="combined",
+                               mdd_test={"percentile": 95.0})
     assert rec["passed"] is True
     assert "검증됨" in wb.verification_note(rec)
 
 
 def test_the_note_names_the_lowest_drawdown_leg():
     note = wb.verification_note(
-        wb.validation_record(_table(), at="t", mdd_test={"percentile": 89.2}))
+        wb.validation_record(_table(), at="t", rule="combined",
+                             mdd_test={"percentile": 89.2}))
     assert "합친 규칙(200일선+VKOSPI)" in note
 
 
@@ -245,3 +248,28 @@ def test_no_record_says_unmeasured_not_verified():
 
 def test_a_missing_ledger_does_not_break_the_bot(tmp_path):
     assert wb.load_validation(tmp_path / "없음.json") is None
+
+
+
+def test_the_bot_reads_only_its_own_rule(tmp_path):
+    """**다른 규칙의 진단이 마지막 줄이어도 자기 것처럼 보여주지 않는다.**
+
+    리뷰(2026-09-02): ma_only `--record`가 마지막 줄이 되면 봇 화면이
+    2,158일짜리 다른 규칙의 백분위 47.9를 자기 규칙 판정으로 띄웠다.
+    """
+    import finding_ledger as fl
+    p = tmp_path / "w.json"
+    fl.append(wb.validation_record(_table(), at="1", rule="combined",
+                                   mdd_test={"percentile": 89.2}), p)
+    fl.append(wb.validation_record(_table(), at="2", rule="ma_only",
+                                   mdd_test={"percentile": 47.9}), p)
+    got = wb.load_validation(p)
+    assert got["rule"] == "combined" and got["mdd_percentile"] == 89.2
+
+
+def test_the_note_has_no_markdown_stars():
+    """주간 리포트는 parse_mode=HTML — 별표가 그대로 보인다."""
+    note = wb.verification_note(
+        wb.validation_record(_table(), at="t", rule="combined",
+                             mdd_test={"percentile": 89.2}))
+    assert "**" not in note

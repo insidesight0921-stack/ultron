@@ -326,19 +326,31 @@ def format_compare(table: dict, *, mdd_test: dict = None,
 VALIDATION_FILE = "weight_rule_validation.json"
 
 
-def validation_record(table: dict, *, at: str, mdd_test=None, ret_test=None,
-                      note: str = "") -> dict:
-    """원장에 남길 한 건(순수). 다리별 성과와 회전 검정 백분위를 함께."""
-    legs = {name: {"n": p.get("n"), "avg_weight": p.get("avg_weight"),
+RULE_COMBINED = "combined"      # 봇이 실제로 쓰는 규칙(200일선 + VKOSPI)
+RULE_MA_ONLY = "ma_only"        # 한 다리만 본 진단용
+
+
+def validation_record(table: dict, *, at: str, rule: str, mdd_test=None,
+                      ret_test=None, note: str = "") -> dict:
+    """원장에 남길 한 건(순수). 다리별 성과와 회전 검정 백분위를 함께.
+
+    **어느 규칙을 쟀는지를 반드시 적는다.** 리뷰(2026-09-02): ma_only 기록이
+    마지막 줄이 되면 봇이 다른 규칙의 판정을 자기 것처럼 보여줬다.
+    실수는 자리를 고정한다(3.10/3.12 sum() 비트 차이로 원장이 또 쌓인다).
+    """
+    def fix(v, places=6):
+        return None if v is None else round(float(v), places)
+
+    legs = {name: {"n": p.get("n"), "avg_weight": fix(p.get("avg_weight")),
                    "switches": p.get("switches"),
-                   "total_return": p.get("total_return"),
-                   "mdd": p.get("mdd"), "sharpe": p.get("sharpe")}
+                   "total_return": fix(p.get("total_return")),
+                   "mdd": fix(p.get("mdd")), "sharpe": fix(p.get("sharpe"))}
             for name, p in (table or {}).items()}
-    return {"at": at, "legs": legs, "note": note,
-            "mdd_percentile": (mdd_test or {}).get("percentile"),
-            "return_percentile": (ret_test or {}).get("percentile"),
-            "passed": bool((mdd_test or {}).get("percentile") is not None
-                           and (mdd_test or {}).get("percentile", 0) >= 95)}
+    pct = (mdd_test or {}).get("percentile")
+    return {"at": at, "rule": rule, "legs": legs, "note": note,
+            "mdd_percentile": fix(pct),
+            "return_percentile": fix((ret_test or {}).get("percentile")),
+            "passed": bool(pct is not None and pct >= 95)}
 
 
 def verification_note(record) -> str:
@@ -357,20 +369,28 @@ def verification_note(record) -> str:
             continue
         if best is None or leg["mdd"] < legs[best]["mdd"]:
             best = name
-    head = ("✅ 검증됨" if record.get("passed") else "⚠️ **미검증**")
+    # 마크다운 별표를 쓰지 않는다 — 주간 리포트는 parse_mode=HTML이라 그대로 보인다.
+    head = ("✅ 검증됨" if record.get("passed") else "⚠️ 미검증")
     tail = f"MDD 회전 검정 백분위 {pct}" if pct is not None else "회전 검정 없음"
     extra = f" · 이 표본에서 MDD가 가장 낮았던 것: {best}" if best else ""
     return f"{head} — {tail}({record.get('at', '')[:10]} 측정){extra}"
 
 
-def load_validation(path=None):
-    """마지막 판정. 경로를 못 구하면 None."""
+def load_validation(path=None, *, rule: str = RULE_COMBINED):
+    """**그 규칙의** 마지막 판정. 경로를 못 구하거나 없으면 None.
+
+    봇은 자기가 쓰는 규칙(combined)의 판정만 읽는다. 다른 규칙의 진단이
+    마지막 줄이어도 그것을 자기 것처럼 보여주지 않는다.
+    """
     try:
         import finding_ledger as fl
         if path is None:
             from storage_paths import PATHS
             path = PATHS.private_state_file(VALIDATION_FILE)
-        return fl.latest(path)
+        for rec in reversed(fl.load(path)):
+            if rec.get("rule", RULE_COMBINED) == rule:
+                return rec
+        return None
     except Exception:                                       # noqa: BLE001
         return None
 
@@ -424,7 +444,7 @@ def _cli() -> int:
                     help="판정을 원장에 남겨 봇 화면이 읽게 한다")
     args = ap.parse_args()
 
-    def _record(table, mdd_test, ret_test, note):
+    def _record(table, mdd_test, ret_test, note, rule):
         if not args.record:
             return
         from datetime import datetime
@@ -437,7 +457,8 @@ def _cli() -> int:
             ledger = (_P(__file__).resolve().parents[1] / "data" / "private" /
                       "state" / VALIDATION_FILE)
         rec = validation_record(table, at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                                mdd_test=mdd_test, ret_test=ret_test, note=note)
+                                rule=rule, mdd_test=mdd_test, ret_test=ret_test,
+                                note=note)
         _, added = fl.append(rec, ledger, ignore=("at",))
         print()
         print(f"  원장 {'기록' if added else '유지(직전과 같은 판정)'} — {ledger.name}")
@@ -491,7 +512,9 @@ def _cli() -> int:
         ret_test = rotation_test(rets_c, comb_c, _return_metric)
         print(format_compare(table, mdd_test=mdd_test, ret_test=ret_test))
         _record(table, mdd_test, ret_test,
-                f"combined · {days[idx[0]]}~{days[idx[-1]]} · 창 {args.window}일")
+                f"{days[idx[0]]}~{days[idx[-1]]} · 창 {args.window}일 · "
+                f"VKOSPI 임계값은 같은 표본의 p20/p80(in-sample)",
+                rule=RULE_COMBINED)
         return 0
     weights = ma_weights(closes, window=args.window,
                          above=args.above, below=args.below)
@@ -503,7 +526,7 @@ def _cli() -> int:
     ret_test = rotation_test(rets, weights, _return_metric)
     print(format_compare(table, mdd_test=mdd_test, ret_test=ret_test))
     _record(table, mdd_test, ret_test,
-            f"ma_only · {days[0]}~{days[-1]} · 창 {args.window}일")
+            f"{days[0]}~{days[-1]} · 창 {args.window}일", rule=RULE_MA_ONLY)
     return 0
 
 
