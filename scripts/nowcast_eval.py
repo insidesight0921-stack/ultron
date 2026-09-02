@@ -179,7 +179,14 @@ def evaluate(predictions: list[tuple], truth: dict, *,
         # 예측 구성으로 무작위로 찍었을 때"와 비교할 뿐, 시장 상승 편향을
         # 이기는지는 묻지 않는다. 2026-08-31에 200일선 기울기가 이 틈으로
         # 빠져나갈 뻔했다.
-        verdict = "음성 대조 미달"
+        #
+        # **다만 「못 넘었다」에는 두 가지가 섞여 있다(2026-09-02).**
+        #   ① 표본이 작아 가릴 수 없었다 → 없다는 증명이 아니다
+        #   ② 표본이 충분한데도 못 넘었다 → 이제는 「정보 없음」이라 말해도 된다
+        # 외국인 순매수가 2,162건에서 50.0%(기준선 54.7%)로 나온 날 이 구분이
+        # 필요해졌다. 둘을 한 이름으로 부르면 ②를 ①처럼 유보하게 된다.
+        verdict = ("음성 대조 미달 — 정보 없음(표본 충분)"
+                   if _powered(actual["n"], ctrl) else "음성 대조 미달")
     elif pct < 95:
         verdict = "우연 범위"
     else:
@@ -290,6 +297,24 @@ def bar_table(base: float, *, margins=(0.05, 0.10, 0.15),
         out.append({"margin": m, "target": target, "need": need,
                     "years": round(need / 252, 1)})
     return out
+
+
+POWERED_MARGIN = 0.05      # 기준선을 이만큼 이기는 것을 가릴 표본이면 '충분'
+
+
+def _powered(n: int, base_rate_value, *, margin: float = POWERED_MARGIN,
+             k: int = N_INDICATORS) -> bool:
+    """이 표본으로 기준선 +`margin`을 가릴 수 있었는가(순수).
+
+    가릴 수 있었는데 못 넘었다면 「모른다」가 아니라 「없다」에 가깝다.
+    """
+    if not n or base_rate_value is None:
+        return False
+    base = base_rate_value / 100.0 if base_rate_value > 1 else float(base_rate_value)
+    if not 0.0 < base < 1.0:
+        return False
+    need = required_n(min(base + margin, 0.999), base, k=k)
+    return bool(need) and n >= need
 
 
 def readiness(truth: dict, n: int, *, margin: float = 0.10,

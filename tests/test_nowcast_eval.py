@@ -452,3 +452,31 @@ def test_a_large_constant_predictor_is_still_called_uninformative():
     truth = {d: ne.UP for d in days}
     got = ne.evaluate([(d, ne.UP) for d in days], truth)
     assert got["verdict"] == "상수 예측 — 방향 정보 없음"
+
+
+# ─── 「못 넘었다」에는 두 가지가 섞여 있다 (2026-09-02) ───
+
+def test_a_thin_miss_is_not_called_absence_of_information():
+    """**표본이 작아 못 가린 것을 「정보 없음」이라 하면 안 된다.**"""
+    assert ne._powered(150, 54.7) is False
+
+
+def test_a_large_miss_can_be_called_absence_of_information():
+    """외국인 순매수 2,162건에서 50.0%(기준선 54.7%) — 가릴 수 있었는데 못 넘었다."""
+    assert ne._powered(2162, 54.7) is True
+
+
+def test_the_verdict_separates_the_two_kinds_of_miss():
+    days = [f"{20200101 + i}" for i in range(600)]
+    truth = {d: (ne.UP if i % 100 < 55 else ne.DOWN) for i, d in enumerate(days)}
+    preds = [(d, ne.UP if i % 2 else ne.DOWN) for i, d in enumerate(days)]
+    got = ne.evaluate(preds, truth, trials=50)
+    assert "음성 대조 미달" in got["verdict"]
+
+
+def test_a_missing_control_rate_is_not_called_powered():
+    assert ne._powered(5000, None) is False
+
+
+def test_a_degenerate_base_rate_is_not_called_powered():
+    assert ne._powered(5000, 100.0) is False
