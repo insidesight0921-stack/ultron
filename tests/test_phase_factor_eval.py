@@ -330,3 +330,36 @@ def test_a_missing_index_is_reported_as_thin_not_as_a_result():
     got, rows, expected = pf.run_one(
         pf.FAMILY[0], lambda service, name: {}, {}, {})
     assert got["verdict"] == "표본 부족" and got["missing"]
+
+
+# ─── 팩터보다 앞선 질문 ───────────────────────────────
+
+def test_the_market_hypothesis_comes_from_the_phase_names():
+    """**내가 고른 방향이 아니다.** Recovery·Expansion은 정의상 오르는 국면이다."""
+    got = pf.MARKET_TEST["expected"]
+    assert got == {"Recovery": 1, "Expansion": 1,
+                   "Slowdown": -1, "Contraction": -1}
+
+
+def test_the_market_test_has_no_short_leg():
+    """시장 그 자체를 보는 것이므로 반대 다리가 없다 — 대신 우연 기대가 높다."""
+    assert pf.MARKET_TEST["short"] is None
+
+
+def test_a_rising_market_makes_the_bar_high_not_fifty():
+    """**시장은 대체로 오른다.** 「늘 상승」으로 찍은 성적을 넘어야 한다."""
+    rows = [{"sign": 1}] * 12 + [{"sign": -1}] * 6
+    line = pf.bar(rows)
+    assert abs(line["p0"] - 12 / 18) < 1e-12
+    assert line["baseline_sign"] == 1
+
+
+def test_the_report_uses_the_words_of_the_question_being_asked():
+    """시장 방향 검정에서 「늘 소형 우위」라고 적으면 읽는 사람이 오해한다."""
+    rows = (_rows([-1] * 13, phase="Contraction") + _rows([1] * 5, phase="Slowdown"))
+    expected = {"Contraction": -1, "Slowdown": -1}
+    msg = pf.format_verdict(pf.verdict(rows, expected), expected, rows,
+                            words=("상승", "하락"), subject="시장 방향")
+    assert "소형" not in msg and "대형" not in msg
+    assert "하락" in msg          # 이 표본의 예측은 둘 다 하락이다
+    assert "시장 방향을 예측한다는 근거" in msg

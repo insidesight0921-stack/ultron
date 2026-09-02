@@ -62,6 +62,26 @@ FAMILY = (
 )
 
 
+# ─── 더 앞선 질문 (2026-09-02, 재기 전에 고정) ──────────
+#
+# 팩터 셋이 모두 우연을 못 넘었다. 그런데 그 앞에 물어야 할 것이 있다:
+# **국면 판정은 시장 방향이라도 맞히는가?**
+#
+# 이 가설은 내가 고르지 않았다 — 국면 이름 자체가 방향이다. Recovery와
+# Expansion은 경기가 오르는 국면이고 Slowdown·Contraction은 내리는
+# 국면이다(CLI level×momentum의 4분면 정의). 팩터 우위보다 훨씬 약한
+# 주장이므로, 이것마저 못 넘으면 국면 판정 자체가 비어 있는 것이다.
+#
+# 우연 기대는 50%가 아니다 — 시장은 대체로 오른다(nowcast 63.4% 교훈).
+MARKET_TEST = {
+    "key": "시장 방향",
+    "long": ("KOSPI 시리즈", "코스피 200"),
+    "short": None,                       # 롱 단독 — 시장 그 자체
+    "expected": {"Recovery": 1, "Expansion": 1,
+                 "Slowdown": -1, "Contraction": -1},
+}
+
+
 def expected_signs(weights: dict, factor="Size", *, tol: float = 1e-9) -> dict:
     """국면별 기대 부호(순수). **봇의 가중치에서 기계적으로 끌어낸다.**
 
@@ -295,13 +315,15 @@ def format_family(family: dict) -> str:
 
 
 def format_verdict(result: dict, expected: dict, rows: list, *,
-                   label: str = "", lag: int = LAG_DEFAULT) -> str:
+                   label: str = "", lag: int = LAG_DEFAULT,
+                   words: tuple = ("소형 우위", "대형 우위"),
+                   subject: str = "팩터 방향") -> str:
     lines = [f"🎯 국면 → 팩터 방향 검정{(' — ' + label) if label else ''}", ""]
     lines.append(f"  발표 시차 {lag}개월 반영 · 에피소드 {len(rows)}개")
     lines.append("")
     lines.append("  사전 등록된 예측(봇의 PHASE_FACTOR_WEIGHT에서 기계적으로 유도):")
     for phase, want in sorted(expected.items()):
-        word = {1: "소형 우위", -1: "대형 우위", 0: "예측 없음"}[want]
+        word = {1: words[0], -1: words[1], 0: "예측 없음"}[want]
         lines.append(f"   · {phase}: {word}")
     lines.append("")
     for row in rows:
@@ -315,8 +337,9 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
         lines.append("  판정할 에피소드가 없습니다.")
         return chr(10).join(lines)
     lines.append(f"  적중 {result['hits']}/{result['n']} = {result['rate'] * 100:.1f}%")
-    base_sign = {1: "늘 소형 우위", -1: "늘 대형 우위", 0: "-"}[line.get("baseline_sign", 0)]
-    lines.append(f"  우연 기대: {line['p0'] * 100:.1f}% ({base_sign}로 찍었을 때)")
+    base_sign = {1: f"늘 「{words[0]}」", -1: f"늘 「{words[1]}」",
+                 0: "-"}[line.get("baseline_sign", 0)]
+    lines.append(f"  우연 기대: {line['p0'] * 100:.1f}% ({base_sign} 한쪽으로만 찍었을 때)")
     if line.get("need") is not None:
         lines.append(f"  합격선(α={ALPHA}, 단측, 검증 전 고정): "
                      f"{line['need']}/{line['n']} = {line['need_rate'] * 100:.1f}%")
@@ -328,7 +351,7 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
     lines.append("")
     lines.append(f"  판정: **{result['verdict']}**")
     if result.get("verdict") == "우위 확인 불가":
-        lines.append("  국면이 팩터 방향을 예측한다는 근거가 이 표본에서는 없습니다.")
+        lines.append(f"  국면이 {subject}을 예측한다는 근거가 이 표본에서는 없습니다.")
         lines.append("  (없다는 증명이 아닙니다 — 이 크기로는 가릴 수 없다는 뜻입니다.)")
     return chr(10).join(lines)
 
@@ -371,6 +394,8 @@ def _cli() -> int:
     ap.add_argument("--key", default="consensus")
     ap.add_argument("--long-service", dest="long_service", default=None)
     ap.add_argument("--short-service", dest="short_service", default=None)
+    ap.add_argument("--market", action="store_true",
+                    help="국면이 시장 방향이라도 맞히는가(팩터보다 앞선 질문)")
     ap.add_argument("--family", action="store_true",
                     help="사전 고정된 검정 가족 전체를 재고 합격선을 나눈다")
     args = ap.parse_args()
@@ -379,6 +404,28 @@ def _cli() -> int:
 
     def load_pair(service: str, name: str) -> dict:
         return fs.load_cache(fs.cache_path(service, root)).get(name, {})
+
+    if args.market:
+        hist_path = (Path(__file__).resolve().parents[1] / "data" / "private" /
+                     "state" / "phase_history.json")
+        history = json.loads(hist_path.read_text(encoding="utf-8"))
+        phases = shift(phase_by_month(history, args.key), args.lag)
+        series = load_pair(*MARKET_TEST["long"])
+        if not series:
+            print(f"❌ 캐시에 「{MARKET_TEST['long'][1]}」이 없습니다.")
+            return 1
+        rets = fs.monthly_returns(series)
+        rows = episode_rows(rets, episodes(phases, start=args.start))
+        expected = MARKET_TEST["expected"]
+        got = verdict(rows, expected)
+        print(format_verdict(got, expected, rows,
+                             label=f"{MARKET_TEST['long'][1]} 단독(시장 방향)",
+                             lag=args.lag, words=("상승", "하락"),
+                             subject="시장 방향"))
+        print()
+        print("  이 가설은 국면 **이름 자체**에서 온다(CLI level×momentum 4분면).")
+        print("  팩터 우위보다 약한 주장이다 — 이것마저 못 넘으면 국면 판정이 비어 있다.")
+        return 0
 
     if args.family:
         hist_path = (Path(__file__).resolve().parents[1] / "data" / "private" /
