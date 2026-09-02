@@ -185,16 +185,51 @@ def summarize(items: list[dict]) -> dict:
             "n_total": len(items), "missing": missing, "lean": lean}
 
 
-def format_snapshot(snap: dict) -> str:
+def verification_notes(names, ledger=None) -> dict:
+    """지표별 검증 상태(얇은 I/O). 원장이 없으면 전부 「미측정」.
+
+    **화면이 지표를 그냥 보여주면 사람은 예측력 있는 신호로 읽는다.**
+    2026-09-02 실측: 외국인 순매수는 2,162건에서 적중 50.0%(기준선 54.7%)로
+    **예측력이 없다고 말할 수 있는** 상태가 됐고, 200일선 기울기도 1,490건에서
+    같은 판정을 받았다. 그 사실을 지표 옆에 붙인다.
+    """
+    try:
+        import nowcast_eval as ne
+        if ledger is None:
+            ledger = env_config.default_env_path().parent / "data" / "private" / \
+                "state" / ne.VALIDATION_FILE
+            try:
+                from storage_paths import PATHS
+                ledger = PATHS.private_state_file(ne.VALIDATION_FILE)
+            except Exception:                               # noqa: BLE001
+                pass
+        import finding_ledger as fl
+        record = fl.latest(ledger)
+        return {n: ne.indicator_note(n, record) for n in names}
+    except Exception as exc:                                # noqa: BLE001
+        log.debug("검증 상태 조회 실패: %s", exc)
+        return {n: "미측정" for n in names}
+
+
+def format_snapshot(snap: dict, notes: dict | None = None) -> str:
     mark = {"risk_on": "🟢", "neutral": "🟡", "risk_off": "🔴", "unknown": "⚪"}
     s = snap["summary"]
-    lines = [f"📡 실시간 대리 지표 — {s['lean']} "
-             f"({s['n_available']}/{s['n_total']} 확보)"]
+    if notes is None:
+        notes = verification_notes([i["name"] for i in snap["indicators"]])
+    dead = [n for n, note in notes.items() if "예측력 없음" in note]
+    head = (f"📡 실시간 대리 지표 — {s['lean']} "
+            f"({s['n_available']}/{s['n_total']} 확보)")
+    if dead:
+        head += f"\n  ⚠️ 이 중 {len(dead)}개는 **예측력이 없다고 측정된 지표**입니다"
+    lines = [head]
     for i in snap["indicators"]:
         value = "—" if i["value"] is None else f"{i['value']}{i['unit']}"
         line = f"  {mark[i['state']]} {i['name']}: {value}"
         if i["as_of"]:
             line += f"  ({i['as_of']})"
+        note = notes.get(i["name"])
+        if note:
+            line += f"  [{note}]"
         lines.append(line)
         if i["note"]:
             lines.append(f"      ※ {i['note']}")
@@ -204,7 +239,8 @@ def format_snapshot(snap: dict) -> str:
         # "수집 실패"와 "키가 없어서 시도조차 못 함"은 고쳐야 할 곳이 다르다.
         lines.append(f"  ⚙️ 자격 정보 미설정: {', '.join(snap['missing_env'])} "
                      f"(.env 확인 — 수집 실패가 아니라 시도 자체를 못 한 것)")
-    lines.append("  ※ 방향 임계값은 가설이며 표본이 쌓이면 재조정합니다.")
+    lines.append("  ※ 방향 임계값은 가설입니다. **[ ] 안이 그 가설의 검증 상태**이며,"
+                 " 「예측력 없음」은 표본이 충분한데도 기준선(늘 상승)을 못 넘었다는 뜻입니다.")
     return "\n".join(lines)
 
 

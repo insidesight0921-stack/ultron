@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 import random
 from statistics import NormalDist
+from pathlib import Path
 from typing import Iterable, Optional
 
 TRIALS = 2000
@@ -564,6 +565,46 @@ def _logged_predictions(name: str):
     return out
 
 
+# ─── 판정 원장 ───────────────────────────────────────
+
+VALIDATION_FILE = "nowcast_validation.json"
+CONTROL_PREFIX = "대조: "
+
+
+def validation_record(results: dict, *, at: str, base: Optional[float] = None) -> dict:
+    """원장에 남길 한 건(순수). **대조군 행은 판정이 아니므로 뺀다.**"""
+    tests = {}
+    for name, r in (results or {}).items():
+        if name.startswith(CONTROL_PREFIX):
+            continue
+        tests[name] = {"n": r.get("n", 0), "rate": r.get("rate"),
+                       "control_rate": r.get("control_rate"),
+                       "percentile": r.get("percentile"),
+                       "verdict": r.get("verdict")}
+    findings = [k for k, v in tests.items() if v.get("verdict") == VERDICT_FINDING]
+    return {"at": at, "base_rate": base, "tests": tests, "findings": findings}
+
+
+def indicator_note(name: str, record: Optional[dict]) -> str:
+    """지표 한 줄 옆에 붙일 검증 상태(순수).
+
+    **기록이 없는 것과 검증된 것은 다르다.** 화면이 지표를 그냥 보여주면
+    사람은 그것이 예측력 있는 신호라고 읽는다.
+    """
+    if not record:
+        return "미측정"
+    t = (record.get("tests") or {}).get(name)
+    if not t or not t.get("n"):
+        return "미측정"
+    verdict = str(t.get("verdict") or "")
+    n = t.get("n")
+    if verdict == VERDICT_FINDING:
+        return f"검증됨 · {n}건"
+    if "정보 없음" in verdict:
+        return f"**예측력 없음**(표본 {n}건에서 기준선 미달)"
+    return f"미검증 · {n}건"
+
+
 def _cli() -> int:
     truth, dates, closes = _kospi_truth()
     if not truth:
@@ -598,6 +639,22 @@ def _cli() -> int:
                          else {"n": 0,
                                "verdict": f"캐시 없음 — `{hint}`로 소급 가능"})
     print(format_report(results, truth))
+    if "--record" in __import__("sys").argv:
+        from datetime import datetime
+        import finding_ledger as fl
+        try:
+            from storage_paths import PATHS
+            ledger = PATHS.private_state_file(VALIDATION_FILE)
+        except Exception:                                   # noqa: BLE001
+            ledger = (Path(__file__).resolve().parents[1] / "data" / "private" /
+                      "state" / VALIDATION_FILE)
+        rec = validation_record(results, base=base_rate(truth),
+                                at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
+        _, added = fl.append(rec, ledger, ignore=("at",))
+        print()
+        print(f"  원장 {'기록' if added else '유지(직전과 같은 판정)'} — {ledger.name}")
+        for name in rec["tests"]:
+            print(f"    {name}: {indicator_note(name, rec)}")
     return 0
 
 

@@ -310,3 +310,43 @@ def test_a_stale_cache_is_not_used_silently(tmp_path, monkeypatch):
     monkeypatch.setattr(qb, "_fetch_ecos_series_raw", _boom)
     closes2, _ = pi._fx_series(refresh=True)
     assert closes2 == []
+
+
+# ─── 검증 상태를 지표 옆에 붙인다 (2026-09-02) ──────────
+
+def _snap(names=("코스피 200일선 기울기", "외국인 순매수(5일)")):
+    return {"summary": {"lean": "혼조", "n_available": len(names),
+                        "n_total": len(names), "missing": [], "counts": {}},
+            "indicators": [{"name": n, "value": 1.0, "unit": "%",
+                            "state": "risk_on", "as_of": "20260902",
+                            "note": "", "available": True} for n in names]}
+
+
+def test_a_disproven_indicator_is_marked_on_screen():
+    """**화면이 지표를 그냥 보여주면 사람은 신호로 읽는다.**
+
+    2026-09-02 실측: 외국인 순매수 2,162건 적중 50.0% vs 기준선 54.7%.
+    """
+    notes = {"코스피 200일선 기울기": "**예측력 없음**(표본 1490건에서 기준선 미달)",
+             "외국인 순매수(5일)": "**예측력 없음**(표본 2162건에서 기준선 미달)"}
+    out = pi.format_snapshot(_snap(), notes=notes)
+    assert "예측력이 없다고 측정된 지표" in out
+    assert out.count("예측력 없음") >= 2
+
+
+def test_an_unmeasured_indicator_says_so_rather_than_looking_verified():
+    out = pi.format_snapshot(_snap(), notes={"코스피 200일선 기울기": "미측정",
+                                             "외국인 순매수(5일)": "미측정"})
+    assert "[미측정]" in out
+    assert "예측력이 없다고 측정된 지표" not in out
+
+
+def test_the_footer_explains_what_the_bracket_means():
+    out = pi.format_snapshot(_snap(), notes={})
+    assert "검증 상태" in out and "기준선" in out
+
+
+def test_a_missing_ledger_does_not_break_the_screen(tmp_path):
+    """원장이 없어도 화면은 떠야 한다 — 없으면 미측정이라고 말한다."""
+    got = pi.verification_notes(["외국인 순매수(5일)"], ledger=tmp_path / "없음.json")
+    assert got == {"외국인 순매수(5일)": "미측정"}

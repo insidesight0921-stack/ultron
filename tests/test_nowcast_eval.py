@@ -480,3 +480,52 @@ def test_a_missing_control_rate_is_not_called_powered():
 
 def test_a_degenerate_base_rate_is_not_called_powered():
     assert ne._powered(5000, 100.0) is False
+
+
+# ─── 판정 원장 (2026-09-02) ────────────────────────────
+
+def _res(n, rate, ctrl, verdict):
+    return {"n": n, "rate": rate, "control_rate": ctrl,
+            "percentile": 60.0, "verdict": verdict}
+
+
+def test_the_control_rows_are_not_recorded_as_findings():
+    """「대조: 항상 상승」은 판정이 아니라 기준선이다."""
+    rec = ne.validation_record(
+        {"VIX 밴드": _res(197, 54.8, 55.8, "음성 대조 미달"),
+         "대조: 항상 상승": _res(1948, 55.1, None, "상수 예측 — 방향 정보 없음")},
+        at="2026-09-02T14:00:00")
+    assert list(rec["tests"]) == ["VIX 밴드"]
+
+
+def test_a_powered_miss_is_written_as_no_information():
+    rec = ne.validation_record(
+        {"외국인 순매수(5일)": _res(2162, 50.0, 54.7,
+                             "음성 대조 미달 — 정보 없음(표본 충분)")},
+        at="t")
+    assert "예측력 없음" in ne.indicator_note("외국인 순매수(5일)", rec)
+    assert "2162건" in ne.indicator_note("외국인 순매수(5일)", rec)
+
+
+def test_a_thin_miss_is_only_unverified():
+    rec = ne.validation_record({"VIX 밴드": _res(197, 54.8, 55.8, "음성 대조 미달")},
+                               at="t")
+    note = ne.indicator_note("VIX 밴드", rec)
+    assert note.startswith("미검증") and "예측력 없음" not in note
+
+
+def test_a_finding_is_named_as_verified():
+    rec = ne.validation_record({"X": _res(2000, 70.0, 55.0, ne.VERDICT_FINDING)},
+                               at="t")
+    assert ne.indicator_note("X", rec).startswith("검증됨")
+    assert rec["findings"] == ["X"]
+
+
+def test_no_record_means_unmeasured_not_verified():
+    """**기록이 없는 것과 검증된 것은 다르다.**"""
+    assert ne.indicator_note("무엇이든", None) == "미측정"
+
+
+def test_an_indicator_absent_from_the_record_is_unmeasured():
+    rec = ne.validation_record({"X": _res(100, 50.0, 55.0, "음성 대조 미달")}, at="t")
+    assert ne.indicator_note("Y", rec) == "미측정"

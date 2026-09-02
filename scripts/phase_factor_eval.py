@@ -403,46 +403,26 @@ def validation_line(record: Optional[dict]) -> str:
 
 
 def same_finding(a: Optional[dict], b: Optional[dict]) -> bool:
-    """시각을 빼고 **판정 내용이 같은가**(순수)."""
-    if not a or not b:
-        return False
-    keys = ("tests", "passed", "any_passed", "alpha")
-    return all(a.get(k) == b.get(k) for k in keys)
+    """시각·메모를 빼고 **판정 내용이 같은가**(순수).
+
+    2026-09-02: 나우캐스팅 판정도 같은 원장이 필요해져 `finding_ledger`로
+    옮겼다. 여기 남은 것은 이 도메인에서 무엇을 「내용」으로 볼지의 정의뿐이다.
+    """
+    import finding_ledger as _fl
+    return _fl.same_finding(a, b, ignore=("at", "note"))
 
 
 def append_validation(record: dict, path) -> list:
-    """추가만 한다. 지난 판정을 고치지 않는다.
-
-    **같은 결과를 다시 적지는 않는다.** 원장의 존재 이유는 「무엇이 언제
-    바뀌었나」인데, 같은 값이 반복되면 변화 지점이 묻힌다. 새 표본이 없는
-    재실행은 새 판정이 아니다.
-    """
-    import json as _json
-    path = Path(path)
-    try:
-        log = _json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(log, list):
-            log = []
-    except (OSError, ValueError):
-        log = []
-    if log and same_finding(log[-1], record):
-        return log                      # 고치지도, 더하지도 않는다
-    log.append(record)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(_json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
-    return log
+    """추가만 한다. 같은 판정은 다시 적지 않는다(`finding_ledger`)."""
+    import finding_ledger as _fl
+    rows, _ = _fl.append(record, path, ignore=("at", "note"))
+    return rows
 
 
 def latest_validation(path) -> Optional[dict]:
     """마지막 판정. 없으면 None."""
-    import json as _json
-    try:
-        log = _json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return log[-1] if isinstance(log, list) and log else None
+    import finding_ledger as _fl
+    return _fl.latest(path)
 
 
 def run_one(spec: dict, load_pair, phases: dict, weights: dict, *,
