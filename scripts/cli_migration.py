@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 
 log = logging.getLogger("cli_migration")
@@ -127,7 +128,41 @@ def compare_crossings(old: list, new: list, threshold: float = 100.0,
     }
 
 
-def verdict(levels: dict, cross: dict) -> dict:
+def compare_momentum(old: list, new: list) -> dict:
+    """모멘텀 **부호**가 같은가(순수).
+
+    `classify_phase`는 level(기준선 대비)과 momentum(부호)을 함께 쓴다.
+    level만 대조하고 교체하면 4분면 중 절반만 검증한 것이다 —
+    Amplitude adjusted는 진폭을 유지하므로 모멘텀 **크기**는 다를 수 있지만,
+    분류에 쓰이는 것은 `momentum >= 0` 하나뿐이라 부호만 맞으면 된다.
+    """
+    import quant_bot as qb
+
+    months, va, vb = _aligned(old, new)
+    if len(months) < 30:
+        return {"usable": False}
+    sa, sb = [], []
+    for i in range(18, len(months) + 1):
+        ma = qb.compute_momentum(list(zip(months[:i], va[:i])))
+        mb = qb.compute_momentum(list(zip(months[:i], vb[:i])))
+        if ma is None or mb is None:
+            continue
+        sa.append(ma >= 0)
+        sb.append(mb >= 0)
+    n = len(sa)
+    if not n:
+        return {"usable": False}
+    agree = sum(1 for x, y in zip(sa, sb) if x == y)
+    pa, pb = sum(sa) / n, sum(sb) / n
+    exp = pa * pb + (1 - pa) * (1 - pb)
+    kappa = (agree / n - exp) / (1 - exp) if exp < 1 else None
+    return {"usable": True, "n": n, "agree": agree,
+            "agree_pct": round(agree / n * 100, 1),
+            "expected_pct": round(exp * 100, 1),
+            "kappa": round(kappa, 3) if kappa is not None else None}
+
+
+def verdict(levels: dict, cross: dict, momentum: Optional[dict] = None) -> dict:
     """교체해도 되는가(순수). **기준을 미리 정해두고 그대로 적용한다.**"""
     if not levels.get("usable"):
         return {"ok": False, "reason": levels.get("reason", "표본 부족")}
@@ -142,12 +177,19 @@ def verdict(levels: dict, cross: dict) -> dict:
         return {"ok": False, "kappa": kappa,
                 "reason": f"전환 시점이 어긋난다(일치 {cross.get('match_pct')}%) "
                           "— 국면 판정에서 중요한 것은 그 시점이다"}
+    if momentum and momentum.get("usable"):
+        mk = momentum.get("kappa")
+        if mk is not None and mk < KAPPA_PASS:
+            return {"ok": False, "kappa": kappa, "momentum_kappa": mk,
+                    "reason": f"모멘텀 부호가 갈린다(kappa {mk} < {KAPPA_PASS}) "
+                              "— 4분면의 나머지 축이 달라진다"}
     return {"ok": True, "kappa": kappa,
-            "reason": "기준선 판정과 전환 시점이 모두 맞는다 — 같은 뜻으로 쓸 수 있다"}
+            "momentum_kappa": (momentum or {}).get("kappa"),
+            "reason": "기준선·전환 시점·모멘텀 부호가 모두 맞는다 — 같은 뜻으로 쓸 수 있다"}
 
 
 def format_report(levels: dict, cross: dict, *, old_name: str,
-                  new_name: str) -> str:
+                  new_name: str, momentum: Optional[dict] = None) -> str:
     lines = [f"🔄 CLI 시리즈 교체 검증 — {old_name} → {new_name}", ""]
     if not levels.get("usable"):
         lines.append(f"  {levels.get('reason')}")
@@ -170,7 +212,15 @@ def format_report(levels: dict, cross: dict, *, old_name: str,
                      + (f" · 평균 {cross['mean_gap']}개월 차이"
                         if cross.get("mean_gap") is not None else ""))
         lines.append("")
-    v = verdict(levels, cross)
+    if momentum and momentum.get("usable"):
+        lines.append("■ 모멘텀 부호 (4분면의 나머지 축)")
+        lines.append(f"  같은 부호 {momentum['agree']}/{momentum['n']}개월 "
+                     f"({momentum['agree_pct']}%) · 무관할 때 기대 "
+                     f"{momentum['expected_pct']}%")
+        if momentum.get("kappa") is not None:
+            lines.append(f"  코헨 kappa {momentum['kappa']:+.3f}")
+        lines.append("")
+    v = verdict(levels, cross, momentum)
     lines.append(("✅ 교체 가능 — " if v["ok"] else "⛔ 그대로 교체 불가 — ") + v["reason"])
     lines.append("")
     lines.append("_합격선은 검증 전에 정했습니다(kappa 0.6 · 전환 일치 60%)._")
@@ -208,8 +258,10 @@ def _cli() -> int:
             continue
         levels = compare_levels(old, new)
         cross = compare_crossings(old, new)
+        mom = compare_momentum(old, new)
         print()
-        print(format_report(levels, cross, old_name=old_key, new_name=new_key))
+        print(format_report(levels, cross, old_name=old_key, new_name=new_key,
+                            momentum=mom))
         print()
         # 새 계열의 기준일도 알린다 — 이번 사고의 핵심이 그것이었다.
         f_old, f_new = qb.freshness(old, old_key), qb.freshness(new, new_key)

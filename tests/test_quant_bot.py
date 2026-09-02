@@ -335,9 +335,9 @@ def test_snapshot_all_signals_normal(monkeypatch):
     bsi_vals = [50.0 + i * 0.5 for i in range(24)]       # 양수 추세
 
     def fake_fetch(name, months=24):
-        if name == "CLI_KR":
+        if name == qb.ACTIVE_CLI["KR"]:
             return _series(cli_kr_vals)
-        if name == "CLI_US":
+        if name == qb.ACTIVE_CLI["US"]:
             return _series(cli_us_vals)
         if name == "BSI_KR":
             return _series(bsi_vals)
@@ -358,9 +358,9 @@ def test_snapshot_partial_fetch_failure_graceful(monkeypatch):
     qb.clear_cache()
 
     def fake_fetch(name, months=24):
-        if name == "CLI_KR":
+        if name == qb.ACTIVE_CLI["KR"]:
             raise RuntimeError("ECOS down")
-        if name == "CLI_US":
+        if name == qb.ACTIVE_CLI["US"]:
             return _series([101.0 + i * 0.05 for i in range(24)])
         return []
     monkeypatch.setattr(qb, "fetch_series", fake_fetch)
@@ -387,7 +387,7 @@ def test_snapshot_low_confidence_triggers_recheck(monkeypatch):
     """신호 1개만 + BSI 없으면 confidence < 0.6 → needs_recheck True."""
     qb.clear_cache()
     def fake_fetch(name, months=24):
-        if name == "CLI_KR":
+        if name == qb.ACTIVE_CLI["KR"]:
             return _series([98.0 + i * 0.05 for i in range(24)])
         return []  # us, bsi 없음
     monkeypatch.setattr(qb, "fetch_series", fake_fetch)
@@ -451,9 +451,9 @@ def test_format_snapshot_low_confidence_warning():
 def test_run_phase_action_returns_text(monkeypatch):
     qb.clear_cache()
     def fake_fetch(name, months=24):
-        if name == "CLI_KR":
+        if name == qb.ACTIVE_CLI["KR"]:
             return _series([98.0 + i * 0.05 for i in range(24)])
-        if name == "CLI_US":
+        if name == qb.ACTIVE_CLI["US"]:
             return _series([101.0 + i * 0.05 for i in range(24)])
         return []
     monkeypatch.setattr(qb, "fetch_series", fake_fetch)
@@ -943,9 +943,9 @@ def test_run_recommend_action(monkeypatch):
     qb.clear_cache()
 
     def fake_fetch(name, months=24):
-        if name == "CLI_KR":
+        if name == qb.ACTIVE_CLI["KR"]:
             return _series([98.0 + i * 0.05 for i in range(24)])
-        if name == "CLI_US":
+        if name == qb.ACTIVE_CLI["US"]:
             return _series([101.0 + i * 0.05 for i in range(24)])
         return []
     monkeypatch.setattr(qb, "fetch_series", fake_fetch)
@@ -1076,10 +1076,18 @@ def test_the_active_cli_is_named_explicitly():
         assert key in qb.FRED_SERIES
 
 
-def test_the_replacement_candidates_are_present_but_not_active():
-    """검증 전에는 후보일 뿐이다 — 그냥 바꿔 끼우지 않는다."""
+def test_the_active_series_is_the_one_that_is_still_updated():
+    """2026-09-01 교체: Normalised 계열은 2024-01에서 멈췄고 Amplitude
+    adjusted는 갱신 중이다. 검증(kappa +0.975/+0.990) 통과 후 교체했다.
+
+    **되돌아가면 다시 32개월 낡은 값으로 판정하게 된다.**
+    """
     assert "CLI_KR_AA" in qb.FRED_SERIES and "CLI_US_AA" in qb.FRED_SERIES
-    assert qb.ACTIVE_CLI["KR"] == "CLI_KR"     # 아직 교체 전
+    assert qb.ACTIVE_CLI["KR"] == "CLI_KR_AA"
+    assert qb.ACTIVE_CLI["US"] == "CLI_US_AA"
+    for key in qb.ACTIVE_CLI.values():
+        assert qb.FRED_SERIES[key]["series_id"].endswith("AASTSAM"), (
+            f"{key}가 멈춘 Normalised 계열로 되돌아갔다")
 
 
 

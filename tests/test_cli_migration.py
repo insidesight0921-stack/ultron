@@ -137,3 +137,62 @@ def test_the_report_states_the_pass_mark_was_preset():
                            old_name="CLI_KR", new_name="CLI_KR_AA")
     assert "검증 전에 정했습니다" in msg
     assert "승인입니다" in msg
+
+
+# ─── 모멘텀 부호 (4분면의 나머지 축) ────────────────
+#
+# level만 대조하고 교체하면 4분면 중 절반만 검증한 것이다.
+# classify_phase는 `level >= 100`과 `momentum >= 0` 둘을 쓴다.
+
+
+def test_identical_series_have_identical_momentum_signs():
+    s = [(m, 100.0 + i * 0.3) for i, m in enumerate(_months(60))]
+    out = cm.compare_momentum(s, s)
+    assert out["usable"] is True
+    assert out["agree_pct"] == 100.0
+
+
+def test_a_scaled_series_keeps_the_same_momentum_sign():
+    """진폭이 달라도 **부호**는 같아야 한다 — 분류에 쓰이는 건 부호뿐이다."""
+    ms = _months(60)
+    a = [(m, 100.0 + i * 0.2) for i, m in enumerate(ms)]
+    b = [(m, 100.0 + i * 0.8) for i, m in enumerate(ms)]   # 진폭 4배
+    out = cm.compare_momentum(a, b)
+    assert out["agree_pct"] == 100.0
+
+
+def test_an_inverted_series_flips_the_momentum_sign():
+    ms = _months(60)
+    a = [(m, 100.0 + i * 0.3) for i, m in enumerate(ms)]
+    b = [(m, 100.0 - i * 0.3) for i, m in enumerate(ms)]
+    out = cm.compare_momentum(a, b)
+    assert out["agree_pct"] == 0.0
+
+
+def test_a_thin_overlap_yields_no_momentum_verdict():
+    s = [(m, 100.0) for m in _months(20)]
+    assert cm.compare_momentum(s, s)["usable"] is False
+
+
+def test_the_verdict_refuses_when_momentum_signs_diverge():
+    """level이 완벽해도 모멘텀이 갈리면 교체하면 안 된다."""
+    ms = _months(120)
+    level_ok = cm.compare_levels([(m, 101.0 if i % 20 < 10 else 99.0)
+                                  for i, m in enumerate(ms)],
+                                 [(m, 101.0 if i % 20 < 10 else 99.0)
+                                  for i, m in enumerate(ms)])
+    cross_ok = {"usable": True, "match_pct": 100.0}
+    bad_momentum = {"usable": True, "kappa": 0.1, "agree_pct": 55.0,
+                    "n": 100, "agree": 55, "expected_pct": 50.0}
+    v = cm.verdict(level_ok, cross_ok, bad_momentum)
+    assert v["ok"] is False
+    assert "모멘텀 부호가 갈린다" in v["reason"]
+
+
+def test_the_verdict_passes_when_all_three_agree():
+    ms = _months(120)
+    s = [(m, 100.0 + (i % 20) - 10) for i, m in enumerate(ms)]
+    v = cm.verdict(cm.compare_levels(s, s), cm.compare_crossings(s, s),
+                   cm.compare_momentum(s, s))
+    assert v["ok"] is True
+    assert "모멘텀 부호" in v["reason"]

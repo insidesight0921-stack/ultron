@@ -94,7 +94,19 @@ FRED_SERIES = {
 }
 
 # 지금 국면 판정에 쓰는 시리즈. 교체는 검증을 통과한 뒤에만 한다.
-ACTIVE_CLI = {"KR": "CLI_KR", "US": "CLI_US"}
+#
+# **2026-09-01 교체 완료.** `cli_migration.py` 실측(겹치는 394개월,
+# 1991-04 ~ 2024-01):
+#
+#     CLI_KR → CLI_KR_AA   기준선 판정 일치 98.7%(우연 기대 50.0%)
+#                          코헨 kappa **+0.975** · 교차 16/17회(94.1%)
+#                          평균 0.2개월 차이
+#     CLI_US → CLI_US_AA   일치 99.5%(기대 50.2%) · kappa **+0.990**
+#                          교차 18/18회(100%) · 평균 0.1개월 차이
+#
+# 합격선(kappa 0.6 · 전환 일치 60%)은 검증 전에 정해둔 값이고, 결과는 그것을
+# 크게 넘었다. 33년 겹침에서 이 정도면 같은 뜻으로 쓸 수 있다.
+ACTIVE_CLI = {"KR": "CLI_KR_AA", "US": "CLI_US_AA"}
 
 # MSCI 4분면 라벨
 PHASES = ("Recovery", "Expansion", "Slowdown", "Contraction")
