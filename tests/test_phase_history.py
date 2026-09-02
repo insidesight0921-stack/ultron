@@ -187,3 +187,34 @@ def test_a_current_history_is_not_flagged():
     now = datetime.now()
     hist = [{"month": f"{now.year}-{now.month:02d}", "consensus": "Expansion"}]
     assert "🚨" not in ph.format_report(hist)
+
+
+def test_collect_uses_the_active_series_not_a_hardcoded_name(monkeypatch):
+    """2026-09-01: 시리즈를 교체했는데 여기가 옛 이름을 박아둬서 이력이
+    여전히 2024-01에서 끝났다. **같은 커밋에서 테스트의 하드코딩은 고치고
+    이 파일은 놓쳤다.**"""
+    import quant_bot as qb
+
+    asked = []
+
+    def fake_fetch(name, months=24):
+        asked.append(name)
+        return []
+
+    monkeypatch.setattr(qb, "fetch_series", fake_fetch)
+    ph.collect(months=24)
+    assert qb.ACTIVE_CLI["KR"] in asked
+    assert qb.ACTIVE_CLI["US"] in asked
+    assert "BSI_KR" in asked
+
+
+def test_collect_does_not_ask_for_the_dead_series(monkeypatch):
+    import quant_bot as qb
+
+    asked = []
+    monkeypatch.setattr(qb, "fetch_series",
+                        lambda name, months=24: asked.append(name) or [])
+    ph.collect(months=24)
+    dead = [n for n in asked
+            if qb.FRED_SERIES.get(n, {}).get("series_id", "").endswith("NOSTSAM")]
+    assert not dead, f"멈춘 시리즈를 부르고 있다: {dead}"

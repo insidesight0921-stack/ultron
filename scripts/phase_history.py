@@ -170,14 +170,19 @@ def collect(months: int = 120) -> list[dict]:
     """원자료를 받아 국면 이력을 만든다(네트워크)."""
     import quant_bot as qb
 
+    # **시리즈 이름을 박지 않는다.** 2026-09-01: 죽은 CLI를 살아 있는 것으로
+    # 교체했는데 여기가 옛 이름을 하드코딩하고 있어 이력이 여전히 2024-01에서
+    # 끝났다. 같은 커밋에서 테스트의 하드코딩을 고쳐놓고 이 파일은 놓쳤다.
+    # 판정에 쓰는 시리즈는 `quant_bot.ACTIVE_CLI` 한 곳에서만 정한다.
+    names = {"KR": qb.ACTIVE_CLI["KR"], "US": qb.ACTIVE_CLI["US"], "BSI": "BSI_KR"}
     series = {}
-    for name in ("CLI_KR", "CLI_US", "BSI_KR"):
+    for slot, name in names.items():
         try:
-            series[name] = qb.fetch_series(name, months=months)
+            series[slot] = qb.fetch_series(name, months=months)
         except Exception as exc:  # noqa: BLE001
-            log.warning("%s 수집 실패: %s", name, exc)
-            series[name] = []
-    return rebuild(series["CLI_KR"], series["CLI_US"], series["BSI_KR"])
+            log.warning("%s(%s) 수집 실패: %s", slot, name, exc)
+            series[slot] = []
+    return rebuild(series["KR"], series["US"], series["BSI"])
 
 
 def save(history: list[dict], path=None) -> Optional[str]:

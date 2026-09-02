@@ -1347,3 +1347,13 @@ def test_a_fresh_snapshot_is_not_marked_stale(monkeypatch):
     monkeypatch.setattr(qb, "fetch_series", lambda name, months=24: fresh)
     snap = qb.snapshot()
     assert snap.stale is False
+
+
+def test_the_freshness_label_names_the_series_actually_used(monkeypatch):
+    """교체 후 화면이 쓰지도 않는 이름으로 기준일을 보고하면 안 된다."""
+    monkeypatch.setattr(qb, "fetch_series",
+                        lambda name, months=24: [("2024-01-01", 100.0)])
+    snap = qb.snapshot()
+    names = {f["name"] for f in snap.freshness}
+    assert qb.ACTIVE_CLI["KR"] in names
+    assert qb.ACTIVE_CLI["US"] in names

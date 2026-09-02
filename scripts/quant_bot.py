@@ -461,8 +461,11 @@ def snapshot(months: int = 24) -> PhaseSnapshot:
 
     # **낡은 계열은 판정에서 뺀다.** 값이 있다는 것과 지금을 말한다는 것은
     # 다르다 — 이 구분이 없어서 2024-01 값이 2026-09 국면이 됐다.
-    fresh_kr = freshness(cli_kr, "CLI_KR")
-    fresh_us = freshness(cli_us, "CLI_US")
+    # **라벨도 실제 시리즈를 가리켜야 한다.** "CLI_KR"로 고정하면 교체 후
+    # 화면이 쓰지도 않는 시리즈 이름으로 기준일을 보고한다 — 이번 사고의
+    # 원인이 정확히 "무엇을 쓰는지 어디에도 안 적혀 있던 것"이었다.
+    fresh_kr = freshness(cli_kr, ACTIVE_CLI["KR"])
+    fresh_us = freshness(cli_us, ACTIVE_CLI["US"])
     fresh_bsi = freshness(bsi_kr, "BSI_KR")
     for f in (fresh_kr, fresh_us, fresh_bsi):
         if f["note"]:
