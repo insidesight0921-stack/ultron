@@ -181,8 +181,11 @@ def bar(rows: list, *, alpha: float = ALPHA) -> dict:
     base = constant_baseline(rows)
     n = base["n"]
     p0 = max(0.5, base["rate"] or 0.5)
-    need = required_hits(n, p0, alpha)
-    return {"n": n, "p0": p0, "need": need,
+    # **모든 에피소드의 부호가 같으면 아무것도 우연을 못 이긴다.**
+    # 「늘 같은 쪽」이 100%이므로 이 표본으로는 국면의 기여를 가릴 수 없다.
+    degenerate = p0 >= 1.0
+    need = None if degenerate else required_hits(n, p0, alpha)
+    return {"n": n, "p0": p0, "need": need, "degenerate": degenerate,
             "need_rate": (need / n) if (need is not None and n) else None,
             "baseline_sign": base["sign"]}
 
@@ -194,10 +197,68 @@ def verdict(rows: list, expected: dict, *, alpha: float = ALPHA,
     if got["n"] < min_episodes:
         return {**got, **{"bar": line}, "verdict": "표본 부족",
                 "p": None, "passed": None}
+    if line.get("degenerate"):
+        return {**got, "bar": line, "p": None, "passed": None,
+                "verdict": "판정 불가(모든 에피소드가 같은 부호)"}
     p = binom_p_ge(got["hits"], got["n"], line["p0"])
     passed = bool(line["need"] is not None and got["hits"] >= line["need"])
     return {**got, "bar": line, "p": p, "passed": passed,
             "verdict": "우위 확인" if passed else "우위 확인 불가"}
+
+
+def family_alpha(k: int, alpha: float = ALPHA) -> float:
+    """검정을 k개 하면 선을 k로 나눈다(순수, Bonferroni).
+
+    **팩터를 넷 재고 그중 하나가 유의하면 그것은 발견이 아니다.** α=0.05로
+    넷을 재면 하나라도 걸릴 확률이 18.5%다. 탭 D에서 축마다 같은 검정을
+    대면 안 된다고 적어둔 것과 같은 문제다.
+
+    보수적이다(팩터 스프레드끼리 상관이 있어 실제 위험은 이보다 작다).
+    그래도 느슨한 쪽으로 틀리지 않는 편을 고른다.
+    """
+    return alpha / max(1, int(k))
+
+
+def family_verdict(results: dict, *, alpha: float = ALPHA) -> dict:
+    """여러 팩터를 한꺼번에 판정(순수). **검정 수를 미리 세어 선을 낮춘다.**"""
+    k = len(results)
+    adj = family_alpha(k, alpha)
+    out = {}
+    for name, r in results.items():
+        n, hits = r.get("n", 0), r.get("hits", 0)
+        p0 = (r.get("bar") or {}).get("p0", 0.5)
+        need = required_hits(n, p0, adj)
+        passed = bool(need is not None and hits >= need and r.get("p") is not None)
+        out[name] = {**r, "family_need": need, "family_alpha": adj,
+                     "family_passed": passed,
+                     "family_verdict": "우위 확인" if passed else "우위 확인 불가"}
+    return {"k": k, "alpha": adj, "results": out}
+
+
+def format_family(family: dict) -> str:
+    """가족 단위 보고(순수)."""
+    lines = [f"🧪 팩터 {family['k']}종 동시 검정", ""]
+    lines.append(f"  검정을 {family['k']}개 하므로 합격선을 낮춘다: "
+                 f"α = {ALPHA} / {family['k']} = {family['alpha']:.4f}")
+    lines.append("  (넷을 α=0.05로 재면 하나라도 걸릴 확률이 18.5%다)")
+    lines.append("")
+    for name, r in family["results"].items():
+        if r.get("verdict") == "표본 부족" or r.get("rate") is None:
+            lines.append(f"  · {name}: 표본 부족(에피소드 {r.get('n', 0)}개)")
+            continue
+        if (r.get("bar") or {}).get("degenerate"):
+            lines.append(f"  · {name}: {r['hits']}/{r['n']} — "
+                         f"**판정 불가**(모든 에피소드가 같은 부호, 우연 기대 100%)")
+            continue
+        need = r.get("family_need")
+        need_s = f"{need}/{r['n']}" if need is not None else "도달 불가"
+        p_s = f"{r['p']:.3f}" if r.get("p") is not None else "N/A"
+        lines.append(f"  · {name}: {r['hits']}/{r['n']} = {r['rate'] * 100:.1f}% "
+                     f"· 우연 {r['bar']['p0'] * 100:.1f}% · 선 {need_s} "
+                     f"· p={p_s} → **{r['family_verdict']}**")
+    lines.append("")
+    lines.append("_검정 목록은 재기 전에 고정했습니다. 나중에 하나 더 붙이면 선이 다시 낮아집니다._")
+    return chr(10).join(lines)
 
 
 def format_verdict(result: dict, expected: dict, rows: list, *,
@@ -228,6 +289,9 @@ def format_verdict(result: dict, expected: dict, rows: list, *,
                      f"{line['need']}/{line['n']} = {line['need_rate'] * 100:.1f}%")
     if result.get("p") is not None:
         lines.append(f"  p = {result['p']:.3f}")
+    elif (result.get("bar") or {}).get("degenerate"):
+        lines.append("  모든 에피소드의 부호가 같습니다 — 「늘 같은 쪽」이 100%이므로")
+        lines.append("  국면이 무엇을 더했는지 이 표본으로는 가릴 수 없습니다.")
     lines.append("")
     lines.append(f"  판정: **{result['verdict']}**")
     if result.get("verdict") == "우위 확인 불가":

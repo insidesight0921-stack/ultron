@@ -172,10 +172,16 @@ def test_a_perfect_hit_rate_passes():
 
 
 def test_matching_the_baseline_does_not_pass():
-    """**늘 대형 우위로 찍은 것과 같은 성적은 국면이 한 일이 없다는 뜻이다.**"""
-    rows = _rows([-1] * 13, phase="Contraction") + _rows([-1] * 5, phase="Expansion")
-    got = pf.verdict(rows, {"Expansion": 1, "Contraction": -1})
-    assert got["hits"] == 13 and got["passed"] is False
+    """**늘 대형 우위로 찍은 것과 같은 성적은 국면이 한 일이 없다는 뜻이다.**
+
+    부호 13:5로 음수가 많은 표본. 예측이 그 다수를 그대로 따라가면
+    적중 13/18이 나오지만, 「늘 음수」도 13/18이다.
+    """
+    rows = (_rows([-1] * 13, phase="Contraction") + _rows([1] * 5, phase="Slowdown"))
+    got = pf.verdict(rows, {"Contraction": -1, "Slowdown": -1})
+    assert got["n"] == 18 and got["hits"] == 13
+    assert abs(got["bar"]["p0"] - 13 / 18) < 1e-12
+    assert got["passed"] is False
 
 
 def test_a_thin_sample_refuses_to_report_a_rate():
@@ -190,8 +196,8 @@ def test_ties_and_unpredicted_phases_are_excluded():
 
 
 def test_the_report_says_it_is_not_a_proof_of_absence():
-    rows = _rows([-1] * 13, phase="Contraction") + _rows([-1] * 5, phase="Expansion")
-    expected = {"Expansion": 1, "Contraction": -1}
+    rows = (_rows([-1] * 13, phase="Contraction") + _rows([1] * 5, phase="Slowdown"))
+    expected = {"Contraction": -1, "Slowdown": -1}
     msg = pf.format_verdict(pf.verdict(rows, expected), expected, rows)
     assert "없다는 증명이 아닙니다" in msg
 
@@ -202,3 +208,68 @@ def test_the_report_shows_the_pre_registered_prediction():
     msg = pf.format_verdict(pf.verdict(rows, expected), expected, rows)
     assert "사전 등록된 예측" in msg
     assert "PHASE_FACTOR_WEIGHT" in msg
+
+
+# ─── 여러 팩터를 동시에 재는 것의 대가 ─────────────────
+
+def test_testing_four_factors_lowers_the_bar_for_each():
+    """**넷을 α=0.05로 재면 하나라도 걸릴 확률이 18.5%다.**
+
+    탭 D에서 「축마다 같은 검정을 대면 안 된다」고 적어둔 것과 같은 문제.
+    """
+    assert pf.family_alpha(4) == 0.05 / 4
+    assert pf.family_alpha(1) == 0.05
+
+
+def test_a_zero_or_negative_count_does_not_divide_by_zero():
+    assert pf.family_alpha(0) == 0.05
+
+
+def test_the_family_bar_is_stricter_than_the_single_bar():
+    rows = _rows([1] * 11) + _rows([-1] * 7, phase="Contraction")
+    single = pf.verdict(rows, {"Expansion": 1, "Contraction": -1})
+    fam = pf.family_verdict({"Size": single, "Value": single,
+                             "LowVol": single, "Dividend": single})
+    got = fam["results"]["Size"]
+    assert got["family_need"] >= single["bar"]["need"]
+    assert fam["alpha"] == 0.05 / 4
+
+
+def test_a_result_that_passes_alone_can_fail_in_the_family():
+    """**혼자 재면 발견, 넷 중 하나면 아니다.** 이것이 다중비교다."""
+    rows = (_rows([1] * 7) + _rows([-1] * 3)
+            + _rows([-1] * 6, phase="Contraction") + _rows([1] * 2, phase="Contraction"))
+    expected = {"Expansion": 1, "Contraction": -1}
+    single = pf.verdict(rows, expected)
+    assert single["n"] == 18 and single["hits"] == 13
+    assert single["bar"]["p0"] == 0.5          # 부호가 9대 9 — 우연은 동전이다
+    assert single["passed"] is True
+    fam = pf.family_verdict({f"f{i}": single for i in range(4)})
+    assert fam["results"]["f0"]["family_passed"] is False
+
+
+def test_all_episodes_sharing_one_sign_cannot_be_judged():
+    """**「늘 같은 쪽」이 100%면 무엇도 우연을 못 이긴다.**
+
+    부호가 한쪽으로만 나오면 국면이 무엇을 더했는지 가릴 방법이 없다.
+    p를 내지 않고 판정 불가라고 말한다.
+    """
+    rows = _rows([1] * 18)
+    got = pf.verdict(rows, {"Expansion": 1})
+    assert got["passed"] is None and got["p"] is None
+    assert "판정 불가" in got["verdict"]
+    assert "가릴 수 없습니다" in pf.format_verdict(got, {"Expansion": 1}, rows)
+
+
+def test_the_family_report_says_the_list_was_fixed_in_advance():
+    rows = _rows([1] * 10) + _rows([-1] * 8, phase="Contraction")
+    single = pf.verdict(rows, {"Expansion": 1, "Contraction": -1})
+    msg = pf.format_family(pf.family_verdict({"Size": single, "Value": single}))
+    assert "재기 전에 고정" in msg
+    assert "18.5%" in msg
+
+
+def test_a_thin_factor_is_reported_not_silently_dropped():
+    thin = pf.verdict(_rows([1] * 5), {"Expansion": 1})
+    msg = pf.format_family(pf.family_verdict({"Value": thin}))
+    assert "표본 부족" in msg

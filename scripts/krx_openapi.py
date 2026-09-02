@@ -435,6 +435,9 @@ def _cli() -> int:
     ap.add_argument("--auth", action="store_true",
                     help="인증 방식 진단(음성 대조 — 헤더 문제인지 권한 문제인지)")
     ap.add_argument("--date", help="기준일 YYYYMMDD (기본: 어제)")
+    ap.add_argument("--list", action="store_true",
+                    help="지수 이름을 전부 나열한다(다리 짝을 고르려면 목록이 필요하다)")
+    ap.add_argument("--grep", help="--list 결과에서 이 글자가 든 것만")
     ap.add_argument("--factors", action="store_true",
                     help="팩터/스타일 지수 후보를 찾는다(탭 C 검증용)")
     args = ap.parse_args()
@@ -445,6 +448,24 @@ def _cli() -> int:
         return 1
     if args.auth:
         print(format_auth_diagnose(auth_diagnose(bas)))
+        return 0
+    if args.list:
+        for label, path in INDEX_ENDPOINTS.items():
+            payload = fetch(path, bas)
+            if payload.get("error"):
+                print(f"  {label}: 조회 실패 ({payload['error']})")
+                continue
+            names = []
+            for row in rows_of(payload):
+                for field in NAME_FIELDS:
+                    if row.get(field):
+                        names.append(str(row[field]))
+                        break
+            if args.grep:
+                names = [n for n in names if args.grep in n]
+            print(f"\n  [{label}] {len(names)}개")
+            for n in sorted(set(names)):
+                print(f"    {n}")
         return 0
     if args.factors:
         # 모든 지수 서비스를 훑어 후보를 모은다 — 어느 서비스에 있는지 모른다.
