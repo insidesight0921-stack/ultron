@@ -104,3 +104,28 @@ def test_the_status_tells_you_to_collect_more_rather_than_wait(tmp_path, monkeyp
                     "close": closes}}), encoding="utf-8")
     msg = ch.format_status()
     assert "더 소급하면 됩니다" in msg
+
+
+# ─── 원인을 정확히 말한다 (2026-09-02) ──────────────────
+
+def test_a_login_requirement_is_named_not_called_an_empty_response(monkeypatch):
+    """**「응답이 비었습니다」는 네트워크를 의심하게 만든다.**
+
+    실제 원인은 KRX 회원 로그인이었다. CLI 시리즈가 낡았을 때
+    「키·네트워크 점검」이라 말하던 것과 같은 실수다.
+    """
+    monkeypatch.delenv("KRX_ID", raising=False)
+    monkeypatch.delenv("KRX_PW", raising=False)
+    msg = ch._flow_failure_reason(
+        RuntimeError("KRX 로그인 실패: KRX_ID 또는 KRX_PW 환경 변수가 없습니다"))
+    assert "KRX 회원 로그인" in msg
+    assert "KRX_ID" in msg and "KRX_PW" in msg
+    assert "네트워크·키 문제가 아닙니다" in msg
+
+
+def test_a_real_empty_response_is_still_reported_as_such(monkeypatch):
+    """자격증명이 있는데도 비면 그때는 진짜 빈 응답이다."""
+    monkeypatch.setenv("KRX_ID", "id")
+    monkeypatch.setenv("KRX_PW", "pw")
+    msg = ch._flow_failure_reason(None)
+    assert "비었습니다" in msg and "로그인" not in msg

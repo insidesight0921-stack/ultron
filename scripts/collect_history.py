@@ -128,20 +128,45 @@ def backfill_fx(months: int) -> dict:
     return {"item": "fx", "n": len(dates), "range": (dates[0], dates[-1])}
 
 
+def _flow_failure_reason(error) -> str:
+    """**원인을 정확히 말한다(2026-09-02).**
+
+    이 경로는 KRX 회원 로그인을 요구하는데, 예전 메시지는 「응답이
+    비었습니다」였다. 그러면 네트워크나 pykrx를 의심하게 되고 진짜 원인을
+    못 찾는다 — CLI 시리즈가 낡았을 때 「키·네트워크 점검」이라 말하던 것과
+    같은 실수다.
+    """
+    import os
+
+    text = str(error or "")
+    missing = not (os.getenv("KRX_ID") and os.getenv("KRX_PW"))
+    if missing or "KRX_ID" in text or "로그인" in text:
+        return ("외국인 순매수는 **KRX 회원 로그인이 필요한 경로**입니다"
+                "(pykrx get_market_trading_value_by_date). "
+                ".env에 KRX_ID·KRX_PW를 넣으면 소급됩니다. "
+                "네트워크·키 문제가 아닙니다.")
+    return f"외국인 순매수 응답이 비었습니다({text or '빈 응답'})."
+
+
 def backfill_flow(days: int) -> dict:
     """외국인 순매수 — pykrx는 **임의 기간 조회**다.
 
     `proxy_indicators._foreign_net`이 최근 5일만 부르는 것은 스냅샷 용도라
     그런 것이고, 소급은 여기서 한다. 단위는 억원(원본은 원).
     """
+    import os
+
     from pykrx import stock
 
     end = datetime.now()
     start = end - timedelta(days=int(days * 1.6) + 30)   # 휴장일 여유
-    df = stock.get_market_trading_value_by_date(
-        start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), "KOSPI")
+    try:
+        df = stock.get_market_trading_value_by_date(
+            start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), "KOSPI")
+    except Exception as e:                                  # noqa: BLE001
+        raise RuntimeError(_flow_failure_reason(e)) from e
     if df is None or len(df) == 0:
-        raise RuntimeError("외국인 순매수 응답이 비었습니다.")
+        raise RuntimeError(_flow_failure_reason(None))
     col = next((c for c in ("외국인합계", "외국인") if c in df.columns), None)
     if col is None:
         raise RuntimeError(f"외국인 컬럼을 찾지 못했습니다: {list(df.columns)}")

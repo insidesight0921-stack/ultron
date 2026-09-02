@@ -149,10 +149,14 @@ def evaluate(predictions: list[tuple], truth: dict, *,
         # 성질이라 5건에서도 참이고, 표본을 늘려도 상수면 여전히 정보가 없다.
         # 순서를 뒤집었더니 상수 진단이 "표본 미달"에 가려졌다(2026-09-01).
         thin = actual["n"] < MIN_PREDICTIONS
+        # 다만 **표본이 미달이면 「정보 없음」이라고 단정하지 않는다**
+        # (2026-09-02: 외국인 순매수가 1건으로 「방향 정보 없음」 판정을 받았다).
+        # 상수라는 사실은 그대로 말하되, 결론은 보류다.
         return {**actual,
                 "rate": None if thin else actual["rate"],
                 "percentile": None, "baseline_mean": None, "constant": True,
-                "verdict": "상수 예측 — 방향 정보 없음"}
+                "verdict": (f"상수 예측 · 표본 {actual['n']}건 — 판정 보류"
+                            if thin else "상수 예측 — 방향 정보 없음")}
     if actual["n"] < MIN_PREDICTIONS:
         # **표본이 적으면 적중률을 내지 않는다.** 숫자가 보이면 읽는 사람은
         # 그것을 결과로 받아들인다.

@@ -432,3 +432,23 @@ def test_a_constant_diagnosis_is_not_hidden_by_a_thin_sample():
     assert r["constant"] is True
     assert "상수 예측" in r["verdict"]
     assert r["rate"] is None      # 다만 적중률은 표본 미달이라 감춘다
+
+
+def test_a_single_prediction_is_not_called_uninformative():
+    """**1건으로 「방향 정보 없음」이라 단정하면 안 된다.**
+
+    2026-09-02: 외국인 순매수가 로그 1건뿐인데 「상수 예측 — 방향 정보
+    없음」으로 떴다. 상수라는 사실은 말하되 결론은 보류다.
+    """
+    truth = {"20260101": ne.UP}
+    got = ne.evaluate([("20260101", ne.UP)], truth)
+    assert got["constant"] is True
+    assert "판정 보류" in got["verdict"]
+    assert got["rate"] is None
+
+
+def test_a_large_constant_predictor_is_still_called_uninformative():
+    days = [f"202601{i:02d}" for i in range(1, ne.MIN_PREDICTIONS + 5)]
+    truth = {d: ne.UP for d in days}
+    got = ne.evaluate([(d, ne.UP) for d in days], truth)
+    assert got["verdict"] == "상수 예측 — 방향 정보 없음"
