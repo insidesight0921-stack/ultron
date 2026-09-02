@@ -509,7 +509,17 @@ def format_snapshot(snap: PhaseSnapshot) -> str:
     lines = ["📊 콴텍봇 거시 국면 스냅샷 (MSCI 4분면)"]
     if snap.consensus_phase:
         emo = PHASE_EMOJI.get(snap.consensus_phase, "")
-        lines.append(f"\n{emo} 통합 국면: **{snap.consensus_phase}** (확신도 {snap.confidence:.0%})")
+        # **'통합'이 아니다(2026-09-02 실측).** 421개월 전부 consensus == phase_kr이었다.
+        # 원인은 compute_confidence의 구조다: KR·US가 같은 0.4를 받고 동점이면
+        # 딕셔너리 삽입 순서로 KR이 이기며, BSI 보너스 0.2는 `phase_kr or phase_us`라
+        # 항상 KR에게만 간다 → US가 대표 국면이 되는 경우가 **구조적으로 불가능**.
+        # 규칙은 그대로 둔다(탭 C가 정확도를 재기 전에 바꾸면 무엇이 나아졌는지 알 수 없다).
+        # 대신 **이름이 사실과 어긋나지 않게** 한다.
+        lines.append(f"\n{emo} 국면(한국 CLI 기준): **{snap.consensus_phase}** "
+                     f"(확신도 {snap.confidence:.0%})")
+        if snap.phase_us and snap.phase_us != snap.consensus_phase:
+            lines.append(f"   ↔ 미국 CLI는 {PHASE_EMOJI.get(snap.phase_us, '')} "
+                         f"{snap.phase_us} — 갈립니다. 위 판정은 한국 기준입니다.")
         if snap.needs_recheck:
             lines.append("⚠️ 확신도 60% 미만 — 2주 재진단 필요. 직전 국면 가중 유지 권장.")
     else:

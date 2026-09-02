@@ -1358,3 +1358,53 @@ def test_the_freshness_label_names_the_series_actually_used(monkeypatch):
     names = {f["name"] for f in snap.freshness}
     assert qb.ACTIVE_CLI["KR"] in names
     assert qb.ACTIVE_CLI["US"] in names
+
+
+# ─── '통합 국면'은 통합이 아니었다 (2026-09-02) ──────────
+
+def test_the_us_can_never_win_a_tie():
+    """**구조적 불가능을 실측으로 박아둔다.**
+
+    KR·US가 갈리고 BSI가 KR을 지지하지 않아도 대표 국면은 KR이다.
+    딕셔너리 삽입 순서가 타이브레이크 노릇을 하고 있고, 그것은 규칙이
+    아니라 사고다. 421개월 이력에서 consensus == phase_kr이 421/421이었다.
+
+    이 테스트는 **고쳤다고 주장하지 않는다** — 지금 무엇이 도는지를
+    적어둔다. 규칙을 바꾸면 이 테스트가 깨지고, 그때 이력이 통째로
+    달라진다는 사실이 함께 드러난다.
+    """
+    for bsi in (-5.0, None, 5.0):
+        phase, _ = qb.compute_confidence("Expansion", "Contraction", bsi)
+        assert phase == "Expansion"
+    phase, _ = qb.compute_confidence("Contraction", "Expansion", 5.0)
+    assert phase == "Contraction"
+
+
+def test_a_tie_is_reported_as_low_confidence():
+    """동점을 삽입 순서로 깨더라도, 확신도는 그것이 동점이었음을 말해야 한다."""
+    _, conf = qb.compute_confidence("Expansion", "Contraction", -5.0)
+    assert conf < 0.6
+
+
+def test_the_screen_does_not_call_it_a_combined_phase():
+    """이름이 사실과 어긋나면 사람은 미국이 반영된 줄 안다."""
+    snap = qb.PhaseSnapshot(
+        phase_kr="Expansion", phase_us="Contraction",
+        cli_kr_level=101.0, cli_kr_momentum=0.5,
+        cli_us_level=99.0, cli_us_momentum=-0.5,
+        bsi_trend=None, consensus_phase="Expansion", confidence=0.4,
+        needs_recheck=True)
+    out = qb.format_snapshot(snap)
+    assert "통합 국면" not in out
+    assert "한국 CLI 기준" in out
+    assert "갈립니다" in out
+
+
+def test_no_divergence_line_when_the_two_agree():
+    snap = qb.PhaseSnapshot(
+        phase_kr="Expansion", phase_us="Expansion",
+        cli_kr_level=101.0, cli_kr_momentum=0.5,
+        cli_us_level=101.0, cli_us_momentum=0.5,
+        bsi_trend=None, consensus_phase="Expansion", confidence=0.8,
+        needs_recheck=False)
+    assert "갈립니다" not in qb.format_snapshot(snap)

@@ -2020,7 +2020,7 @@ async function loadQuantPhase() {
     if (d.needs_recheck) cls = "crash-mid";
     if (!d.consensus_phase) cls = "crash-warn";
     card.innerHTML = `
-      <div class="${cls}">${emoji} 통합 국면 <b>${phase}</b> · 확신도 ${conf}${d.needs_recheck ? " ⚠️ 2주 재진단" : ""}</div>
+      <div class="${cls}">${emoji} 국면(한국 CLI 기준) <b>${phase}</b> · 확신도 ${conf}${d.needs_recheck ? " ⚠️ 2주 재진단" : ""}</div>
       <div class="muted" style="margin-top: 0.4rem;">
         한국 CLI ${d.cli_kr_level !== null ? d.cli_kr_level.toFixed(2) : "N/A"}
         (${d.cli_kr_momentum !== null ? (d.cli_kr_momentum >= 0 ? "+" : "") + d.cli_kr_momentum.toFixed(3) : "N/A"})
