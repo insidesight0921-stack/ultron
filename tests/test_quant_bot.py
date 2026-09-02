@@ -1338,7 +1338,8 @@ def test_the_snapshot_carries_each_series_as_of(monkeypatch):
     snap = qb.snapshot()
     assert snap.freshness
     names = {f["name"] for f in snap.freshness}
-    assert names == {"CLI_KR", "CLI_US", "BSI_KR"}
+    # 이름을 박지 않는다 — 교체할 때마다 깨진다(v3.65에서 실제로 깨졌다).
+    assert names == {qb.ACTIVE_CLI["KR"], qb.ACTIVE_CLI["US"], "BSI_KR"}
     assert all(f["as_of"] == "2024-01-01" for f in snap.freshness)
 
 
