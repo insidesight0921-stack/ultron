@@ -215,3 +215,118 @@ def test_collect_saves_as_it_goes(tmp_path):
     fs.collect(_fake_market(prices), ["A"], [(2010, m) for m in range(1, 13)],
                path=p, save_every=3)
     assert len(json.loads(p.read_text(encoding="utf-8"))["A"]) == 12
+
+
+# ─── 오염 탐지 (2026-09-02) ───────────────────────────
+#
+# 200개월을 받아 스프레드까지 만들었는데 전부 못 쓰는 것이었다.
+# 「코스피 대형주」레벨이 2025-06 3,068에서 2026-06 9,421로 갔다 —
+# 대형주 가격지수로는 불가능한 값이다. 그런데 스프레드의 겉모습
+# (누적 −89.9%p · 월 sd 6.07%p)은 조금도 이상해 보이지 않았다.
+# **유일한 낌새는 소형-대형 상관 +0.52였다**(정상이면 0.8대).
+
+
+def test_two_rows_with_the_same_name_yield_no_value():
+    """첫 행을 집으면 달마다 다른 지수를 집을 수 있다 — 값을 내지 않는다."""
+    rows = [{"IDX_NM": "코스피 대형주", "CLSPRC_IDX": "2500"},
+            {"IDX_NM": "코스피 대형주", "CLSPRC_IDX": "9400"}]
+    assert fs.close_of(rows, "코스피 대형주") is None
+
+
+def test_a_single_match_still_works():
+    rows = [{"IDX_NM": "코스피 대형주", "CLSPRC_IDX": "2500"},
+            {"IDX_NM": "코스피 소형주", "CLSPRC_IDX": "2400"}]
+    assert fs.close_of(rows, "코스피 대형주") == 2500.0
+
+
+def test_ambiguity_shows_what_got_mixed():
+    rows = [{"IDX_NM": "코스피 대형주", "IDX_IND_CD": "1", "CLSPRC_IDX": "2500"},
+            {"IDX_NM": "코스피 대형주", "IDX_IND_CD": "9", "CLSPRC_IDX": "9400"}]
+    got = fs.ambiguity(rows, "코스피 대형주")
+    assert len(got) == 2
+    assert {i["close"] for i in got} == {2500.0, 9400.0}
+    assert got[0]["id"]["IDX_IND_CD"] == "1"
+
+
+def test_collect_refuses_an_ambiguous_month_instead_of_guessing():
+    def fetch(bas_dd):
+        if not bas_dd.endswith("28"):
+            return []
+        return [{"IDX_NM": "A", "CLSPRC_IDX": "100"},
+                {"IDX_NM": "A", "CLSPRC_IDX": "900"}]
+    got = fs.collect(fetch, ["A"], [(2026, 5)])
+    assert got["A"] == {}
+    assert got["__ambiguous__"]["A"] == ["2026-05"]
+
+
+def test_a_low_correlation_between_the_legs_is_a_problem():
+    """**이것이 그날 유일한 낌새였다.** 대·소형이 +0.52로 움직일 수는 없다."""
+    import math
+    small = {f"2010-{m:02d}": 100 * (1.01 ** m) for m in range(1, 13)}
+    large = {f"2010-{m:02d}": 100 * (1 + 0.3 * math.sin(m)) for m in range(1, 13)}
+    got = fs.audit({"소형": small, "대형": large})
+    assert not got["ok"]
+    assert any("상관" in p for p in got["problems"])
+
+
+def test_a_monthly_jump_is_a_problem():
+    series = {"2025-06": 3068.0, "2025-07": 9421.0}
+    got = fs.audit({"대형": series})
+    assert not got["ok"]
+    assert any("급변" in p for p in got["problems"])
+
+
+def test_a_clean_pair_passes():
+    small = {f"2010-{m:02d}": 100 + m for m in range(1, 13)}
+    large = {f"2010-{m:02d}": 200 + 2 * m for m in range(1, 13)}
+    got = fs.audit({"소형": small, "대형": large})
+    assert got["ok"], got["problems"]
+    assert "스프레드를 만들어도 됩니다" in fs.format_audit(got)
+
+
+def test_the_audit_report_refuses_out_loud():
+    got = fs.audit({"대형": {"2025-06": 3068.0, "2025-07": 9421.0}})
+    assert "스프레드를 만들지 않습니다" in fs.format_audit(got)
+
+
+def test_pearson_needs_variation():
+    assert fs.pearson([1.0, 1.0], [1.0, 2.0]) is None
+    assert abs(fs.pearson([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]) - 1.0) < 1e-9
+
+
+def test_quarantine_moves_rather_than_deletes(tmp_path):
+    """**지우면 무엇이 잘못됐었는지 다시 못 본다.**
+
+    그렇다고 남겨두면 다음 수집이 「이미 있는 달」로 건너뛰어 오염이
+    살아남는다. 그래서 옮긴다.
+    """
+    p = tmp_path / "c.json"
+    fs.save_cache(p, {"대형": {"2026-05": 9341.0}, "소형": {"2026-05": 2585.0}})
+    got = fs.quarantine(p, "대형", note="중복 의심")
+    assert "대형" not in got and "소형" in got
+    box = got["__quarantine__"]
+    assert len(box) == 1
+    key = next(iter(box))
+    assert key.startswith("대형@") and box[key]["series"]["2026-05"] == 9341.0
+    assert box[key]["note"] == "중복 의심"
+
+
+def test_quarantine_is_a_no_op_for_an_unknown_name(tmp_path):
+    p = tmp_path / "c.json"
+    fs.save_cache(p, {"소형": {"2026-05": 2585.0}})
+    assert "__quarantine__" not in fs.quarantine(p, "없는이름")
+
+
+def test_a_collected_month_is_refetched_after_quarantine(tmp_path):
+    """격리의 목적 — 다음 수집이 그 달을 **다시 받는다**."""
+    p = tmp_path / "c.json"
+    fs.save_cache(p, {"대형": {"2026-05": 9341.0}})
+    fs.quarantine(p, "대형")
+    calls = []
+
+    def fetch(bas_dd):
+        calls.append(bas_dd)
+        return [{"IDX_NM": "대형", "CLSPRC_IDX": "2500"}] if bas_dd.endswith("29") else []
+
+    got = fs.collect(fetch, ["대형"], [(2026, 5)], have=fs.load_cache(p))
+    assert calls and got["대형"]["2026-05"] == 2500.0

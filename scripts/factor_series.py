@@ -43,22 +43,51 @@ def _num(value) -> Optional[float]:
         return None
 
 
-def close_of(rows: list, name: str) -> Optional[float]:
-    """이름이 **정확히** 일치하는 지수의 종가(순수). 부분일치 금지."""
+def matches(rows: list, name: str) -> list:
+    """이름이 **정확히** 일치하는 행 전부(순수). 하나라고 가정하지 않는다."""
     target = str(name).replace(" ", "")
+    out = []
     for row in rows or []:
         got = None
         for field in NAME_FIELDS:
             if row.get(field):
                 got = str(row[field]).replace(" ", "")
                 break
-        if got != target:
-            continue
+        if got == target:
+            out.append(row)
+    return out
+
+
+def close_of(rows: list, name: str, *, strict: bool = True) -> Optional[float]:
+    """이름이 정확히 일치하는 지수의 종가(순수).
+
+    **같은 이름의 행이 둘 이상이면 값을 내지 않는다**(strict). 첫 번째를
+    집으면 응답 순서에 따라 달마다 다른 지수를 집을 수 있고, 그렇게 만들어진
+    시계열은 그럴듯한 모양을 유지한 채 전혀 다른 것이 된다 — 2026-09-02
+    「코스피 대형주」가 2025-06 이후 3,068 → 9,421로 튄 것이 그것이다.
+    소형-대형 상관이 +0.52(정상이면 0.8대)였던 것이 유일한 낌새였다.
+    """
+    found = matches(rows, name)
+    if strict and len(found) > 1:
+        return None
+    for row in found:
         for field in CLOSE_FIELDS:
             value = _num(row.get(field))
             if value is not None and value > 0:
                 return value
     return None
+
+
+def ambiguity(rows: list, name: str, *, id_fields=("IDX_IND_CD", "IDX_CD", "IND_CD",
+                                                   "BAS_TM_CONTN", "IDX_CLSS")) -> list:
+    """같은 이름 행들을 구별되게 늘어놓는다(순수) — 무엇이 섞였는지 보려고."""
+    out = []
+    for row in matches(rows, name):
+        ident = {f: row[f] for f in id_fields if row.get(f)}
+        close = next((_num(row.get(f)) for f in CLOSE_FIELDS if _num(row.get(f))), None)
+        out.append({"id": ident, "close": close,
+                    "fields": sorted(k for k in row if row.get(k))})
+    return out
 
 
 def merge_series(existing: dict, new: dict) -> dict:
@@ -155,6 +184,73 @@ def format_readiness(sd_month: Optional[float], sd_block: Optional[float],
     return "\n".join(lines)
 
 
+def pearson(xs: list, ys: list) -> Optional[float]:
+    """상관(순수). 2개 미만이거나 분산이 0이면 None."""
+    if len(xs) != len(ys) or len(xs) < 2:
+        return None
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    dx = sum((x - mx) ** 2 for x in xs)
+    dy = sum((y - my) ** 2 for y in ys)
+    if dx <= 0 or dy <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (dx * dy) ** 0.5
+
+
+def jumps(series: dict, *, threshold: float = 0.25) -> list:
+    """한 달에 threshold 넘게 움직인 달(순수) — 지수 교체·오조회는 여기서 튄다."""
+    out = []
+    for month in sorted(series):
+        prev = _prev_month(month)
+        if prev in series and series[prev]:
+            change = series[month] / series[prev] - 1.0
+            if abs(change) >= threshold:
+                out.append((month, series[prev], series[month], change))
+    return out
+
+
+def audit(series_by_name: dict, *, corr_floor: float = 0.7,
+          jump: float = 0.25) -> dict:
+    """스프레드를 만들기 **전에** 원자료를 의심한다(순수).
+
+    2026-09-02: 이 검사가 없어서 오염된 200개월을 그대로 국면 분석에 넣을
+    뻔했다. 누적 −89.9%p·표준편차 6.07%p는 전혀 이상해 보이지 않았다.
+    """
+    names = list(series_by_name)
+    rets = {n: monthly_returns(series_by_name[n]) for n in names}
+    common = sorted(set.intersection(*[set(r) for r in rets.values()])) if rets else []
+    corr = None
+    if len(names) == 2 and common:
+        corr = pearson([rets[names[0]][m] for m in common],
+                       [rets[names[1]][m] for m in common])
+    bad = {n: jumps(series_by_name[n], threshold=jump) for n in names}
+    problems = []
+    if corr is not None and corr < corr_floor:
+        problems.append(f"두 다리의 상관이 {corr:+.3f} — {corr_floor:+.2f} 미만이면 "
+                        f"같은 시장의 대·소형이라 보기 어렵다")
+    for n, js in bad.items():
+        if js:
+            problems.append(f"{n}: 월 {jump:.0%} 넘는 급변 {len(js)}회 "
+                            f"({', '.join(m for m, *_ in js[:4])}…)")
+    return {"months": len(common), "corr": corr, "jumps": bad,
+            "problems": problems, "ok": not problems}
+
+
+def format_audit(result: dict) -> str:
+    """감사 결과(순수). **문제가 있으면 스프레드를 만들지 않는다.**"""
+    lines = ["🔍 원자료 감사", ""]
+    lines.append(f"  겹치는 달: {result.get('months', 0)}")
+    if result.get("corr") is not None:
+        lines.append(f"  두 다리 상관: {result['corr']:+.3f}")
+    lines.append("")
+    if result.get("ok"):
+        lines.append("  ✅ 걸린 것 없음 — 스프레드를 만들어도 됩니다.")
+        return chr(10).join(lines)
+    lines.append("  ❌ 이 원자료로는 스프레드를 만들지 않습니다:")
+    for problem in result.get("problems", []):
+        lines.append(f"   · {problem}")
+    return chr(10).join(lines)
+
+
 # ─── I/O ─────────────────────────────────────────────
 
 def cache_path(service: str, root: Path) -> Path:
@@ -183,11 +279,32 @@ def save_cache(path: Path, data: dict) -> Path:
     return path
 
 
+def quarantine(path: Path, name: str, *, note: str = "") -> dict:
+    """오염이 확인된 계열을 **지우지 않고** 격리한다.
+
+    지우면 무엇이 잘못됐었는지 다시 볼 수 없고, 남겨두면 다음 수집이
+    「이미 있는 달」로 건너뛰어 오염이 살아남는다. 그래서 옮긴다.
+    """
+    from datetime import datetime
+    data = load_cache(path)
+    if name not in data:
+        return data
+    box = data.setdefault("__quarantine__", {})
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    box[f"{name}@{stamp}"] = {"note": note, "series": data.pop(name)}
+    tmp = Path(path).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True),
+                   encoding="utf-8")
+    tmp.replace(Path(path))
+    return data
+
+
 def collect(fetch_day, names: list[str], months: list[tuple[int, int]],
             *, path: Optional[Path] = None, have: Optional[dict] = None,
             save_every: int = 12, on_progress=None) -> dict:
     """월말 종가를 모은다. 이미 있는 달은 **부르지 않는다**(이어 받기)."""
     have = {n: dict((have or {}).get(n, {})) for n in names}
+    ambiguous: dict = {}
     done = 0
     for year, month in months:
         key = f"{year:04d}-{month:02d}"
@@ -198,6 +315,10 @@ def collect(fetch_day, names: list[str], months: list[tuple[int, int]],
             if not rows:
                 continue
             for name in names:
+                found = matches(rows, name)
+                if len(found) > 1:
+                    ambiguous.setdefault(name, []).append(key)
+                    continue          # **집지 않는다.** 첫 행을 집으면 시계열이 섞인다
                 value = close_of(rows, name)
                 if value is not None:
                     have[name][key] = value
@@ -209,6 +330,8 @@ def collect(fetch_day, names: list[str], months: list[tuple[int, int]],
             save_cache(path, have)
     if path:
         save_cache(path, have)
+    if ambiguous:
+        have["__ambiguous__"] = ambiguous   # 호출자가 반드시 보게 한다
     return have
 
 
@@ -231,7 +354,27 @@ def _cli() -> int:
     ap.add_argument("--service", default="KOSPI 시리즈", choices=sorted(k.INDEX_ENDPOINTS))
     ap.add_argument("--from", dest="start", default="2010-01")
     ap.add_argument("--to", dest="end", default=None)
+    ap.add_argument("--audit", action="store_true",
+                    help="이미 받은 캐시만 검사한다(네트워크 없이)")
+    ap.add_argument("--forget", nargs="+", metavar="NAME",
+                    help="오염된 계열을 캐시에서 격리한다(지우지 않고 옮긴다)")
+    ap.add_argument("--dump", metavar="YYYYMMDD",
+                    help="그 날짜에 같은 이름의 행이 몇 개인지 그대로 보여준다")
     args = ap.parse_args()
+
+    path0 = cache_path(args.service, root)
+    if args.forget:
+        for name in args.forget:
+            quarantine(path0, name, note="2026-09-02 같은 이름 중복 의심")
+            print(f"  격리: {name} → __quarantine__ (지우지 않았습니다)")
+        return 0
+    if args.audit:
+        cached = load_cache(path0)
+        picked = {n: cached.get(n, {}) for n in args.names if cached.get(n)}
+        if len(picked) < len(args.names):
+            print(f"  캐시에 없는 이름: {[n for n in args.names if n not in picked]}")
+        print(format_audit(audit(picked)))
+        return 0 if audit(picked)["ok"] else 1
 
     if not k._auth_key():
         print(f"❌ {k.KEY_NAME}가 없습니다.")
@@ -251,6 +394,18 @@ def _cli() -> int:
 
     p = k.INDEX_ENDPOINTS[args.service]
 
+    if args.dump:
+        payload = k.fetch(p, args.dump)
+        rows = [] if payload.get("error") else k.rows_of(payload)
+        print(f"  {args.dump} · 응답 {len(rows)}행")
+        for name in args.names:
+            found = ambiguity(rows, name)
+            print(f"\n  「{name}」 정확일치 {len(found)}행")
+            for item in found:
+                print(f"    close={item['close']} id={item['id']}")
+                print(f"    필드: {item['fields']}")
+        return 0
+
     def fetch_day(bas_dd: str) -> list:
         payload = k.fetch(p, bas_dd)
         return [] if payload.get("error") else k.rows_of(payload)
@@ -268,6 +423,20 @@ def _cli() -> int:
             print(f"  · {name}: {len(got)}개월 ({min(got)} ~ {max(got)})")
         else:
             print(f"  · {name}: 0개월 — 이름이 맞는지, 서비스가 맞는지 확인하세요")
+    flagged = series.pop("__ambiguous__", None)
+    if flagged:
+        print("\n  ⚠️ 같은 이름의 행이 둘 이상이라 **집지 않은** 달:")
+        for name, months in flagged.items():
+            print(f"    {name}: {len(months)}개월 ({months[0]} ~ {months[-1]})")
+        print("    --dump 으로 무엇이 섞였는지 보세요.")
+
+    checked = audit({n: series.get(n, {}) for n in args.names[:2]})
+    print()
+    print(format_audit(checked))
+    if not checked["ok"]:
+        print("\n  스프레드를 만들지 않았습니다. 원자료를 먼저 해결하세요.")
+        return 1
+
     long_name, short_name = args.names[0], args.names[1]
     sp = spread(monthly_returns(series.get(long_name, {})),
                 monthly_returns(series.get(short_name, {})))
