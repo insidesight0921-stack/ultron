@@ -1061,8 +1061,25 @@ def test_v3231_ecos_series_only_bsi():
 
 
 def test_v3231_fred_series_both_cli():
-    """v3.23.1 — FRED에 한미 CLI 둘 다."""
-    assert set(qb.FRED_SERIES.keys()) == {"CLI_KR", "CLI_US"}
+    """v3.23.1 — FRED에 한미 CLI 둘 다. v3.65에서 진폭조정 후보가 추가됐다."""
+    assert {"CLI_KR", "CLI_US"} <= set(qb.FRED_SERIES.keys())
+
+
+def test_the_active_cli_is_named_explicitly():
+    """**어느 시리즈로 판정하는지가 코드에 드러나야 한다.**
+
+    2026-09-01: 쓰던 시리즈가 2024-01에서 죽었는데 그 사실을 아무도 몰랐다.
+    교체 후보를 붙일 때 '지금 쓰는 것'을 이름으로 고정한다.
+    """
+    assert set(qb.ACTIVE_CLI) == {"KR", "US"}
+    for key in qb.ACTIVE_CLI.values():
+        assert key in qb.FRED_SERIES
+
+
+def test_the_replacement_candidates_are_present_but_not_active():
+    """검증 전에는 후보일 뿐이다 — 그냥 바꿔 끼우지 않는다."""
+    assert "CLI_KR_AA" in qb.FRED_SERIES and "CLI_US_AA" in qb.FRED_SERIES
+    assert qb.ACTIVE_CLI["KR"] == "CLI_KR"     # 아직 교체 전
 
 
 

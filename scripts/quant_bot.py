@@ -74,11 +74,27 @@ ECOS_SERIES = {
 }
 
 # FRED — St. Louis Fed
+#
+# **2026-09-01: 쓰던 시리즈가 죽었다.** `*LOLITONOSTSAM`(Normalised) 계열은
+# 한국·미국 모두 **2024-01이 마지막 관측치**이고 다음 발표일이 "Not Available"
+# 이다(FRED 공식 페이지 확인). 32개월 낡은 값으로 "현재 국면"을 내고 있었다.
+#
+# 같은 OECD CLI의 `*LOLITOAASTSAM`(Amplitude adjusted) 계열은 **2026-06까지
+# 갱신 중**이다. 다만 **그냥 바꿔 끼우지 않는다** — 두 계열은 정규화 방식이
+# 다르므로 `classify_phase`의 100 기준선이 같은 뜻인지 재야 한다.
+# 교과서 임계값을 다른 시장에 옮겨 쓴 오늘의 실패와 같은 자리다.
+# 검증: `cli_migration.py`
 FRED_SERIES = {
     "CLI_US": {"series_id": "USALOLITONOSTSAM", "label": "미국 OECD CLI (정규화)"},
     # v3.23.1 — CLI_KR도 FRED로 통일. 한미 같은 OECD 시리즈 그룹 (CLI Normalised).
     "CLI_KR": {"series_id": "KORLOLITONOSTSAM", "label": "한국 OECD CLI (정규화)"},
+    # 후보(검증 전에는 쓰지 않는다).
+    "CLI_KR_AA": {"series_id": "KORLOLITOAASTSAM", "label": "한국 OECD CLI (진폭조정)"},
+    "CLI_US_AA": {"series_id": "USALOLITOAASTSAM", "label": "미국 OECD CLI (진폭조정)"},
 }
+
+# 지금 국면 판정에 쓰는 시리즈. 교체는 검증을 통과한 뒤에만 한다.
+ACTIVE_CLI = {"KR": "CLI_KR", "US": "CLI_US"}
 
 # MSCI 4분면 라벨
 PHASES = ("Recovery", "Expansion", "Slowdown", "Contraction")
@@ -419,13 +435,13 @@ def snapshot(months: int = 24) -> PhaseSnapshot:
     cli_us = []
     bsi_kr = []
     try:
-        cli_kr = fetch_series("CLI_KR", months=months)
+        cli_kr = fetch_series(ACTIVE_CLI["KR"], months=months)
     except Exception as e:
-        log.warning(f"CLI_KR fetch 실패: {e}")
+        log.warning(f"{ACTIVE_CLI['KR']} fetch 실패: {e}")
     try:
-        cli_us = fetch_series("CLI_US", months=months)
+        cli_us = fetch_series(ACTIVE_CLI["US"], months=months)
     except Exception as e:
-        log.warning(f"CLI_US fetch 실패: {e}")
+        log.warning(f"{ACTIVE_CLI['US']} fetch 실패: {e}")
     try:
         bsi_kr = fetch_series("BSI_KR", months=months)
     except Exception as e:
