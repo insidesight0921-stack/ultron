@@ -321,6 +321,60 @@ def format_compare(table: dict, *, mdd_test: dict = None,
     return "\n".join(lines)
 
 
+# ─── 판정 원장 ───────────────────────────────────────
+
+VALIDATION_FILE = "weight_rule_validation.json"
+
+
+def validation_record(table: dict, *, at: str, mdd_test=None, ret_test=None,
+                      note: str = "") -> dict:
+    """원장에 남길 한 건(순수). 다리별 성과와 회전 검정 백분위를 함께."""
+    legs = {name: {"n": p.get("n"), "avg_weight": p.get("avg_weight"),
+                   "switches": p.get("switches"),
+                   "total_return": p.get("total_return"),
+                   "mdd": p.get("mdd"), "sharpe": p.get("sharpe")}
+            for name, p in (table or {}).items()}
+    return {"at": at, "legs": legs, "note": note,
+            "mdd_percentile": (mdd_test or {}).get("percentile"),
+            "return_percentile": (ret_test or {}).get("percentile"),
+            "passed": bool((mdd_test or {}).get("percentile") is not None
+                           and (mdd_test or {}).get("percentile", 0) >= 95)}
+
+
+def verification_note(record) -> str:
+    """비중 권고 옆에 붙일 한 줄(순수).
+
+    **기록이 없는 것과 검증된 것은 다르다.** 봇이 「주식 70%」라고만 말하면
+    사람은 그 규칙이 검증된 것으로 읽는다.
+    """
+    if not record:
+        return "⚠️ 이 비중 규칙은 아직 측정되지 않았습니다(미측정)."
+    legs = record.get("legs") or {}
+    pct = record.get("mdd_percentile")
+    best = None
+    for name, leg in legs.items():
+        if leg.get("mdd") is None:
+            continue
+        if best is None or leg["mdd"] < legs[best]["mdd"]:
+            best = name
+    head = ("✅ 검증됨" if record.get("passed") else "⚠️ **미검증**")
+    tail = f"MDD 회전 검정 백분위 {pct}" if pct is not None else "회전 검정 없음"
+    extra = f" · 이 표본에서 MDD가 가장 낮았던 것: {best}" if best else ""
+    return f"{head} — {tail}({record.get('at', '')[:10]} 측정){extra}"
+
+
+def load_validation(path=None):
+    """마지막 판정. 경로를 못 구하면 None."""
+    try:
+        import finding_ledger as fl
+        if path is None:
+            from storage_paths import PATHS
+            path = PATHS.private_state_file(VALIDATION_FILE)
+        return fl.latest(path)
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 # ─── I/O ─────────────────────────────────────────────
 
 def load_vkospi(path=None) -> dict:
@@ -366,7 +420,28 @@ def _cli() -> int:
     ap.add_argument("--from", dest="start", default=None, help="YYYYMMDD")
     ap.add_argument("--combined", action="store_true",
                     help="VKOSPI 오버레이까지 합친 봇의 실제 규칙을 잰다")
+    ap.add_argument("--record", action="store_true",
+                    help="판정을 원장에 남겨 봇 화면이 읽게 한다")
     args = ap.parse_args()
+
+    def _record(table, mdd_test, ret_test, note):
+        if not args.record:
+            return
+        from datetime import datetime
+        from pathlib import Path as _P
+        import finding_ledger as fl
+        try:
+            from storage_paths import PATHS
+            ledger = PATHS.private_state_file(VALIDATION_FILE)
+        except Exception:                                   # noqa: BLE001
+            ledger = (_P(__file__).resolve().parents[1] / "data" / "private" /
+                      "state" / VALIDATION_FILE)
+        rec = validation_record(table, at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                                mdd_test=mdd_test, ret_test=ret_test, note=note)
+        _, added = fl.append(rec, ledger, ignore=("at",))
+        print()
+        print(f"  원장 {'기록' if added else '유지(직전과 같은 판정)'} — {ledger.name}")
+        print(f"  봇 화면 문구: {verification_note(rec)}")
 
     days, closes = load_kospi()
     if not closes:
@@ -412,20 +487,23 @@ def _cli() -> int:
               f"VKOSPI {len(vk)}일 · 창 {args.window}일")
         print(f"  ⚠️ VKOSPI 이력이 {len(vk)}일뿐이라 이 판정의 구간은 그만큼 짧습니다.")
         print()
-        print(format_compare(
-            table,
-            mdd_test=rotation_test(rets_c, comb_c, _mdd_metric, larger_is_better=False),
-            ret_test=rotation_test(rets_c, comb_c, _return_metric)))
+        mdd_test = rotation_test(rets_c, comb_c, _mdd_metric, larger_is_better=False)
+        ret_test = rotation_test(rets_c, comb_c, _return_metric)
+        print(format_compare(table, mdd_test=mdd_test, ret_test=ret_test))
+        _record(table, mdd_test, ret_test,
+                f"combined · {days[idx[0]]}~{days[idx[-1]]} · 창 {args.window}일")
         return 0
     weights = ma_weights(closes, window=args.window,
                          above=args.above, below=args.below)
     print(f"  KOSPI {len(closes)}일 ({days[0]} ~ {days[-1]}) · "
           f"창 {args.window}일 · 비중 {args.above:.0%}/{args.below:.0%}")
     print()
-    print(format_compare(
-        compare(rets, weights, fixed=args.above),
-        mdd_test=rotation_test(rets, weights, _mdd_metric, larger_is_better=False),
-        ret_test=rotation_test(rets, weights, _return_metric)))
+    table = compare(rets, weights, fixed=args.above)
+    mdd_test = rotation_test(rets, weights, _mdd_metric, larger_is_better=False)
+    ret_test = rotation_test(rets, weights, _return_metric)
+    print(format_compare(table, mdd_test=mdd_test, ret_test=ret_test))
+    _record(table, mdd_test, ret_test,
+            f"ma_only · {days[0]}~{days[-1]} · 창 {args.window}일")
     return 0
 
 

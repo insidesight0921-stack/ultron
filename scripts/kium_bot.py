@@ -432,6 +432,15 @@ def format_scan_result(
         lines.append(f"📐 권장 비중: 주식 {eq:.0f}% / 채권 {bd:.0f}%")
         if reason:
             lines.append(f"   {reason}")
+        # **봇이 「주식 70%」라고만 말하면 사람은 그 규칙이 검증된 것으로 읽는다.**
+        # 2026-09-02 백테스트: 200일선 다리는 수익만 깎고 MDD를 못 줄였다
+        # (VKOSPI 다리가 일한다). 판정선(회전 검정 백분위 95)은 못 넘었으므로
+        # 규칙은 그대로 두고, 그 사실을 같이 보여준다.
+        try:
+            import weight_rule_backtest as _wrb
+            lines.append(f"   {_wrb.verification_note(_wrb.load_validation())}")
+        except Exception:                                   # noqa: BLE001
+            pass
     lines.append("")
     for i, r in enumerate(results, 1):
         score_pct = (r.get("score") or 0) * 100

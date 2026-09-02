@@ -1063,3 +1063,18 @@ def test_a_broken_ledger_falls_back_to_the_code_constants(tmp_path, monkeypatch)
     hi, lo, src = kb.active_thresholds()
     assert (hi, lo) == (kb.VKOSPI_HIGH, kb.VKOSPI_LOW)
     assert "실패" in src
+
+
+def test_the_weight_line_says_the_rule_is_unverified():
+    """**봇이 「주식 70%」라고만 말하면 사람은 검증된 규칙으로 읽는다.**
+
+    2026-09-02 백테스트: 200일선 다리는 수익만 깎고 MDD를 못 줄였다.
+    판정선(회전 검정 백분위 95)은 못 넘었으므로 규칙은 그대로 두고
+    그 사실을 같이 보여준다.
+    """
+    out = kb.format_scan_result(
+        [{"ticker": "005930", "name": "삼성전자", "score": 0.3,
+          "current_price": 70000, "return_1m": 0.01, "return_12m": 0.3}],
+        weight={"equity_weight": 0.70, "bond_weight": 0.30, "reason": "테스트"})
+    assert "권장 비중" in out
+    assert ("미검증" in out) or ("미측정" in out) or ("검증됨" in out)

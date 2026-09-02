@@ -198,3 +198,50 @@ def test_the_weight_is_rounded_where_the_bot_rounds_it():
     0.7999999999999999가 되어 **봇이 실제로 쓰는 값과 어긋난다.**"""
     assert wb.vkospi_adjust(0.70, 15.0) == 0.80
     assert isinstance(wb.vkospi_adjust(0.50, 70.0), float)
+
+
+# ─── 판정 원장 (2026-09-02) ────────────────────────────
+
+def _table():
+    return {"합친 규칙(200일선+VKOSPI)": {"n": 407, "avg_weight": 0.666, "switches": 43,
+                                    "total_return": 106.7, "mdd": 24.50, "sharpe": 1.82},
+            "VKOSPI만": {"n": 407, "avg_weight": 0.70, "switches": 38,
+                        "total_return": 117.8, "mdd": 24.69, "sharpe": 1.87},
+            "200일선만": {"n": 407, "avg_weight": 0.666, "switches": 7,
+                        "total_return": 101.4, "mdd": 28.18, "sharpe": 1.63}}
+
+
+def test_the_record_keeps_every_leg():
+    """어느 다리가 일했는지가 이 측정의 결론이다 — 합계만 남기면 사라진다."""
+    rec = wb.validation_record(_table(), at="2026-09-02T15:00:00",
+                               mdd_test={"percentile": 89.2},
+                               ret_test={"percentile": 59.2})
+    assert set(rec["legs"]) == set(_table())
+    assert rec["legs"]["VKOSPI만"]["sharpe"] == 1.87
+
+
+def test_a_percentile_below_95_is_not_passed():
+    rec = wb.validation_record(_table(), at="t", mdd_test={"percentile": 89.2})
+    assert rec["passed"] is False
+    assert "미검증" in wb.verification_note(rec)
+
+
+def test_a_percentile_at_95_passes():
+    rec = wb.validation_record(_table(), at="t", mdd_test={"percentile": 95.0})
+    assert rec["passed"] is True
+    assert "검증됨" in wb.verification_note(rec)
+
+
+def test_the_note_names_the_lowest_drawdown_leg():
+    note = wb.verification_note(
+        wb.validation_record(_table(), at="t", mdd_test={"percentile": 89.2}))
+    assert "합친 규칙(200일선+VKOSPI)" in note
+
+
+def test_no_record_says_unmeasured_not_verified():
+    """**기록이 없는 것과 검증된 것은 다르다.**"""
+    assert "미측정" in wb.verification_note(None)
+
+
+def test_a_missing_ledger_does_not_break_the_bot(tmp_path):
+    assert wb.load_validation(tmp_path / "없음.json") is None
