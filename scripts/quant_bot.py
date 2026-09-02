@@ -321,6 +321,80 @@ def compute_confidence(phase_kr: str | None, phase_us: str | None,
 # ─── run() entrypoint ────────────────────────────
 
 
+# ─── 원자료 신선도 (v3.65) ─────────────────────────
+#
+# **2026-09-01 발견: 콴텍봇이 2년 8개월 낡은 데이터로 "현재 국면"을 냈다.**
+# FRED `KORLOLITONOSTSAM`(한국 OECD CLI)의 마지막 관측치가 **2024-01**이고
+# 다음 발표일이 "Not Available"인데, `compute_level`은 `series[-1]`을 그냥
+# 쓰고 `PhaseSnapshot`에는 기준일 필드조차 없었다. 그래서 화면에는 2026-09
+# 국면이 "Expansion"으로 확신 있게 떴다.
+#
+# VKOSPI에 5일 신선도 가드를 붙이면서 여기는 보지 않았다. 월간 지표라 기준이
+# 다를 뿐, **낡은 값을 현재로 쓰는 것**은 같은 실패다.
+#
+# OECD CLI는 정상적으로 1~2개월 지연된다. 3개월을 넘으면 알리고, 6개월을
+# 넘으면 국면을 내지 않는다 — 모르는 것을 "Expansion"이라고 말하지 않는다.
+SERIES_STALE_WARN_MONTHS = 3
+SERIES_STALE_DROP_MONTHS = 6
+
+
+def series_as_of(series: list[tuple[str, float]]) -> str | None:
+    """시계열의 기준일(마지막 시점 라벨). 빈 계열이면 None."""
+    if not series:
+        return None
+    return str(series[-1][0])
+
+
+def months_behind(as_of: str | None, today: str | None = None) -> int | None:
+    """기준일이 몇 개월 낡았는가(순수). 판정 불가면 None.
+
+    라벨은 `YYYY-MM` 또는 `YYYY-MM-DD` 둘 다 온다(ECOS는 `YYYYMM`).
+    """
+    if not as_of:
+        return None
+    digits = "".join(ch for ch in str(as_of) if ch.isdigit())
+    if len(digits) < 6:
+        return None
+    try:
+        y, m = int(digits[:4]), int(digits[4:6])
+    except ValueError:
+        return None
+    if not 1 <= m <= 12:
+        return None
+    if today:
+        td = "".join(ch for ch in str(today) if ch.isdigit())
+        ty, tm = int(td[:4]), int(td[4:6])
+    else:
+        now = datetime.now()
+        ty, tm = now.year, now.month
+    return (ty - y) * 12 + (tm - m)
+
+
+def freshness(series: list[tuple[str, float]], name: str = "",
+              today: str | None = None) -> dict:
+    """이 계열을 **현재 판정에 써도 되는가**(순수).
+
+    `usable=False`면 호출부는 그 신호를 None으로 둬야 한다 — 낡은 값으로
+    국면을 만들면 그 국면은 사실이 아니다.
+    """
+    as_of = series_as_of(series)
+    behind = months_behind(as_of, today)
+    if as_of is None:
+        return {"name": name, "as_of": None, "behind": None,
+                "usable": False, "note": "데이터 없음"}
+    if behind is None:
+        return {"name": name, "as_of": as_of, "behind": None,
+                "usable": False, "note": f"기준일을 읽을 수 없음({as_of})"}
+    if behind > SERIES_STALE_DROP_MONTHS:
+        return {"name": name, "as_of": as_of, "behind": behind, "usable": False,
+                "note": f"{behind}개월 낡음 — 현재 판정에 쓰지 않음"}
+    if behind > SERIES_STALE_WARN_MONTHS:
+        return {"name": name, "as_of": as_of, "behind": behind, "usable": True,
+                "note": f"{behind}개월 낡음 — 확인 필요"}
+    return {"name": name, "as_of": as_of, "behind": behind, "usable": True,
+            "note": ""}
+
+
 @dataclass
 class PhaseSnapshot:
     phase_kr: str | None
@@ -333,6 +407,10 @@ class PhaseSnapshot:
     consensus_phase: str | None
     confidence: float
     needs_recheck: bool  # 확신도 < 0.6
+    # v3.65 — **각 계열의 기준일을 반드시 들고 다닌다.** 이 필드가 없어서
+    # 2년 8개월 낡은 값이 "현재 국면"으로 나갔다(2026-09-01).
+    freshness: tuple = ()
+    stale: bool = False
 
 
 def snapshot(months: int = 24) -> PhaseSnapshot:
@@ -353,17 +431,29 @@ def snapshot(months: int = 24) -> PhaseSnapshot:
     except Exception as e:
         log.warning(f"BSI_KR fetch 실패: {e}")
 
-    cli_kr_level = compute_level(cli_kr)
-    cli_kr_momentum = compute_momentum(cli_kr)
-    cli_us_level = compute_level(cli_us)
-    cli_us_momentum = compute_momentum(cli_us)
-    bsi_trend = compute_momentum(bsi_kr, recent_n=3, baseline_n=6)
+    # **낡은 계열은 판정에서 뺀다.** 값이 있다는 것과 지금을 말한다는 것은
+    # 다르다 — 이 구분이 없어서 2024-01 값이 2026-09 국면이 됐다.
+    fresh_kr = freshness(cli_kr, "CLI_KR")
+    fresh_us = freshness(cli_us, "CLI_US")
+    fresh_bsi = freshness(bsi_kr, "BSI_KR")
+    for f in (fresh_kr, fresh_us, fresh_bsi):
+        if f["note"]:
+            log.warning("%s: %s (기준일 %s)", f["name"], f["note"], f["as_of"])
+
+    cli_kr_level = compute_level(cli_kr) if fresh_kr["usable"] else None
+    cli_kr_momentum = compute_momentum(cli_kr) if fresh_kr["usable"] else None
+    cli_us_level = compute_level(cli_us) if fresh_us["usable"] else None
+    cli_us_momentum = compute_momentum(cli_us) if fresh_us["usable"] else None
+    bsi_trend = (compute_momentum(bsi_kr, recent_n=3, baseline_n=6)
+                 if fresh_bsi["usable"] else None)
 
     phase_kr = classify_phase(cli_kr_level, cli_kr_momentum)
     phase_us = classify_phase(cli_us_level, cli_us_momentum)
 
     consensus, confidence = compute_confidence(phase_kr, phase_us, bsi_trend)
 
+    checks = (fresh_kr, fresh_us, fresh_bsi)
+    stale = any(not f["usable"] for f in checks)
     return PhaseSnapshot(
         phase_kr=phase_kr, phase_us=phase_us,
         cli_kr_level=cli_kr_level, cli_kr_momentum=cli_kr_momentum,
@@ -371,6 +461,7 @@ def snapshot(months: int = 24) -> PhaseSnapshot:
         bsi_trend=bsi_trend,
         consensus_phase=consensus, confidence=confidence,
         needs_recheck=confidence < 0.6 and consensus is not None,
+        freshness=checks, stale=stale,
     )
 
 
@@ -391,7 +482,17 @@ def format_snapshot(snap: PhaseSnapshot) -> str:
         if snap.needs_recheck:
             lines.append("⚠️ 확신도 60% 미만 — 2주 재진단 필요. 직전 국면 가중 유지 권장.")
     else:
-        lines.append("\n❌ 데이터 부족 — 국면 판단 불가 (ECOS/FRED 키 또는 네트워크 점검).")
+        # **원인을 정확히 말한다.** 예전에는 늘 "키 또는 네트워크 점검"이라고
+        # 했는데, 2026-09-01 실제 원인은 **시리즈가 2024-01에서 멈춘 것**이었다.
+        # 키를 점검하면 멀쩡하니 사람은 원인을 못 찾는다.
+        dead = [f for f in (snap.freshness or []) if not f["usable"] and f["as_of"]]
+        if dead:
+            lines.append("\n❌ 국면 판단 불가 — **원자료가 낡았습니다**")
+            for f in dead:
+                lines.append(f"   {f['name']}: 기준일 {f['as_of']} ({f['note']})")
+            lines.append("   키·네트워크 문제가 아닙니다. 시리즈 자체를 확인하세요.")
+        else:
+            lines.append("\n❌ 데이터 부족 — 국면 판단 불가 (ECOS/FRED 키 또는 네트워크 점검).")
 
     def _fmt_pair(label: str, level: float | None, momentum: float | None, phase: str | None) -> str:
         lev_s = f"{level:.2f}" if level is not None else "N/A"
@@ -399,6 +500,13 @@ def format_snapshot(snap: PhaseSnapshot) -> str:
         emo = PHASE_EMOJI.get(phase, "")
         ph_s = f"{emo} {phase}" if phase else "(판단 불가)"
         return f"  {label}: level={lev_s} · 모멘텀={mom_s} → {ph_s}"
+
+    if snap.stale and snap.consensus_phase:
+        # 일부만 낡아 국면은 나온 경우 — 그래도 무엇이 빠졌는지 말한다.
+        missing = [f"{f['name']}({f['as_of']})"
+                   for f in (snap.freshness or []) if not f["usable"]]
+        if missing:
+            lines.append(f"⚠️ 낡아서 제외된 신호: {', '.join(missing)}")
 
     lines.append("\n신호별:")
     lines.append(_fmt_pair("한국 CLI", snap.cli_kr_level, snap.cli_kr_momentum, snap.phase_kr))

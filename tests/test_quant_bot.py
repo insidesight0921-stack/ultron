@@ -15,10 +15,24 @@ import quant_bot as qb
 # ─── compute_momentum ───────────────────────────
 
 
-def _series(values: list[float], year: int = 2024) -> list[tuple[str, float]]:
-    """월간 더미 시계열 — TIME 문자열은 정렬용으로만 의미."""
+def _series(values: list[float], year: int | None = None) -> list[tuple[str, float]]:
+    """월간 더미 시계열 — **마지막 시점이 이번 달이 되도록** 역산한다.
+
+    v3.65에서 `snapshot()`에 신선도 검사가 붙었다. 고정 연도(2024)로 만들면
+    시간이 지날수록 더미가 낡아 국면이 None이 된다 — 실제로 2026-09에
+    그렇게 깨졌고, 그건 검사가 일한 것이지 테스트가 맞는 게 아니었다.
+    신선도 자체는 별도 테스트에서 본다.
+    """
+    from datetime import datetime
+
     out = []
-    y, m = year, 1
+    if year is None:
+        now = datetime.now()
+        span = max(len(values) - 1, 0)
+        y = now.year - (span + (12 - now.month)) // 12
+        m = (now.month - span - 1) % 12 + 1
+    else:
+        y, m = year, 1
     for v in values:
         out.append((f"{y:04d}{m:02d}", float(v)))
         m += 1
@@ -1234,3 +1248,77 @@ def test_recommend_uses_ohlcv_cache(tmp_path, monkeypatch):
         fundamentals=funds, market_caps=caps,
     )
     assert fetch_calls["n"] == 2, "두 번째 호출에서 fetch 호출되면 안 됨 (캐시)"
+
+
+# ─── 원자료 신선도 (v3.65, 2026-09-01 사고) ─────────
+#
+# **콴텍봇이 2년 8개월 낡은 데이터로 "현재 국면"을 냈다.**
+# FRED KORLOLITONOSTSAM의 마지막 관측치가 2024-01인데 `compute_level`은
+# `series[-1]`을 그냥 썼고 PhaseSnapshot에 기준일 필드조차 없었다.
+# 화면에는 2026-09 국면이 "Expansion"으로 확신 있게 떴다.
+
+
+def test_months_behind_reads_various_label_shapes():
+    """ECOS는 YYYYMM, FRED는 YYYY-MM-DD로 온다."""
+    assert qb.months_behind("2024-01-01", today="202609") == 32
+    assert qb.months_behind("202401", today="202609") == 32
+    assert qb.months_behind("2026-09", today="202609") == 0
+
+
+def test_an_unreadable_label_is_not_treated_as_fresh():
+    assert qb.months_behind("알수없음", today="202609") is None
+    f = qb.freshness([("알수없음", 1.0)], "X", today="202609")
+    assert f["usable"] is False
+
+
+def test_an_empty_series_is_not_usable():
+    f = qb.freshness([], "CLI_KR", today="202609")
+    assert f["usable"] is False and f["as_of"] is None
+
+
+def test_a_fresh_series_passes_without_a_note():
+    f = qb.freshness([("2026-08-01", 100.0)], "CLI_KR", today="202609")
+    assert f["usable"] is True and f["note"] == ""
+
+
+def test_a_slightly_late_series_warns_but_is_used():
+    """OECD CLI는 정상적으로 1~2개월 지연된다 — 그것까지 막으면 못 쓴다."""
+    f = qb.freshness([("2026-05-01", 100.0)], "CLI_KR", today="202609")
+    assert f["usable"] is True and "확인 필요" in f["note"]
+
+
+def test_a_long_dead_series_is_dropped_not_used():
+    """이게 실제로 일어난 일이다 — 2024-01 값으로 2026-09를 판정했다."""
+    f = qb.freshness([("2024-01-01", 100.2)], "CLI_KR", today="202609")
+    assert f["usable"] is False
+    assert "32개월" in f["note"]
+
+
+def test_a_stale_series_yields_no_phase(monkeypatch):
+    """**모르는 것을 'Expansion'이라고 말하지 않는다.**"""
+    dead = [(f"2023-{m:02d}", 100.0 + m * 0.3) for m in range(1, 13)] + \
+           [(f"2024-{m:02d}", 103.0 + m * 0.3) for m in range(1, 7)]
+
+    monkeypatch.setattr(qb, "fetch_series", lambda name, months=24: dead)
+    snap = qb.snapshot()
+    assert snap.phase_kr is None
+    assert snap.consensus_phase is None
+    assert snap.stale is True
+
+
+def test_the_snapshot_carries_each_series_as_of(monkeypatch):
+    """기준일 필드가 없어서 낡은 값이 현재로 나갔다 — 이제 들고 다닌다."""
+    monkeypatch.setattr(qb, "fetch_series",
+                        lambda name, months=24: [("2024-01-01", 100.2)])
+    snap = qb.snapshot()
+    assert snap.freshness
+    names = {f["name"] for f in snap.freshness}
+    assert names == {"CLI_KR", "CLI_US", "BSI_KR"}
+    assert all(f["as_of"] == "2024-01-01" for f in snap.freshness)
+
+
+def test_a_fresh_snapshot_is_not_marked_stale(monkeypatch):
+    fresh = _series([95.0 + i * 0.4 for i in range(24)])
+    monkeypatch.setattr(qb, "fetch_series", lambda name, months=24: fresh)
+    snap = qb.snapshot()
+    assert snap.stale is False

@@ -169,3 +169,21 @@ def test_saving_the_same_month_takes_the_newer_row(tmp_path):
     import json
     rows = json.loads(p.read_text(encoding="utf-8"))
     assert len(rows) == 1 and rows[0]["consensus"] == "Slowdown"
+
+
+def test_the_report_flags_a_history_that_ends_long_ago():
+    """2026-09-01: CLI_KR이 2024-01에서 멈춘 것을 이력 마지막 달을 보고서야
+    알았다 — 화면이 먼저 말해야 한다."""
+    hist = [{"month": f"2023-{m:02d}", "consensus": "Expansion"} for m in range(1, 13)]
+    hist += [{"month": "2024-01", "consensus": "Expansion"}]
+    msg = ph.format_report(hist)
+    assert "이력이" in msg and "끝납니다" in msg
+    assert "현재 국면 판정은" in msg
+
+
+def test_a_current_history_is_not_flagged():
+    from datetime import datetime
+
+    now = datetime.now()
+    hist = [{"month": f"{now.year}-{now.month:02d}", "consensus": "Expansion"}]
+    assert "🚨" not in ph.format_report(hist)

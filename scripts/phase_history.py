@@ -142,6 +142,20 @@ def format_report(history: list[dict]) -> str:
                else f"이력 {d['n']}개월 < {MIN_HISTORY}개월")
         lines.append(f"  ⚠️ 아직 측정 대상이 아닙니다({why}).")
         lines.append("     원자료를 더 길게 받으면 늘어납니다 — 기다릴 필요 없습니다.")
+    # **이력의 끝이 언제인지 말한다.** 2026-09-01에 CLI_KR이 2024-01에서
+    # 멈춘 것을 이력 마지막 달을 보고서야 알았다 — 화면이 먼저 말해야 한다.
+    try:
+        import quant_bot as qb
+
+        behind = qb.months_behind(d["span"][1])
+        if behind is not None and behind > qb.SERIES_STALE_WARN_MONTHS:
+            lines.append("")
+            lines.append(f"  🚨 이력이 {behind}개월 전에서 끝납니다({d['span'][1]}).")
+            lines.append("     원자료 시리즈가 멈췄을 수 있습니다 — **현재 국면 판정은")
+            lines.append("     이 데이터로 하면 안 됩니다.** 대체 시리즈를 찾아야 합니다.")
+    except Exception:  # noqa: BLE001
+        pass
+
     lines.append("")
     lines.append("_각 달의 국면은 **그 달까지의 값으로만** 계산했습니다(미래 미참조)._")
     lines.append("_다만 이건 '그때 봇이 그렇게 판단했다'가 아니라 "
