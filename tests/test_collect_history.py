@@ -108,6 +108,37 @@ def test_the_status_tells_you_to_collect_more_rather_than_wait(tmp_path, monkeyp
 
 # ─── 원인을 정확히 말한다 (2026-09-02) ──────────────────
 
+def test_the_env_file_is_read_before_blaming_the_environment(monkeypatch, tmp_path):
+    """**`.env`에 있는데도 「환경 변수 없음」이라 말하면 안 된다.**
+
+    2026-09-02: KRX_ID·KRX_PW가 `.env`에 있었는데 `collect_history`가 그
+    파일을 읽지 않아 실패했다. `env_config` 첫 줄에 「같은 원인이 두 번
+    나왔다」고 적혀 있고, 이것이 세 번째였다.
+    """
+    import env_config
+    env = tmp_path / ".env"
+    env.write_text("KRX_ID=someone\nKRX_PW=secret\n", encoding="utf-8")
+    monkeypatch.delenv("KRX_ID", raising=False)
+    monkeypatch.delenv("KRX_PW", raising=False)
+    monkeypatch.setattr(env_config, "default_env_path", lambda: env)
+    assert ch._ensure_krx_login() == []
+
+
+def test_the_missing_keys_are_named_one_by_one(monkeypatch):
+    monkeypatch.delenv("KRX_PW", raising=False)
+    monkeypatch.setenv("KRX_ID", "someone")
+    msg = ch._flow_failure_reason(None, missing=["KRX_PW"])
+    assert "KRX_PW" in msg and "KRX_ID" not in msg.split("비어 있는 키:")[1]
+
+
+def test_a_rejected_login_is_not_reported_as_a_missing_key(monkeypatch):
+    """키는 있는데 인증이 거부된 것과 키가 없는 것은 다른 문제다."""
+    monkeypatch.setenv("KRX_ID", "someone")
+    monkeypatch.setenv("KRX_PW", "wrong")
+    msg = ch._flow_failure_reason(RuntimeError("KRX 로그인 실패"), missing=[])
+    assert "인증에 실패" in msg and "비어 있는 키" not in msg
+
+
 def test_a_login_requirement_is_named_not_called_an_empty_response(monkeypatch):
     """**「응답이 비었습니다」는 네트워크를 의심하게 만든다.**
 
@@ -117,10 +148,11 @@ def test_a_login_requirement_is_named_not_called_an_empty_response(monkeypatch):
     monkeypatch.delenv("KRX_ID", raising=False)
     monkeypatch.delenv("KRX_PW", raising=False)
     msg = ch._flow_failure_reason(
-        RuntimeError("KRX 로그인 실패: KRX_ID 또는 KRX_PW 환경 변수가 없습니다"))
+        RuntimeError("KRX 로그인 실패: KRX_ID 또는 KRX_PW 환경 변수가 없습니다"),
+        missing=["KRX_ID", "KRX_PW"])
     assert "KRX 회원 로그인" in msg
     assert "KRX_ID" in msg and "KRX_PW" in msg
-    assert "네트워크·키 문제가 아닙니다" in msg
+    assert "네트워크·API 키 문제가 아닙니다" in msg
 
 
 def test_a_real_empty_response_is_still_reported_as_such(monkeypatch):

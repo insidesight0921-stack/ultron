@@ -128,7 +128,20 @@ def backfill_fx(months: int) -> dict:
     return {"item": "fx", "n": len(dates), "range": (dates[0], dates[-1])}
 
 
-def _flow_failure_reason(error) -> str:
+KRX_LOGIN_KEYS = ("KRX_ID", "KRX_PW")
+
+
+def _ensure_krx_login() -> list:
+    """`.env`에서 KRX 자격증명을 채우고 **끝내 비어 있는 키**를 돌려준다."""
+    try:
+        import env_config
+        return env_config.ensure_env(KRX_LOGIN_KEYS)
+    except ImportError:
+        import os
+        return [k for k in KRX_LOGIN_KEYS if not os.environ.get(k, "").strip()]
+
+
+def _flow_failure_reason(error, *, missing=None) -> str:
     """**원인을 정확히 말한다(2026-09-02).**
 
     이 경로는 KRX 회원 로그인을 요구하는데, 예전 메시지는 「응답이
@@ -139,12 +152,16 @@ def _flow_failure_reason(error) -> str:
     import os
 
     text = str(error or "")
-    missing = not (os.getenv("KRX_ID") and os.getenv("KRX_PW"))
-    if missing or "KRX_ID" in text or "로그인" in text:
-        return ("외국인 순매수는 **KRX 회원 로그인이 필요한 경로**입니다"
-                "(pykrx get_market_trading_value_by_date). "
-                ".env에 KRX_ID·KRX_PW를 넣으면 소급됩니다. "
-                "네트워크·키 문제가 아닙니다.")
+    if missing is None:
+        missing = [k for k in KRX_LOGIN_KEYS if not os.environ.get(k, "").strip()]
+    if missing:
+        return (f"외국인 순매수는 **KRX 회원 로그인이 필요한 경로**입니다"
+                f"(pykrx get_market_trading_value_by_date). "
+                f"비어 있는 키: {', '.join(missing)} — .env를 확인하세요. "
+                f"네트워크·API 키 문제가 아닙니다.")
+    if "KRX_ID" in text or "로그인" in text:
+        return ("KRX 로그인이 거부됐습니다 — KRX_ID·KRX_PW는 있으나 "
+                f"인증에 실패했습니다({text}). 계정·비밀번호를 확인하세요.")
     return f"외국인 순매수 응답이 비었습니다({text or '빈 응답'})."
 
 
@@ -154,12 +171,18 @@ def backfill_flow(days: int) -> dict:
     `proxy_indicators._foreign_net`이 최근 5일만 부르는 것은 스냅샷 용도라
     그런 것이고, 소급은 여기서 한다. 단위는 억원(원본은 원).
     """
-    import os
-
     from pykrx import stock
+
+    # **`.env`를 먼저 읽는다(2026-09-02).** KRX_ID·KRX_PW가 `.env`에 있는데도
+    # 「환경 변수가 설정되지 않았습니다」로 실패했다 — 이 스크립트가 `.env`를
+    # 읽지 않았기 때문이다. `env_config` 첫 줄에 「같은 원인이 두 번 나왔다」고
+    # 적혀 있는데 여기가 **세 번째**였다. 그래서 그 한 곳을 쓴다.
+    missing = _ensure_krx_login()
 
     end = datetime.now()
     start = end - timedelta(days=int(days * 1.6) + 30)   # 휴장일 여유
+    if missing:
+        raise RuntimeError(_flow_failure_reason(None, missing=missing))
     try:
         df = stock.get_market_trading_value_by_date(
             start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), "KOSPI")
