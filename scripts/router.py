@@ -380,7 +380,8 @@ def _build_system_prompt() -> str:
 # ─── 메인 함수 ───────────────────────────────────────
 
 
-def route(query: str, history: list[dict] | None = None, model: str = MASTER_MODEL) -> dict:
+def route(query: str, history: list[dict] | None = None, model: str = MASTER_MODEL,
+          *, think: bool | None = None) -> dict:
     """사용자 입력 + 직전 대화 → {"tool": ..., "args": {...}}.
 
     파라미터:
@@ -433,7 +434,7 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
         messages.extend(history)
     messages.append({"role": "user", "content": query})
 
-    body = json.dumps({
+    payload = {
         "model": model,
         "messages": messages,
         "stream": False,
@@ -444,7 +445,12 @@ def route(query: str, history: list[dict] | None = None, model: str = MASTER_MOD
             "num_ctx": 16384,
             "num_predict": 1024,  # JSON 출력 한도. format=json strict 모드가 한도 내 닫는 } 못 만들면 빈 응답으로 떨어짐 → 여유 있게.
         },
-    }).encode("utf-8")
+    }
+    # 추론 모델(Qwen3.x)을 후보로 잴 때만 쓴다. None이면 필드를 보내지 않아
+    # 기존 동작과 같다(비추론 모델은 이 필드를 거부할 수 있다). 2026-09-04.
+    if think is not None:
+        payload["think"] = think
+    body = json.dumps(payload).encode("utf-8")
 
     req = Request(
         f"{OLLAMA_URL}/api/chat",
