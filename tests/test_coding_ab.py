@@ -177,3 +177,42 @@ def test_the_conditions_match_the_bot():
     assert ab.NUM_CTX == 16384
     assert ab.TEMPERATURE == 0.2
     assert coding_bot.QWEN_MODEL in ("qwen2.5-coder:32b", coding_bot.QWEN_MODEL)
+
+
+def test_a_thinking_gap_is_flagged_in_the_report():
+    """**tok/s가 더 빠른데 21배 느렸다** — 답 토큰이 37배였다(2026-09-04).
+    이 숫자가 보고서에 없으면 「생성이 느리다」로 오독한다."""
+    rows = ([{"model": "A", "task": "t", "ok": True, "why": "통과", "wall": 5.6,
+              "eval_count": 76, "eval_duration_ns": 5.6e9},
+             {"model": "B", "task": "t", "ok": True, "why": "통과", "wall": 117.7,
+              "eval_count": 2837, "eval_duration_ns": 117.7e9}])
+    s = ab.score(rows)
+    assert s["A"]["tokens_avg"] == 76 and s["B"]["tokens_avg"] == 2837
+    msg = ab.format_report(rows, s)
+    assert "thinking 모드일 가능성" in msg and "--think off" in msg
+
+
+def test_similar_token_counts_do_not_trigger_the_flag():
+    rows = ([{"model": "A", "task": "t", "ok": True, "why": "통과", "wall": 5.0,
+              "eval_count": 80, "eval_duration_ns": 5e9},
+             {"model": "B", "task": "t", "ok": True, "why": "통과", "wall": 6.0,
+              "eval_count": 120, "eval_duration_ns": 6e9}])
+    assert "thinking" not in ab.format_report(rows, ab.score(rows))
+
+
+def test_think_flag_reaches_the_payload(monkeypatch):
+    seen = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"message":{"content":"```python\\nx=1\\n```"},"eval_count":3,"eval_duration":1000}'
+
+    def fake_urlopen(req, timeout=0):
+        seen["body"] = __import__("json").loads(req.data.decode("utf-8"))
+        return _Resp()
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ab.ask("m", "do", think=False)
+    assert seen["body"]["think"] is False
+    ab.ask("m", "do")
+    assert "think" not in seen["body"]

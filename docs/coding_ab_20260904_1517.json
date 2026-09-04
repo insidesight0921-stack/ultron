@@ -1,0 +1,231 @@
+{
+ "at": "2026-09-04T15:17:16",
+ "models": [
+  "qwen2.5-coder:32b",
+  "qwen3.6:27b"
+ ],
+ "runs": 1,
+ "results": [
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "파싱: 종목코드 추출",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 9.3,
+   "eval_count": 38,
+   "eval_duration_ns": 2716801000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "날짜: 다음 거래일",
+   "run": 0,
+   "ok": false,
+   "why": "AssertionError",
+   "wall": 6.2,
+   "eval_count": 78,
+   "eval_duration_ns": 5791555000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "수치: 최대 낙폭",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 8.5,
+   "eval_count": 108,
+   "eval_duration_ns": 8115778000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "버그 수정: 이동평균",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 5.2,
+   "eval_count": 61,
+   "eval_duration_ns": 4714563000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "문자열: 천 단위 구분",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 2.1,
+   "eval_count": 23,
+   "eval_duration_ns": 1700998000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "자료구조: 상위 N",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 4.9,
+   "eval_count": 60,
+   "eval_duration_ns": 4451295000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "JSONL: 깨진 줄 건너뛰기",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 5.2,
+   "eval_count": 66,
+   "eval_duration_ns": 4745614000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "수치: 수익률 → 누적",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 4.2,
+   "eval_count": 52,
+   "eval_duration_ns": 3761449000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "정규식: 시각 파싱",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 7.3,
+   "eval_count": 95,
+   "eval_duration_ns": 6852876000
+  },
+  {
+   "model": "qwen2.5-coder:32b",
+   "task": "리팩터: 중복 제거",
+   "run": 0,
+   "ok": false,
+   "why": "AssertionError",
+   "wall": 3.3,
+   "eval_count": 41,
+   "eval_duration_ns": 2919973000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "파싱: 종목코드 추출",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 93.4,
+   "eval_count": 2151,
+   "eval_duration_ns": 88173576000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "날짜: 다음 거래일",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 83.4,
+   "eval_count": 2165,
+   "eval_duration_ns": 82736772000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "수치: 최대 낙폭",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 136.8,
+   "eval_count": 3414,
+   "eval_duration_ns": 136151647999
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "버그 수정: 이동평균",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 287.2,
+   "eval_count": 6714,
+   "eval_duration_ns": 286531574000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "문자열: 천 단위 구분",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 18.4,
+   "eval_count": 416,
+   "eval_duration_ns": 17632019000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "자료구조: 상위 N",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 70.7,
+   "eval_count": 1643,
+   "eval_duration_ns": 70034431000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "JSONL: 깨진 줄 건너뛰기",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 50.2,
+   "eval_count": 1182,
+   "eval_duration_ns": 49500568000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "수치: 수익률 → 누적",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 182.1,
+   "eval_count": 4363,
+   "eval_duration_ns": 181478833000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "정규식: 시각 파싱",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 210.4,
+   "eval_count": 4921,
+   "eval_duration_ns": 209558442000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "리팩터: 중복 제거",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 44.6,
+   "eval_count": 1098,
+   "eval_duration_ns": 43814841000
+  }
+ ],
+ "summary": {
+  "qwen2.5-coder:32b": {
+   "pass": 8,
+   "n": 10,
+   "wall": 56.2,
+   "tokens": 622,
+   "eval_s": 45.770902,
+   "tok_s": 13.6,
+   "wall_avg": 5.6
+  },
+  "qwen3.6:27b": {
+   "pass": 10,
+   "n": 10,
+   "wall": 1177.2,
+   "tokens": 28067,
+   "eval_s": 1165.6127039990001,
+   "tok_s": 24.1,
+   "wall_avg": 117.7
+  }
+ },
+ "verdict": "통과 수 차이 2건 — n=10에서는 우연과 구분되지 않는다. 「qwen2.5-coder:32b가 명백히 나쁘지 않다」까지만 말할 수 있다"
+}

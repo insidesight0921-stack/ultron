@@ -150,6 +150,8 @@ def score(results: list[dict]) -> dict:
     for m in out.values():
         m["tok_s"] = round(m["tokens"] / m["eval_s"], 1) if m["eval_s"] else None
         m["wall_avg"] = round(m["wall"] / m["n"], 1) if m["n"] else None
+        # **답 하나의 토큰 수.** 이게 없어서 "느리다"를 "생성이 느리다"로 읽을 뻔했다.
+        m["tokens_avg"] = round(m["tokens"] / m["n"]) if m["n"] else None
     return out
 
 
@@ -181,7 +183,12 @@ def format_report(results: list[dict], summary: dict) -> str:
     lines.append("")
     for m, s in summary.items():
         lines.append(f"  {m}: 통과 {s['pass']}/{s['n']} · 평균 {s['wall_avg']}s · "
-                     f"{s['tok_s'] if s['tok_s'] is not None else '—'} tok/s")
+                     f"{s['tok_s'] if s['tok_s'] is not None else '—'} tok/s · "
+                     f"답당 {s.get('tokens_avg') if s.get('tokens_avg') is not None else '—'}토큰")
+    toks = [s.get("tokens_avg") for s in summary.values() if s.get("tokens_avg")]
+    if len(toks) == 2 and max(toks) >= 5 * min(toks):
+        lines.append("  ⚠️ 답 토큰 수가 5배 이상 차이 — 한쪽이 thinking 모드일 가능성. "
+                     "`--think off`로 같은 모드에서 다시 재야 속도 비교가 뜻을 가진다.")
     lines.append("")
     lines.append(f"  판정(사전 규칙): {verdict(summary)}")
     lines.append("  _정확도가 먼저, 동률이면 속도. 과제 10개는 「명백히 나쁘지 않은가」를 보는 크기다._")
@@ -190,17 +197,26 @@ def format_report(results: list[dict], summary: dict) -> str:
 
 # ─── I/O ─────────────────────────────────────────────
 
-def ask(model: str, instruction: str) -> dict:
-    """봇과 같은 조건으로 한 번 묻는다."""
+def ask(model: str, instruction: str, *, think: Optional[bool] = None) -> dict:
+    """봇과 같은 조건으로 한 번 묻는다.
+
+    `think`: Qwen3.x 같은 추론 모델은 기본으로 thinking 토큰을 낸다.
+    2026-09-04 첫 A/B에서 qwen3.6:27b가 답 하나에 ~2,800토큰(32b는 ~76)을
+    내며 평균 117초가 걸렸다 — tok/s는 오히려 더 빨랐다(24.1 vs 13.6).
+    **다른 생성 모드를 같은 조건인 척 비교한 것**이다. False면 끈다.
+    """
     from urllib.request import Request, urlopen
 
-    body = json.dumps({
+    payload = {
         "model": model,
         "messages": [{"role": "system", "content": SYSTEM},
                      {"role": "user", "content": instruction}],
         "stream": False,
         "options": {"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
-    }).encode("utf-8")
+    }
+    if think is not None:
+        payload["think"] = think
+    body = json.dumps(payload).encode("utf-8")
     req = Request(f"{OLLAMA_URL}/api/chat", data=body,
                   headers={"Content-Type": "application/json"})
     t0 = time.time()
@@ -212,13 +228,14 @@ def ask(model: str, instruction: str) -> dict:
             "eval_duration_ns": resp.get("eval_duration")}
 
 
-def run(models: list[str], *, runs: int = 1, tasks=TASKS, on_progress=None) -> list[dict]:
+def run(models: list[str], *, runs: int = 1, tasks=TASKS, on_progress=None,
+        think: Optional[bool] = None) -> list[dict]:
     results = []
     for model in models:
         for name, instruction, check in tasks:
             for k in range(runs):
                 try:
-                    got = ask(model, instruction)
+                    got = ask(model, instruction, think=think)
                     ok, why = grade(extract_code(got["answer"]), check)
                     rec = {"model": model, "task": name, "run": k, "ok": ok, "why": why,
                            **{key: got[key] for key in ("wall", "eval_count", "eval_duration_ns")}}
@@ -240,17 +257,20 @@ def _cli() -> int:
     ap.add_argument("--models", nargs="+", default=["qwen2.5-coder:32b", "qwen3.6:27b"])
     ap.add_argument("--runs", type=int, default=1, help="과제당 반복(기본 1)")
     ap.add_argument("--out", default=None, help="결과 JSON 저장 경로")
+    ap.add_argument("--think", choices=("auto", "off", "on"), default="auto",
+                    help="추론(thinking) 토큰: auto=모델 기본, off=끔, on=켬")
     args = ap.parse_args()
+    think = {"auto": None, "off": False, "on": True}[args.think]
 
     print(f"  모델 {args.models} · 과제 {len(TASKS)}개 · 반복 {args.runs} · "
-          f"조건 temp={TEMPERATURE} num_ctx={NUM_CTX}")
+          f"조건 temp={TEMPERATURE} num_ctx={NUM_CTX} · thinking={args.think}")
     print()
 
     def progress(rec):
         print(f"  {'○' if rec['ok'] else '✗'} {rec['model']:20} {rec['task']:18} "
               f"{rec['wall']:>6}s  {rec['why']}")
 
-    results = run(args.models, runs=args.runs, on_progress=progress)
+    results = run(args.models, runs=args.runs, on_progress=progress, think=think)
     summary = score(results)
     print()
     print(format_report(results, summary))
@@ -260,6 +280,7 @@ def _cli() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"at": datetime.now().isoformat(timespec="seconds"),
                                "models": args.models, "runs": args.runs,
+                               "think": args.think,
                                "results": results, "summary": summary,
                                "verdict": verdict(summary)},
                               ensure_ascii=False, indent=1), encoding="utf-8")

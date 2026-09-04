@@ -28,6 +28,12 @@ from urllib.request import Request, urlopen
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 QWEN_MODEL = os.getenv("CODING_BOT_QWEN_MODEL", "qwen2.5-coder:32b").strip()
+# Qwen3.x 같은 추론 모델은 기본으로 thinking 토큰을 낸다. 2026-09-04 A/B에서
+# qwen3.6:27b가 함수 하나에 평균 117초(답당 ~2,800토큰)를 썼다 — fast 티어가
+# 아니게 된다. "off"면 /api/chat에 think=false를 보낸다. 비추론 모델(qwen2.5)에
+# 이 필드를 보내면 거부될 수 있어 **설정했을 때만** 보낸다.
+_THINK = os.getenv("CODING_BOT_QWEN_THINK", "").strip().lower()
+QWEN_THINK = {"off": False, "on": True}.get(_THINK)   # 미설정 → None(보내지 않음)
 CLAUDE_MODEL = os.getenv("CODING_BOT_CLAUDE_MODEL", "claude-sonnet-4-6").strip()
 KEEP_ALIVE = "30m"
 
@@ -112,7 +118,7 @@ ACTION_SYSTEM_PROMPTS = {
 
 def _call_qwen(messages: list[dict], num_predict: int = -1, num_ctx: int = 16384) -> str:
     """Qwen2.5-Coder via ollama. RuntimeError 던질 수 있음."""
-    body = json.dumps({
+    payload = {
         "model": QWEN_MODEL,
         "messages": messages,
         "stream": False,
@@ -122,7 +128,10 @@ def _call_qwen(messages: list[dict], num_predict: int = -1, num_ctx: int = 16384
             "num_ctx": num_ctx,
             "num_predict": num_predict,
         },
-    }).encode("utf-8")
+    }
+    if QWEN_THINK is not None:
+        payload["think"] = QWEN_THINK
+    body = json.dumps(payload).encode("utf-8")
     req = Request(
         f"{OLLAMA_URL}/api/chat",
         data=body,
