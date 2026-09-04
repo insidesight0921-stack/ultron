@@ -1,0 +1,123 @@
+{
+ "at": "2026-09-04T15:39:57",
+ "models": [
+  "qwen3.6:27b"
+ ],
+ "runs": 1,
+ "think": "off",
+ "results": [
+  {
+   "model": "qwen3.6:27b",
+   "task": "파싱: 종목코드 추출",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 7.3,
+   "eval_count": 79,
+   "eval_duration_ns": 2820874000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "날짜: 다음 거래일",
+   "run": 0,
+   "ok": false,
+   "why": "AssertionError",
+   "wall": 3.5,
+   "eval_count": 84,
+   "eval_duration_ns": 2943176000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "수치: 최대 낙폭",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 4.6,
+   "eval_count": 115,
+   "eval_duration_ns": 3960024000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "버그 수정: 이동평균",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 3.0,
+   "eval_count": 71,
+   "eval_duration_ns": 2300037000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "문자열: 천 단위 구분",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 1.5,
+   "eval_count": 25,
+   "eval_duration_ns": 898553000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "자료구조: 상위 N",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 4.7,
+   "eval_count": 111,
+   "eval_duration_ns": 4136149000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "JSONL: 깨진 줄 건너뛰기",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 4.0,
+   "eval_count": 98,
+   "eval_duration_ns": 3451529000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "수치: 수익률 → 누적",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 2.6,
+   "eval_count": 63,
+   "eval_duration_ns": 2036262000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "정규식: 시각 파싱",
+   "run": 0,
+   "ok": false,
+   "why": "AssertionError",
+   "wall": 5.1,
+   "eval_count": 138,
+   "eval_duration_ns": 4459627000
+  },
+  {
+   "model": "qwen3.6:27b",
+   "task": "리팩터: 중복 제거",
+   "run": 0,
+   "ok": true,
+   "why": "통과",
+   "wall": 2.9,
+   "eval_count": 70,
+   "eval_duration_ns": 2290117000
+  }
+ ],
+ "summary": {
+  "qwen3.6:27b": {
+   "pass": 8,
+   "n": 10,
+   "wall": 39.199999999999996,
+   "tokens": 854,
+   "eval_s": 29.296348000000002,
+   "tok_s": 29.2,
+   "wall_avg": 3.9,
+   "tokens_avg": 85
+  }
+ },
+ "verdict": "모델이 둘이 아니다"
+}
