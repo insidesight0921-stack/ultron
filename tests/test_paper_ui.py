@@ -1090,7 +1090,13 @@ def test_signal_accuracy_reports_what_each_horizon_has(client, monkeypatch):
 
 def test_the_signal_tab_shows_the_horizon_counts(client):
     html = client.get("/").text
-    assert "평가 완료:" in html and "거래일이 지나지 않음" in html
+    assert "평가 완료(실행신호):" in html and "거래일이 지나지 않음" in html
+
+
+def test_the_signal_tab_says_hold_is_not_scored(client):
+    """홀딩유지는 방향 예측이 아니다(2026-09-16) — 건수만 보이고 채점하지 않는다."""
+    html = client.get("/").text
+    assert "채점 안 함" in html and "같은 날 같은 신호는 1건으로 센다" in html
 
 
 def test_the_signal_card_shows_how_many_days_the_sample_spans(client):
@@ -1098,3 +1104,20 @@ def test_the_signal_card_shows_how_many_days_the_sample_spans(client):
     html = client.get("/").text
     assert "sigaccDays" in html and "일치" in html
     assert "독립 단위는 건이 아니라 날" in html
+
+
+def test_signal_accuracy_counts_hold_rows_nowhere_but_in_hold(client, monkeypatch):
+    """홀딩유지는 evaluated·pending·recent 어디에도 안 들어가고 summary.hold에만 센다."""
+    import signal_review as sr
+    def row(i, action, ret):
+        return {"key": f"k{i}", "at": f"2026-09-0{i % 9 + 1} 10:00", "day": f"2026-09-0{i % 9 + 1}",
+                "ticker": "005930", "ret_1d": ret, "edge_1d": 0.5, "base_1d": 0.5,
+                "ret_5d": None, "edge_5d": None, "base_5d": None,
+                "strategy": "MACD", "action": action, "suppressed": False,
+                "shadow": False, "pending": True}
+    rows = [row(i, "매수", 1.0) for i in range(3)] + [row(10 + i, "홀딩유지", -9.0) for i in range(5)]
+    monkeypatch.setattr(sr, "load_outcomes", lambda *a, **k: {r["key"]: r for r in rows})
+    d = client.get("/api/signal/accuracy?horizon=1").json()
+    assert d["evaluated"] == 3 and d["pending"] == 0
+    assert all(r["action"] != "홀딩유지" for r in d["recent"])
+    assert d["summary"]["hold"]["n"] == 5

@@ -847,13 +847,15 @@ async def api_signal_accuracy(horizon: int = 5):
         # 카드는 125건인데 표는 「평가된 신호 없음」·상태줄은 「평가 0건」이었다.
         # 같은 응답 안에서 세 숫자가 서로 다른 규칙을 쓰고 있었다.
         key = f"ret_{int(horizon)}d"
-        pending = sum(1 for o in outcomes.values() if o.get(key) is None)
+        # 홀딩유지는 채점 대상이 아니다(2026-09-16) — 건수도 summary.hold로만 나간다.
+        scored = [o for o in outcomes.values() if sv.is_scored(o)]
+        pending = sum(1 for o in scored if o.get(key) is None)
         recent = sorted(
-            (o for o in outcomes.values() if o.get(key) is not None),
+            (o for o in scored if o.get(key) is not None),
             key=lambda o: str(o.get("at") or ""), reverse=True,
         )[:30]
         return JSONResponse({"summary": summary, "pending": pending,
-                             "evaluated": len(outcomes) - pending, "recent": recent})
+                             "evaluated": len(scored) - pending, "recent": recent})
     except Exception as e:
         log.exception("신호 적중률 조회 실패")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2584,11 +2586,17 @@ async function loadSignalAccuracy() {
     const availText = Object.keys(avail).length
       ? Object.entries(avail).map(([h, n]) => `${h}거래일 ${n}건`).join(" · ")
       : "";
+    // 홀딩유지는 채점하지 않는다(2026-09-16) — 방향 예측이 아니라서. 건수만 말한다.
+    const hold = s.hold || {};
+    const holdText = hold.n
+      ? `<p class="muted" style="margin:0 0 0.6rem;">홀딩유지 ${hold.n}건 · ${hold.days}일 — 채점 안 함(포지션 유지 판단이지 방향 예측이 아님). ` +
+        `같은 날 같은 신호는 1건으로 센다.</p>`
+      : "";
     box.innerHTML = (availText
-      ? `<p class="muted" style="margin:0 0 0.6rem;">평가 완료: ${availText}` +
+      ? `<p class="muted" style="margin:0 0 0.6rem;">평가 완료(실행신호): ${availText}` +
         (s.waiting ? ` · 이 지평 대기 ${s.waiting}건(아직 ${horizon}거래일이 지나지 않음)` : "") +
         `</p>`
-      : "") + cards.join("");
+      : "") + holdText + cards.join("");
 
     const rows = d.recent || [];
     const key = `ret_${horizon}d`, bkey = `base_${horizon}d`, ekey = `edge_${horizon}d`;

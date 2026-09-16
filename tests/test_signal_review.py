@@ -157,10 +157,14 @@ def test_verdict_holds_below_min_sample():
     assert sr.summarize(rows)["total"]["verdict"] == "표본 부족"
 
 
-def test_verdict_needs_positive_edge_not_just_positive_return():
-    """수익이 나도 베이스라인보다 못하면 우위가 아니다."""
-    rows = [_out(5, -1) for _ in range(sr.MIN_SAMPLE)]
-    assert sr.summarize(rows)["total"]["verdict"] == "우위 없음"
+def test_verdict_is_not_given_by_edge_alone():
+    """수익이 나고 edge가 양수라도, 방향이 한 종류뿐이면 검정할 수 없다(2026-09-16).
+
+    전에는 edge>0이면 「우위 있음」이었다. 내리는 장에 약세 신호만 내면 edge는
+    저절로 양수라서, 그 규칙은 시장 방향을 신호의 공으로 돌렸다.
+    """
+    rows = [_out(5, 1) for _ in range(sr.MIN_SAMPLE)]
+    assert sr.summarize(rows)["total"]["verdict"] == "검정 불가(한 방향뿐)"
 
 
 def test_format_summary_reports_empty_state():
@@ -383,7 +387,7 @@ def test_enough_days_allows_a_verdict():
     rows = [_partial(key=f"k{i}", day=f"2026-09-{(i % 6) + 1:02d}") for i in range(20)]
     got = sr.summarize(rows, horizon=1)
     assert got["total"]["days"] == 6
-    assert got["total"]["verdict"] in ("우위 있음", "우위 없음")
+    assert got["total"]["verdict"] not in ("표본 부족", "날 부족")
 
 
 def test_the_day_warning_is_printed():
@@ -397,3 +401,218 @@ def test_sample_shortage_still_wins_over_day_shortage():
     """건수가 모자라면 그것이 먼저다 — 두 결함을 한 문장에 섞지 않는다."""
     rows = [_partial(key=f"k{i}", day=f"2026-09-{i+1:02d}") for i in range(5)]
     assert sr.summarize(rows, horizon=1)["total"]["verdict"] == "표본 부족"
+
+
+# ─── 신호 하나가 12번 세어지고 있었다 (2026-09-16) ────────
+
+
+def test_the_key_is_the_day_not_the_hour():
+    """매시간 다시 적힌 같은 신호는 같은 키다."""
+    a = sr.signal_key(_sig(at="2026-09-01 09:14"))
+    b = sr.signal_key(_sig(at="2026-09-01 15:14"))
+    assert a == b
+    assert a != sr.signal_key(_sig(at="2026-09-02 09:14"))       # 다른 날은 다른 신호
+    assert a != sr.signal_key(_sig(at="2026-09-01 09:14", action="매도"))
+
+
+def test_first_per_key_keeps_the_first_sighting_and_its_price():
+    sigs = [_sig(at="2026-09-01 09:14", price=100.0),
+            _sig(at="2026-09-01 10:14", price=103.0),
+            _sig(at="2026-09-01 11:14", price=97.0),
+            _sig(at="2026-09-02 09:14", price=90.0)]
+    kept = sr.first_per_key(sigs)
+    assert [s["price"] for s in kept] == [100.0, 90.0]
+
+
+def test_refresh_evaluates_a_repeated_signal_once(tmp_path):
+    """음성 대조가 아니라 양성: 12번 적힌 신호가 결과 원장에 1행으로 남는다."""
+    sig = tmp_path / "signal_log.jsonl"
+    out = tmp_path / "signal_outcomes.jsonl"
+    sig.write_text("".join(json.dumps(_sig(at=f"2026-08-03 {h:02d}:00", price=100.0 + h))
+                           + "\n" for h in range(9, 16)), encoding="utf-8")
+    outcomes, updated = sr.refresh(sig, out, horizons=(1,),
+                                   fetch=lambda s: _series([100, 100, 100, 110, 120]))
+    assert updated == 1 and len(outcomes) == 1
+    (row,) = outcomes.values()
+    assert row["entry"] == 109.0                                  # 처음 본 가격
+    assert row["at"] == "2026-08-03 09:00"
+
+
+def test_two_different_signals_on_the_same_day_are_still_two(tmp_path):
+    """음성 대조: 접기가 과하지 않다 — 다른 전략·다른 종목은 살아남는다."""
+    sig = tmp_path / "signal_log.jsonl"
+    rows = [_sig(at="2026-08-03 09:00"), _sig(at="2026-08-03 09:00", strategy="MACD"),
+            _sig(at="2026-08-03 09:00", ticker="005930"),
+            _sig(at="2026-08-03 09:00", action="매도")]
+    sig.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    outcomes, updated = sr.refresh(sig, tmp_path / "o.jsonl", horizons=(1,),
+                                   fetch=lambda s: _series([100, 100, 100, 110, 120]))
+    assert updated == 4 and len(outcomes) == 4
+
+
+def test_legacy_hour_keys_collapse_to_the_day_key_on_load(tmp_path):
+    """옛 원장(시각 키 7행)은 읽을 때 1행으로 접히고, 가장 이른 행이 남는다."""
+    out = tmp_path / "signal_outcomes.jsonl"
+    legacy = {}
+    for h in range(9, 16):
+        at = f"2026-09-01 {h:02d}:14:44"
+        k = f"{at}|005930|MACD|매수"
+        legacy[k] = {"key": k, "at": at, "day": "2026-09-01", "ticker": "005930",
+                     "strategy": "MACD", "action": "매수", "suppressed": False,
+                     "entry": 100.0 + h, "ret_1d": 1.0, "pending": False}
+    sr.save_outcomes(legacy, out)
+    loaded = sr.load_outcomes(out)
+    assert list(loaded) == ["2026-09-01|005930|MACD|매수"]
+    assert loaded["2026-09-01|005930|MACD|매수"]["entry"] == 109.0
+
+
+def test_refresh_rewrites_a_legacy_ledger_even_with_nothing_new(tmp_path):
+    """접힌 형태로 원장을 다시 써서, 다음 읽기가 접을 것이 없게 한다."""
+    out = tmp_path / "signal_outcomes.jsonl"
+    sig = tmp_path / "signal_log.jsonl"
+    sig.write_text("", encoding="utf-8")
+    legacy = {}
+    for h in (9, 10):
+        at = f"2026-09-01 {h:02d}:14"
+        k = f"{at}|005930|MACD|매수"
+        legacy[k] = {"key": k, "at": at, "day": "2026-09-01", "ticker": "005930",
+                     "strategy": "MACD", "action": "매수", "ret_1d": 1.0, "pending": False}
+    sr.save_outcomes(legacy, out)
+    assert sr._raw_outcome_rows(out) == 2
+    _, updated = sr.refresh(sig, out, horizons=(1,), fetch=lambda s: [])
+    assert updated == 0 and sr._raw_outcome_rows(out) == 1
+
+
+def test_rows_without_a_ticker_keep_their_stored_key_on_load(tmp_path):
+    p = tmp_path / "o.jsonl"
+    sr.save_outcomes({"k1": {"key": "k1", "ret_5d": 1.0}}, p)
+    assert sr.load_outcomes(p)["k1"]["ret_5d"] == 1.0
+
+
+# ─── 홀딩유지는 채점하지 않는다 (2026-09-16) ────────────
+
+
+def test_hold_rows_are_counted_but_not_scored():
+    rows = [_out(5, 3), _out(-2, -1),
+            _out(-9, -9, action="홀딩유지"), _out(-9, -9, action="홀딩유지")]
+    s = sr.summarize(rows, horizon=5)
+    assert s["total"]["n"] == 2 and s["total"]["hit_rate"] == 50.0
+    assert s["hold"] == {"n": 2, "days": 2}
+    assert "홀딩유지" not in s["by_action"]
+
+
+def test_hold_rows_do_not_change_the_verdict():
+    """음성 대조: 홀딩유지 100건이 나빠도 실행신호 판정은 그대로다."""
+    good = [_out(2, 1) for _ in range(12)]
+    s_clean = sr.summarize(good, horizon=5)
+    s_dirty = sr.summarize(good + [_out(-20, -20, action="홀딩유지") for _ in range(100)],
+                           horizon=5)
+    assert s_clean["total"] == s_dirty["total"]
+    assert s_clean["by_strategy"] == s_dirty["by_strategy"]
+    assert s_clean["mtf"] == s_dirty["mtf"]
+
+
+def test_available_and_waiting_count_scored_rows_only():
+    rows = [_partial(key="a"), _partial(key="b", action="홀딩유지"),
+            _partial(key="c", action="홀딩유지", ret_1d=None)]
+    s = sr.summarize(rows, horizon=5)
+    assert s["available"] == {1: 1, 5: 0}
+    assert s["waiting"] == 1
+
+
+def test_format_summary_says_hold_is_not_scored():
+    rows = [_out(2, 1) for _ in range(12)] + [_out(0, 0, action="홀딩유지")]
+    text = sr.format_summary(sr.summarize(rows, horizon=5))
+    assert "홀딩유지: 1건" in text and "채점 안 함" in text
+
+
+# ─── 판정은 날 안 방향표 섞기 순열검정으로 (2026-09-16) ────
+
+
+def _mixed_day(day, bull_rets, bear_rets):
+    """같은 날에 강세 신호(원수익률 bull_rets)와 약세 신호(원수익률 bear_rets)."""
+    rows = []
+    for i, raw in enumerate(bull_rets):
+        rows.append({"key": f"{day}-b{i}", "day": day, "ticker": f"B{i}", "strategy": "S",
+                     "action": "매수", "suppressed": False, "shadow": False,
+                     "ret_1d": raw, "edge_1d": raw})
+    for i, raw in enumerate(bear_rets):
+        rows.append({"key": f"{day}-s{i}", "day": day, "ticker": f"S{i}", "strategy": "S",
+                     "action": "매도", "suppressed": False, "shadow": False,
+                     "ret_1d": -raw, "edge_1d": -raw})       # 저장값은 방향정렬
+    return rows
+
+
+def test_a_bot_that_picks_direction_well_clears_the_bar():
+    """양성 대조: 매일 오르는 종목에 매수, 내리는 종목에 매도를 붙이면 백분위가 높다."""
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[2.0, 1.5, 1.0], bear_rets=[-2.0, -1.5, -1.0])
+    s = sr.summarize(rows, horizon=1)
+    assert s["total"]["perm"]["pct"] >= sr.PERM_BAR
+    assert s["total"]["verdict"].startswith("우위 있음")
+
+
+def test_a_falling_market_with_only_bearish_calls_is_not_an_edge():
+    """음성 대조 ①: 방향표가 무작위면 백분위는 우연 범위다.
+
+    각 날 종목 수익률은 같은데 어느 종목에 매수·매도를 붙였는지가 무작위 —
+    그래도 시장이 내리면 약세 쪽 적중률·edge는 높게 나온다. 판정은 속지 않아야 한다.
+    """
+    import random
+    rng = random.Random(3)
+    rows = []
+    for d in range(1, 13):
+        rets = [rng.gauss(-1.0, 1.5) for _ in range(6)]      # 내리는 장
+        rng.shuffle(rets)
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=rets[:2], bear_rets=rets[2:])
+    s = sr.summarize(rows, horizon=1)
+    assert s["total"]["avg_ret"] > 0                          # 겉보기 성적은 좋다
+    assert s["total"]["perm"]["pct"] < sr.PERM_BAR
+    assert s["total"]["verdict"].startswith("우연 범위")
+
+
+def test_a_single_direction_group_cannot_be_tested():
+    """음성 대조 ②: 매도만 있는 묶음은 섞어도 달라질 게 없다 → 검정 불가."""
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[], bear_rets=[-2.0, -1.0])
+    assert sr.within_day_percentile(rows, 1) is None
+    assert sr.summarize(rows, horizon=1)["total"]["verdict"] == "검정 불가(한 방향뿐)"
+
+
+def test_the_permutation_is_deterministic():
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[1.0, -0.5], bear_rets=[-1.0, 0.5])
+    a = sr.within_day_percentile(rows, 1)
+    b = sr.within_day_percentile(rows, 1)
+    assert a == b and a["pct"] is not None
+
+
+def test_the_permutation_reads_stored_returns_as_already_directional():
+    """저장된 ret는 방향정렬값이다 — 다시 뒤집으면 약세 신호가 거꾸로 채점된다(내가 낸 오류)."""
+    rows = _mixed_day("2026-09-01", bull_rets=[1.0], bear_rets=[-1.0]) \
+        + _mixed_day("2026-09-02", bull_rets=[1.0], bear_rets=[-1.0])
+    p = sr.within_day_percentile(rows, 1, n_perm=200)
+    assert p["obs"] == 1.0                                    # 둘 다 맞혔으니 +1.0
+
+
+def test_the_summary_prints_the_verdict_basis():
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[2.0, 1.0], bear_rets=[-2.0, -1.0])
+    text = sr.format_summary(sr.summarize(rows, horizon=1))
+    assert "판정 근거" in text and "백분위" in text and "대조군이 아니다" in text
+
+
+def test_too_few_mixed_days_is_untestable_not_a_bad_score():
+    """음성 대조 ③: 경고 35건에 매수 2건이면 백분위 0.0이 나와도 판정이 아니다."""
+    rows = []
+    for d in range(1, 11):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[], bear_rets=[-1.0, 1.0, -0.5])
+    rows += _mixed_day("2026-09-11", bull_rets=[-9.0], bear_rets=[-1.0, 1.0])
+    rows += _mixed_day("2026-09-12", bull_rets=[-9.0], bear_rets=[-1.0, 1.0])
+    s = sr.summarize(rows, horizon=1)
+    assert s["total"]["perm"]["mixed_days"] == 2
+    assert s["total"]["verdict"].startswith("검정 불가(방향 섞인 날 2일")
