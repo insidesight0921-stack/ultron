@@ -68,15 +68,15 @@ MCP는 8090의 검증된 응답도 그대로 통과시키지 않는다. 각 도�
 직접 stdio 실행은 host가 child process로 시작할 때 사용한다.
 
 ```bash
-/Users/byunhyunjun/울트론/ai-agent/.venv/bin/python \
-  /Users/byunhyunjun/울트론/ai-agent/scripts/shareable_mcp.py
+$PROJECT_PATH/.venv/bin/python \
+  $PROJECT_PATH/scripts/shareable_mcp.py
 ```
 
 터미널에서 실행하면 아무 출력 없이 입력을 기다리는 것이 정상이다. 재현 가능한 실측은 다음
 smoke로 수행한다.
 
 ```bash
-cd /Users/byunhyunjun/울트론/ai-agent
+cd $PROJECT_PATH
 PYTHONPATH=scripts .venv/bin/python scripts/smoke_shareable_mcp.py
 ```
 
@@ -87,8 +87,8 @@ Codex CLI, IDE extension은 같은 Codex host 설정을 공유한다.
 
 ```bash
 codex mcp add ultron-shareable -- \
-  /Users/byunhyunjun/울트론/ai-agent/.venv/bin/python \
-  /Users/byunhyunjun/울트론/ai-agent/scripts/shareable_mcp.py
+  $PROJECT_PATH/.venv/bin/python \
+  $PROJECT_PATH/scripts/shareable_mcp.py
 ```
 
 실측 결과는 `enabled=true`, `transport=stdio`, `env=-`, 위 두 절대 경로 일치다. Codex 쪽에도
@@ -110,7 +110,7 @@ codex mcp remove ultron-shareable
 아래 감사는 파일·DB를 수정하지 않고 Codex 설정과 실제 STDIO server를 함께 검사한다.
 
 ```bash
-cd /Users/byunhyunjun/울트론/ai-agent
+cd $PROJECT_PATH
 PYTHONPATH=scripts .venv/bin/python scripts/audit_shareable_mcp.py
 ```
 

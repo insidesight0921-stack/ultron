@@ -90,7 +90,7 @@ pip install pytest fastapi uvicorn pandas httpx pykrx --break-system-packages -q
 - ipo_bot/paper_ui 모두 외부 호출 mock으로 hermetic
 
 **파일 편집 주의**:
-- `Edit` 툴이 `/Users/byunhyunjun/울트론/` 경로에서 차단됨 (Unicode 정규화 이슈)
+- `Edit` 툴이 `$HOME/울트론/` 경로에서 차단됨 (Unicode 정규화 이슈)
 - 대안: `mcp__workspace__bash`로 마운트 경로(`/sessions/.../mnt/*/ai-agent/...`)에 Python 스크립트 작성해 정밀 치환 (이 세션의 `.bak*` 백업 파일들이 동일 패턴 사용 흔적)
 
 **다음 단계 후보 — 난이도·환경 의존도**:

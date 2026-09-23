@@ -27,7 +27,7 @@
 - activation fingerprint: `5515f11433bed4f788c011b1ba4a7c5f7e332d9b70d185a4128327fa533e483f`
 - 설치 bundle SHA-256: `60dd84d6d38ccb4507788f34ef1613e494ef35c907585372a8fef516daf6c67d`
 - 영구 backup manifest:
-  `/Users/byunhyunjun/울트론/private-backups/ai-agent/20260826T193342+0900/manifest.json`
+  `$HOME/울트론/private-backups/ai-agent/20260826T193342+0900/manifest.json`
 
 초기 `/private/tmp/ultron-schedule-candidate-922Se5/` 후보는 리허설 backup root에 묶인
 비설치 증거로만 보존한다. 운영에는 승인된 영구 backup root로 다시 생성·검증한 후보를 설치했다.
