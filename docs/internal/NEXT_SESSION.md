@@ -60,7 +60,7 @@
 > ✅ **MCP 읽기 전용 승인·host allowlist 이중 고정 완료 (2026-08-27)**: 5개 tool 모두 공식 SDK `ToolAnnotations`의 readOnlyHint=true·openWorldHint=false를 반환한다. 힌트를 단독 신뢰하지 않고 Codex 전역 설정에도 같은 5개 enabled_tools와 default_tools_approval_mode=writes를 고정했다. 실제 stdio smoke에서 protocol 2026-07-28·5개 annotation·삼성전자 공개 4필드가 일치하고, 별도 approval override 없는 ephemeral·read-only 새 Codex 작업의 실제 호출도 성공했다. MCP/Data API 30 tests와 shared worktree 전체 1,725 tests가 통과했다. 진행률은 전체 약 88%, Phase 3 약 60%다.
 > ✅ **Phase 3 로컬 STDIO MVP 완료 (2026-08-27)**: 공개 API의 유일한 미노출 endpoint인 시장 전체 factor snapshot(KOSPI fundamentals 890/market-cap 917종목)은 과대 응답이라 직접 노출하지 않고, 단일 ticker만 공개 6개 재무지표와 시가총액으로 축소하는 `get_latest_fundamentals`를 추가했다. 서버·Codex allowlist는 6개로 일치하며 새 Codex 작업의 삼성전자 실제 호출이 성공했다. `audit_shareable_mcp.py`는 command/script same-file, enabled tools, writes 승인, env 미전달, stdio-only, 6 annotation과 instrument/fundamentals 호출을 검사해 ready=true다. 경로 NFC/NFD false negative는 문자열 완전 일치 대신 실제 file identity 비교로 교정했다. 전체 1,732 tests 통과. North Star 로컬 아키텍처와 Phase 3 로컬 MVP는 100%이며 원격 HTTP는 별도 선택 확장이다.
 > ✅ **병렬 착수 전 direct DB 드리프트 정리 (2026-08-27)**: `signal_bot` 관심종목과 `slot_diversify` Paper 포지션 진단을 8091 Private API-only로 전환하고 실패 시 DB 폴백을 제거했다. `seed_watchlist_from_bots.py`는 직접 DB 적용 기능을 없애고 미리보기 전용으로 보존했다. 회고·슬롯 위험 문서의 구현 상태도 코드와 정합화했으며 전체 1,736 tests와 `git diff --check`가 통과했다. 작업 트리는 modified 20/untracked 23, 총 43개로 아직 커밋 전이다.
-> 투자 전략 트랙을 재개할 때는 `docs/다음작업_손절_상관분석.md`를 먼저 읽는다.
+> 투자 전략 트랙을 재개할 때는 `docs/internal/다음작업_손절_상관분석.md`를 먼저 읽는다.
 > (system_info·paper 성과·피드백 루프·trade_analytics는 아래 완료 항목 참조.)
 
 # IPO Bot — 다음 세션 인수인계 (v3.35)

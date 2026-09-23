@@ -275,7 +275,7 @@ def _cli() -> int:
     print()
     print(format_report(results, summary))
     out = Path(args.out) if args.out else (
-        Path(__file__).resolve().parents[1] / "docs" /
+        Path(__file__).resolve().parents[1] / "docs" / "internal" /
         f"coding_ab_{datetime.now().strftime('%Y%m%d_%H%M')}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"at": datetime.now().isoformat(timespec="seconds"),
