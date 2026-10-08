@@ -1121,3 +1121,29 @@ def test_signal_accuracy_counts_hold_rows_nowhere_but_in_hold(client, monkeypatc
     assert d["evaluated"] == 3 and d["pending"] == 0
     assert all(r["action"] != "홀딩유지" for r in d["recent"])
     assert d["summary"]["hold"]["n"] == 5
+
+
+# ─── 운영 탭 (2026-10-08) ─────────────────────────────
+
+
+def test_ops_tab_reads_the_latest_record_and_does_not_probe(client, monkeypatch, tmp_path):
+    import ops_probe as op
+    calls = []
+    monkeypatch.setattr(op, "probe", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(op, "latest_path", lambda *a, **k: tmp_path / "ops_probe_latest.json")
+    d = client.get("/api/ops").json()
+    assert d["record"] is None and "install-ops-probe" in d["how"]
+    import json as _json
+    (tmp_path / "ops_probe_latest.json").write_text(_json.dumps(
+        {"at": "2026-10-08T11:00:00", "n": 2, "failing": ["KOSPI 지수 캐시"],
+         "checks": [{"name": "KOSPI 지수 캐시", "ok": False, "detail": "마지막 20260917 · 15평일 전 ≥ 3"},
+                    {"name": "paper_ui health", "ok": True, "detail": "HTTP 200"}]}), encoding="utf-8")
+    d = client.get("/api/ops").json()
+    assert d["failing"] == ["KOSPI 지수 캐시"] and d["record"]["n"] == 2
+    assert calls == []                                        # 화면은 재지 않는다
+
+
+def test_ops_tab_markup_says_it_shows_the_last_probe_not_now(client):
+    html = client.get("/").text
+    assert 'data-tab="tab-ops"' in html and "지금을 재지 않습니다" in html
+    assert "감시 자체가 45분 넘게 조용합니다" in html

@@ -70,3 +70,17 @@ def test_market_data_collector_is_scheduled_and_managed():
     assert "<integer>16</integer>" in SCRIPT
     assert "<integer>20</integer>" in SCRIPT
     assert 'launchctl load "$PLIST_MARKET_COLLECTOR"' in SCRIPT
+
+
+def test_ops_probe_runs_every_15_minutes_and_is_managed():
+    """운영 감시(2026-10-08): 15분 간격, 설치·시작·중지·상태·제거 전부에 들어간다."""
+    assert 'LABEL_OPS_PROBE="com.hyunjun.ai-agent.ops-probe"' in SCRIPT
+    assert "<string>${SCRIPTS}/ops_probe.py</string>" in SCRIPT
+    assert "<key>StartInterval</key>\n    <integer>900</integer>" in SCRIPT
+    assert 'launchctl load "$PLIST_OPS_PROBE"' in SCRIPT
+    assert 'launchctl unload "$PLIST_OPS_PROBE"' in SCRIPT
+    assert '[ -f "$PLIST_OPS_PROBE" ] && LABELS+=("$LABEL_OPS_PROBE")' in SCRIPT
+    assert "install-ops-probe) cmd_install_ops_probe ;;" in SCRIPT
+    # lsof는 /usr/sbin에 있다 — PATH에 없으면 포트 검사가 조용히 빠진다
+    probe_plist = SCRIPT[SCRIPT.index("write_plist_ops_probe()"):SCRIPT.index("write_plist_paper_monthly()")]
+    assert "/usr/sbin" in probe_plist

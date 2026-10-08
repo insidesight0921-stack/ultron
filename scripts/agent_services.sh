@@ -50,6 +50,7 @@ LABEL_PRIVATE_BACKUP="com.hyunjun.ai-agent.private-backup"
 LABEL_PAPER_WEEKLY="com.hyunjun.ai-agent.paper-weekly-report"
 LABEL_SIGNAL_REVIEW="com.hyunjun.ai-agent.signal-review"
 LABEL_PAPER_MONTHLY="com.hyunjun.ai-agent.paper-monthly-report"
+LABEL_OPS_PROBE="com.hyunjun.ai-agent.ops-probe"
 
 PLIST_DATA_API="$LA_DIR/${LABEL_DATA_API}.plist"
 PLIST_PRIVATE_DATA_API="$LA_DIR/${LABEL_PRIVATE_DATA_API}.plist"
@@ -63,6 +64,7 @@ PLIST_PRIVATE_BACKUP="$LA_DIR/${LABEL_PRIVATE_BACKUP}.plist"
 PLIST_PAPER_WEEKLY="$LA_DIR/${LABEL_PAPER_WEEKLY}.plist"
 PLIST_SIGNAL_REVIEW="$LA_DIR/${LABEL_SIGNAL_REVIEW}.plist"
 PLIST_PAPER_MONTHLY="$LA_DIR/${LABEL_PAPER_MONTHLY}.plist"
+PLIST_OPS_PROBE="$LA_DIR/${LABEL_OPS_PROBE}.plist"
 
 LOG_DATA_API_OUT="$LOG_DIR/data_api.out.log"
 LOG_DATA_API_ERR="$LOG_DIR/data_api.err.log"
@@ -86,6 +88,8 @@ LOG_SIGNAL_REVIEW_OUT="$LOG_DIR/signal_review.out.log"
 LOG_SIGNAL_REVIEW_ERR="$LOG_DIR/signal_review.err.log"
 LOG_PAPER_MONTHLY_OUT="$LOG_DIR/paper_monthly_report.out.log"
 LOG_PAPER_MONTHLY_ERR="$LOG_DIR/paper_monthly_report.err.log"
+LOG_OPS_PROBE_OUT="$LOG_DIR/ops_probe.out.log"
+LOG_OPS_PROBE_ERR="$LOG_DIR/ops_probe.err.log"
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
 
@@ -592,6 +596,48 @@ write_plist_signal_review() {
 EOF
 }
 
+write_plist_ops_probe() {
+    # StartInterval 900초(15분): 운영 감시 — 신선도·health·포트 소유자·종료코드.
+    # 고치지도 재시작하지도 않는다. 상태가 바뀔 때만 텔레그램. 종료 코드는 늘 0
+    # (깨졌다고 1로 끝내면 다음 실행이 자기 자신을 실패로 센다).
+    cat > "$PLIST_OPS_PROBE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL_OPS_PROBE}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${SCRIPTS}/ops_probe.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT}</string>
+    <key>StandardOutPath</key>
+    <string>${LOG_OPS_PROBE_OUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_OPS_PROBE_ERR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>ko_KR.UTF-8</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+</dict>
+</plist>
+EOF
+}
+
 write_plist_paper_monthly() {
     # StartCalendarInterval: 매월 1일 17:00 — **직전 달**을 집계한다(--last-month).
     # 월초에 도는 이유: 말일에 돌리면 그날 장 마감 뒤 청산분이 빠질 수 있고,
@@ -728,6 +774,11 @@ cmd_install() {
         echo "  ✅ plist 생성: $PLIST_PAPER_MONTHLY"
     fi
 
+    if [ -f "$SCRIPTS/ops_probe.py" ]; then
+        write_plist_ops_probe
+        echo "  ✅ plist 생성: $PLIST_OPS_PROBE"
+    fi
+
     write_plist_data_api
     echo "  ✅ plist 생성: $PLIST_DATA_API"
 
@@ -798,6 +849,7 @@ cmd_start() {
     [ -f "$PLIST_PAPER_WEEKLY" ] && launchctl unload "$PLIST_PAPER_WEEKLY" 2>/dev/null || true
     [ -f "$PLIST_SIGNAL_REVIEW" ] && launchctl unload "$PLIST_SIGNAL_REVIEW" 2>/dev/null || true
     [ -f "$PLIST_PAPER_MONTHLY" ] && launchctl unload "$PLIST_PAPER_MONTHLY" 2>/dev/null || true
+    [ -f "$PLIST_OPS_PROBE" ] && launchctl unload "$PLIST_OPS_PROBE" 2>/dev/null || true
     sleep 1
 
     # 로드
@@ -844,6 +896,10 @@ cmd_start() {
         launchctl load "$PLIST_PAPER_MONTHLY"
         echo "  ✅ 페이퍼 월간 성과 리포트 등록 (매월 1일 17:00, 직전 달 집계 + 텔레그램)"
     fi
+    if [ -f "$PLIST_OPS_PROBE" ]; then
+        launchctl load "$PLIST_OPS_PROBE"
+        echo "  ✅ 운영 감시 등록 (15분마다, 상태가 바뀔 때만 텔레그램)"
+    fi
     echo "▶️  서비스 시작됨"
     sleep 2
     cmd_status
@@ -884,6 +940,9 @@ cmd_stop() {
     if [ -f "$PLIST_PAPER_MONTHLY" ]; then
         launchctl unload "$PLIST_PAPER_MONTHLY" 2>/dev/null && echo "⏸  페이퍼 월간 리포트 중지" || echo "(페이퍼 월간 리포트 이미 중지됨)"
     fi
+    if [ -f "$PLIST_OPS_PROBE" ]; then
+        launchctl unload "$PLIST_OPS_PROBE" 2>/dev/null && echo "⏸  운영 감시 중지" || echo "(운영 감시 이미 중지됨)"
+    fi
 }
 
 cmd_restart() {
@@ -910,6 +969,7 @@ cmd_status() {
     [ -f "$PLIST_PRIVATE_BACKUP" ] && LABELS+=("$LABEL_PRIVATE_BACKUP")
     [ -f "$PLIST_SIGNAL_REVIEW" ] && LABELS+=("$LABEL_SIGNAL_REVIEW")
     [ -f "$PLIST_PAPER_MONTHLY" ] && LABELS+=("$LABEL_PAPER_MONTHLY")
+    [ -f "$PLIST_OPS_PROBE" ] && LABELS+=("$LABEL_OPS_PROBE")
 
     for label in "${LABELS[@]}"; do
         info=$(launchctl list | grep "$label" || echo "")
@@ -1063,6 +1123,18 @@ cmd_install_private_data_api() {
     echo "✅ Private API 설치: http://127.0.0.1:8091 (Bearer 인증 필요)"
 }
 
+cmd_install_ops_probe() {
+    if [ ! -f "$SCRIPTS/ops_probe.py" ]; then
+        echo "❌ 실행 파일 없음: $SCRIPTS/ops_probe.py"
+        exit 1
+    fi
+    write_plist_ops_probe
+    launchctl unload "$PLIST_OPS_PROBE" 2>/dev/null || true
+    launchctl load "$PLIST_OPS_PROBE"
+    echo "✅ 운영 감시 설치: 15분마다 · 판정만 · 상태가 바뀔 때만 텔레그램"
+    echo "   지금 결과: $PYTHON $SCRIPTS/ops_probe.py --dry"
+}
+
 cmd_rotate_logs() {
     bash "$SCRIPTS/rotate_logs.sh"
 }
@@ -1097,7 +1169,8 @@ cmd_uninstall() {
     cmd_stop
     launchctl unload "$PLIST_LOG_ROTATE" 2>/dev/null || true
     launchctl unload "$PLIST_PRIVATE_BACKUP" 2>/dev/null || true
-    rm -f "$PLIST_DATA_API" "$PLIST_PRIVATE_DATA_API" "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_MARKET_COLLECTOR" "$PLIST_LOG_ROTATE" "$PLIST_PRIVATE_BACKUP"
+    launchctl unload "$PLIST_OPS_PROBE" 2>/dev/null || true
+    rm -f "$PLIST_DATA_API" "$PLIST_PRIVATE_DATA_API" "$PLIST_WATCH" "$PLIST_TG" "$PLIST_PAPER" "$PLIST_WEEKLY" "$PLIST_MARKET_COLLECTOR" "$PLIST_LOG_ROTATE" "$PLIST_PRIVATE_BACKUP" "$PLIST_OPS_PROBE"
     echo "  ✅ plist 파일 삭제"
     echo ""
     echo "완전히 제거되었습니다. 데이터(wiki, LanceDB, 로그)는 그대로 보존됩니다."
@@ -1120,6 +1193,7 @@ AI Agent 서비스 관리
   bash $0 install-log-rotation  로그 회전만 설치 (매일 03:10)
   bash $0 install-private-backup  Private DB 주간 백업만 설치
   bash $0 install-private-data-api  Private API만 설치·시작
+  bash $0 install-ops-probe  운영 감시만 설치 (15분, 판정만)
   bash $0 rotate-logs 현재 10MiB 이상 로그 즉시 회전
   bash $0 uninstall   서비스 제거 (데이터는 보존)
 
@@ -1150,6 +1224,7 @@ case "${1:-help}" in
     install-log-rotation) cmd_install_log_rotation ;;
     install-private-backup) cmd_install_private_backup ;;
     install-private-data-api) cmd_install_private_data_api ;;
+    install-ops-probe) cmd_install_ops_probe ;;
     rotate-logs) cmd_rotate_logs ;;
     uninstall)  cmd_uninstall ;;
     *)          cmd_help ;;

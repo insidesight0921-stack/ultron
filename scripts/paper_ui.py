@@ -894,6 +894,29 @@ async def api_benchmark(rf: float = 0.0):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/ops")
+async def api_ops():
+    """운영 상태(v3.67). **최신 기록을 읽을 뿐 다시 재지 않는다.**
+
+    재는 것은 `ops_probe.py`(launchd 15분)다. 화면이 열릴 때마다 lsof·health를
+    돌리면 열 때마다 다른 답이 나오고, 언제 잰 것인지가 사라진다. 여기서는
+    「언제 쟀고 그때 무엇이 깨져 있었나」만 보인다.
+    """
+    try:
+        import ops_probe as op
+        path = op.latest_path()
+        if not path.exists():
+            return JSONResponse({"record": None,
+                                 "how": "scripts/agent_services.sh install-ops-probe",
+                                 "note": "아직 한 번도 재지 않았습니다"})
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return JSONResponse({"record": record, "failing": record.get("failing", []),
+                             "how": "scripts/ops_probe.py --dry"})
+    except Exception as e:
+        log.exception("ops 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/paper/phase-validation")
 async def api_phase_validation():
     """탭 C — 국면 판정이 검증됐는가. **원장을 읽을 뿐 다시 재지 않는다.**
@@ -1194,6 +1217,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="tab" data-tab="tab-bench">벤치마크</button>
     <button class="tab" data-tab="tab-phase-acc">국면 정확도</button>
     <button class="tab" data-tab="tab-failure">실패 원인</button>
+    <button class="tab" data-tab="tab-ops">운영</button>
   </div>
 
   <!-- 탭 1: 주문 -->
@@ -1563,6 +1587,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p class="muted">불러오는 중…</p>
     </div>
     <div id="phase-acc-table"></div>
+  </div>
+
+  <!-- 탭 운영: ops_probe 최신 기록 (v3.67) -->
+  <div id="tab-ops" class="tab-content">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="toolbar">
+        <button type="button" class="btn-scan" id="btn-ops-refresh">새로고침</button>
+        <span id="ops-status" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-top:0.4rem;border-left:3px solid #888;padding-left:0.6rem;">
+        <b>이 화면은 지금을 재지 않습니다 — 마지막으로 잰 때를 보여줍니다.</b>
+        <code>ops_probe</code>가 15분마다 캐시·원장·로그의 <b>마지막 기록이 몇 평일 묵었나</b>,
+        8080·8090·8091이 응답하나, 그 포트를 듣는 프로세스가 하나뿐인가, launchd 잡의 마지막 종료 코드를 잽니다.<br>
+        KOSPI 지수 캐시가 2026-09-17에 멈춘 채 3주를 간 것, 8080에 리스너 3개가 2주 겹쳐 있던 것 —
+        둘 다 이 표가 있었으면 다음 15분에 보였습니다. <b>고치지도 재시작하지도 않습니다.</b> 판정만 하고, 바뀔 때만 텔레그램으로 말합니다.
+      </p>
+    </div>
+    <div id="ops-verdict" class="card" style="margin-bottom:20px;"><p class="muted">불러오는 중…</p></div>
+    <div id="ops-table"></div>
   </div>
 
   <!-- 탭 D: 실패 원인 분석 (v3.58) -->
@@ -2750,6 +2793,42 @@ async function loadFailureAnalysis() {
   }
 }
 // ── 탭 C: 국면 정확도 (2026-09-02) ───────────────────────────────────────────
+// ── 운영 탭 (v3.67) ─────────────────────────────────────────────────────────
+async function loadOps() {
+  const status = document.getElementById("ops-status");
+  const box = document.getElementById("ops-verdict");
+  const wrap = document.getElementById("ops-table");
+  status.textContent = "로딩 중...";
+  try {
+    const d = await (await fetch("/api/ops")).json();
+    if (d.error) throw new Error(d.error);
+    if (!d.record) {
+      box.innerHTML = `<div class="crash-warn">${d.note || "기록 없음"}</div>
+        <p class="muted" style="margin-top:0.5rem;">설치: <code>${d.how}</code></p>`;
+      wrap.innerHTML = ""; status.textContent = ""; return;
+    }
+    const r = d.record, bad = (r.failing || []).length;
+    const ageMin = Math.round((Date.now() - new Date(r.at).getTime()) / 60000);
+    const stale = ageMin > 45;
+    box.innerHTML = `
+      <div class="${bad ? "crash-warn" : "crash-ok"}">${bad ? `❌ ${bad}건 깨짐` : "✅ 전부 정상"} — ${r.n}개 검사</div>
+      <p class="muted" style="margin-top:0.5rem;">
+        잰 때 ${r.at.replace("T", " ")} (${ageMin}분 전)${stale ? " — <b>감시 자체가 45분 넘게 조용합니다. launchd ops-probe를 확인하세요.</b>" : ""}
+        <br>지금 다시 재려면(기록 없이): <code>${d.how}</code>
+      </p>`;
+    wrap.innerHTML = `<div class="card"><table>
+      <thead><tr><th></th><th>검사</th><th>상태</th></tr></thead>
+      <tbody>${(r.checks || []).map(c => `<tr>
+        <td>${c.ok ? "✅" : "❌"}</td><td>${c.name}</td><td class="muted">${c.detail || ""}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "실패: " + e.message;
+  }
+}
+document.getElementById("btn-ops-refresh").addEventListener("click", loadOps);
+document.querySelector(".tab[data-tab='tab-ops']").addEventListener("click", loadOps);
+
 async function loadPhaseAccuracy() {
   const status = document.getElementById("phase-acc-status");
   const box = document.getElementById("phase-acc-verdict");
