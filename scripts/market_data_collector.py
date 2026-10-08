@@ -207,6 +207,29 @@ def fill_kospi_tail(frame: Any, end: str, *,
     return pd.concat([base, tail])
 
 
+FLOW_DAILY_DAYS = 20        # 일간 수집기가 외국인 순매수 이력을 덧대는 창(거래일)
+
+
+def collect_flow_daily(days: int = FLOW_DAILY_DAYS,
+                       backfill: Callable[[int], dict] | None = None) -> dict[str, Any]:
+    """외국인 순매수 이력을 **매일** 덧댄다(2026-10-08).
+
+    `collect_history --flow`는 사람이 손으로 돌리는 소급 도구였고, 봇은 매번
+    5일치만 실시간으로 받아 썼다. 그래서 이력 캐시가 09-01에 멈춘 채 나우캐스팅의
+    외국인 예측 수가 한 달 동안 늘지 않았다. 같은 소급 함수를 짧은 창으로 매일
+    부른다 — 그 함수는 기존 이력과 **병합**하므로(덮지 않는다) 창이 짧아도 안전하다.
+    KRX 자격증명이 없으면 그 함수가 이유를 말하며 실패하고, 여기서는 건너뛴다.
+    """
+    if backfill is None:
+        import collect_history
+        backfill = collect_history.backfill_flow
+    got = backfill(int(days))
+    first, last = (got.get("range") or (None, None))
+    return {"dataset": "flow", "name": "foreign_net", "as_of": datetime.now().strftime("%Y%m%d"),
+            "rows": got.get("n"), "last": last,
+            "stale_weekdays": stale_weekdays(last, datetime.now().strftime("%Y%m%d"))}
+
+
 def index_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """요약 한 줄(순수) — 행 수만이 아니라 **마지막 날짜와 묵은 평일 수**."""
     dates = (payload.get("series") or {}).get("date") or []
@@ -851,6 +874,13 @@ def collect_all_public(
         warn_if_stale(summary)
         summaries.append(summary)
 
+    try:
+        summary = collect_flow_daily()
+        warn_if_stale(summary)
+        summaries.append(summary)
+    except Exception as exc:
+        log.warning("외국인 순매수 이력 수집 건너뜀: %s", exc)
+
     today = datetime.now().strftime("%Y%m%d")
     try:
         mapping = collect_ticker_map(as_of=today, cache_dir=cache_dir)
@@ -900,7 +930,7 @@ def main() -> int:
     except ImportError:
         pass
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=("all", "indices", "ticker-map", "factors"))
+    parser.add_argument("--dataset", choices=("all", "indices", "ticker-map", "factors", "flow"))
     parser.add_argument("--index", choices=("KOSPI", "VKOSPI", "all"))
     parser.add_argument("--days", type=int)
     args = parser.parse_args()
@@ -910,6 +940,10 @@ def main() -> int:
         today = datetime.now().strftime("%Y%m%d")
         mapping = collect_ticker_map(as_of=today)
         summaries = [{"dataset": "ticker_map", "as_of": today, "rows": len(mapping)}]
+    elif args.dataset == "flow":
+        summary = collect_flow_daily(days=args.days or FLOW_DAILY_DAYS)
+        warn_if_stale(summary)
+        summaries = [summary]
     elif args.dataset == "factors":
         summaries = []
         for market in EXCHANGE_MARKETS:

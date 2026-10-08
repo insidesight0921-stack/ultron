@@ -474,3 +474,37 @@ def test_collect_market_index_returns_the_merged_cache(tmp_path):
         fetcher=lambda *a: fresh)
     assert payload["series"]["date"] == ["20260915", "20260916", "20260917", "20260918"]
     assert collector.index_summary(payload)["stale_weekdays"] == 0
+
+
+# ─── 외국인 순매수 이력이 09-01에 멈춘 채였다 (2026-10-08) ────
+
+
+def test_flow_is_collected_daily_through_the_merging_backfill():
+    calls = []
+
+    def fake_backfill(days):
+        calls.append(days)
+        return {"item": "flow", "n": 15, "range": ("20260915", "20261007")}
+
+    s = collector.collect_flow_daily(backfill=fake_backfill)
+    assert calls == [collector.FLOW_DAILY_DAYS]
+    assert s["dataset"] == "flow" and s["last"] == "20261007" and s["rows"] == 15
+    assert s["stale_weekdays"] == collector.stale_weekdays("20261007", s["as_of"])
+
+
+def test_a_failing_flow_collection_does_not_break_the_public_run(monkeypatch, tmp_path, caplog):
+    """음성 대조: KRX 자격증명이 없어도 지수·티커맵은 그대로 돈다."""
+    import logging
+    monkeypatch.setattr(collector, "collect_all", lambda root: [])
+    monkeypatch.setattr(collector, "collect_ticker_map", lambda **k: {"005930": "삼성전자"})
+    monkeypatch.setattr(collector, "collect_factor_snapshot",
+                        lambda m, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+    monkeypatch.setattr(collector, "collect_universe",
+                        lambda m, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+    monkeypatch.setattr(collector, "collect_flow_daily",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("KRX 로그인 실패")))
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        out = collector.collect_all_public(root=tmp_path)
+    assert any(s["dataset"] == "ticker_map" for s in out)
+    assert not any(s["dataset"] == "flow" for s in out)
+    assert "외국인 순매수 이력 수집 건너뜀" in caplog.text and "KRX 로그인 실패" in caplog.text
