@@ -223,7 +223,11 @@ def collect_flow_daily(days: int = FLOW_DAILY_DAYS,
     if backfill is None:
         import collect_history
         backfill = collect_history.backfill_flow
-    got = backfill(int(days))
+    # pykrx의 KRX 로그인은 **계정 ID를 stdout에 찍는다**(첫 실행에서 확인:
+    # "로그인 ID: …"). 매일 로그에 남길 값이 아니다 — 다른 외부 클라이언트와
+    # 같은 이유로 조용히 돌린다.
+    with _quiet_external_library_output():
+        got = backfill(int(days))
     first, last = (got.get("range") or (None, None))
     return {"dataset": "flow", "name": "foreign_net", "as_of": datetime.now().strftime("%Y%m%d"),
             "rows": got.get("n"), "last": last,

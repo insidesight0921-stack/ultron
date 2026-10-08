@@ -508,3 +508,13 @@ def test_a_failing_flow_collection_does_not_break_the_public_run(monkeypatch, tm
     assert any(s["dataset"] == "ticker_map" for s in out)
     assert not any(s["dataset"] == "flow" for s in out)
     assert "외국인 순매수 이력 수집 건너뜀" in caplog.text and "KRX 로그인 실패" in caplog.text
+
+
+def test_flow_collection_does_not_leak_the_krx_login_id_to_stdout(capsys):
+    """첫 실행 로그에 "로그인 ID: …"가 찍혔다 — 매일 남길 값이 아니다."""
+    def chatty_backfill(days):
+        print("KRX 로그인 시도...\n  로그인 ID: someone")
+        return {"item": "flow", "n": 1, "range": ("20261007", "20261007")}
+
+    collector.collect_flow_daily(backfill=chatty_backfill)
+    assert "로그인 ID" not in capsys.readouterr().out
