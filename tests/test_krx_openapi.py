@@ -385,3 +385,33 @@ def test_dividend_is_its_own_factor_not_growth():
     """'배당성장'이 '성장'에 걸려 Growth로만 보이면 배당 팩터를 놓친다."""
     found = k.find_factor_indices([{"IDX_NM": "코스피 고배당 50"}])
     assert "코스피 고배당 50" in found["Dividend"]
+
+
+# ─── 코스피 종합지수도 같은 응답에서, 정확일치로 (2026-10-08) ────
+
+
+def _idx_rows(*names, close="6,800.12", date="20260918"):
+    return {"OutBlock_1": [{"BAS_DD": date, "IDX_NM": n, "CLSPRC_IDX": close} for n in names]}
+
+
+def test_kospi_close_takes_only_the_exact_name():
+    got = k.kospi_close(_idx_rows("코스피 200", "코스피", "코스피 100"))
+    assert got["found"] and got["value"] == 6800.12 and got["date"] == "20260918"
+
+
+def test_kospi_close_refuses_a_near_miss():
+    """음성 대조: '코스피 200'·'코스피 100'만 있으면 값을 만들지 않는다."""
+    got = k.kospi_close(_idx_rows("코스피 200", "코스피 100"))
+    assert not got["found"] and got["value"] is None and "찾지 못함" in got["reason"]
+
+
+def test_fetch_kospi_passes_through_an_api_error(monkeypatch):
+    monkeypatch.setattr(k, "fetch", lambda path, bas_dd, **kw: {"error": "HTTP 503"})
+    got = k.fetch_kospi("20260918")
+    assert got["value"] is None and got["reason"] == "HTTP 503" and got["date"] == "20260918"
+
+
+def test_vkospi_close_is_the_same_rule_under_a_fixed_name():
+    rows = _idx_rows("코스피 200 변동성지수", "코스피", close="41.59")
+    assert k.vkospi_close(rows)["value"] == 41.59
+    assert k.index_close(rows, "코스피")["value"] == 41.59

@@ -247,8 +247,36 @@ def format_snapshot(snap: dict, notes: dict | None = None) -> str:
 # ─── 경계 (I-O) ──────────────────────────────────────
 
 
-def _kospi_series() -> tuple[list[float], Optional[str]]:
-    """로컬 KOSPI 일봉 캐시 → (종가, 기준일). 네트워크를 쓰지 않는다."""
+# KOSPI 캐시가 이 일수(달력)보다 오래되면 **쓰지 않는다.** 2026-09-17부터 3주간
+# 상류(FDR KS11)가 멈췄는데 200일선 기울기는 `available=True`로 콴텍봇 국면·
+# 비중에 계속 들어갔다 — 기울기가 느리게 움직이는 값이라 더 눈에 안 띄었다.
+# 값이 있는데 낡은 것과 값이 없는 것은 같은 처지다(VKOSPI와 같은 원칙).
+KOSPI_STALE_DAYS = 7
+
+
+def kospi_cache_is_stale(as_of: Optional[str], today: Optional[str] = None,
+                         stale_days: int = KOSPI_STALE_DAYS) -> bool:
+    """기준일이 오늘보다 stale_days 넘게 뒤면 True(순수). 기준일 없으면 True."""
+    from datetime import date, datetime
+    if not as_of:
+        return True
+    ref = str(today or date.today().strftime("%Y%m%d"))
+    try:
+        gap = (datetime.strptime(ref, "%Y%m%d")
+               - datetime.strptime(str(as_of), "%Y%m%d")).days
+    except ValueError:
+        return True
+    return gap > stale_days
+
+
+def _kospi_series(*, today: Optional[str] = None,
+                  stale_days: int = KOSPI_STALE_DAYS
+                  ) -> tuple[list[float], Optional[str]]:
+    """로컬 KOSPI 일봉 캐시 → (종가, 기준일). 네트워크를 쓰지 않는다.
+
+    **낡은 캐시는 빈 목록으로 돌려준다**(기준일은 남겨 화면이 언제 멈췄는지
+    말하게 한다). 그러면 기울기가 None이 되고 지표는 「미확보」로 뜬다.
+    """
     try:
         import json
         import price_sanity as ps
@@ -256,7 +284,13 @@ def _kospi_series() -> tuple[list[float], Optional[str]]:
         if not files:
             return [], None
         payload = json.loads(files[-1].read_text(encoding="utf-8"))
-        return list(payload["series"]["close"]), payload["series"]["date"][-1]
+        closes = list(payload["series"]["close"])
+        as_of = str(payload["series"]["date"][-1])
+        if kospi_cache_is_stale(as_of, today, stale_days):
+            log.warning("KOSPI 캐시가 낡았다(마지막 %s) — 200일선 기울기를 내지 않는다",
+                        as_of)
+            return [], as_of
+        return closes, as_of
     except Exception as exc:  # noqa: BLE001
         log.warning("KOSPI 캐시 로드 실패: %s", exc)
         return [], None
@@ -496,7 +530,9 @@ def snapshot() -> dict:
     items = [
         indicator("코스피 200일선 기울기", slope, slope_state(slope), unit="%",
                   as_of=kospi_as_of, source="로컬 일봉 캐시",
-                  note=f"최근 {SLOPE_LOOKBACK}거래일 변화"),
+                  note=(f"최근 {SLOPE_LOOKBACK}거래일 변화" if closes else
+                        (f"캐시가 {kospi_as_of}에 멈춤 — {KOSPI_STALE_DAYS}일 넘게 낡아 쓰지 않음"
+                         if kospi_as_of else "캐시 없음"))),
         indicator("외국인 순매수(5일)", flow, flow_state(flow), unit="억원",
                   as_of=flow_as_of, source="pykrx"),
         indicator("원/달러 환율", fx, fx_state(fx_change), unit="원",

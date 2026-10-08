@@ -350,3 +350,32 @@ def test_a_missing_ledger_does_not_break_the_screen(tmp_path):
     """원장이 없어도 화면은 떠야 한다 — 없으면 미측정이라고 말한다."""
     got = pi.verification_notes(["외국인 순매수(5일)"], ledger=tmp_path / "없음.json")
     assert got == {"외국인 순매수(5일)": "미측정"}
+
+
+# ─── KOSPI 캐시가 3주 멈췄는데 200일선은 "확보"로 떴다 (2026-10-08) ────
+
+
+def test_kospi_cache_staleness_rule():
+    import proxy_indicators as pi
+    assert pi.kospi_cache_is_stale("20260917", today="20261007")
+    assert not pi.kospi_cache_is_stale("20261006", today="20261007")
+    assert not pi.kospi_cache_is_stale("20261001", today="20261007")   # 6일: 연휴 허용
+    assert pi.kospi_cache_is_stale(None, today="20261007")
+    assert pi.kospi_cache_is_stale("bad", today="20261007")
+
+
+def test_a_stale_kospi_cache_yields_no_closes_but_keeps_the_date(tmp_path, monkeypatch):
+    import json
+    import proxy_indicators as pi
+    import price_sanity as ps
+    (tmp_path / "indices").mkdir()
+    (tmp_path / "indices" / "market_index_KOSPI_20261007.json").write_text(json.dumps({
+        "index": "KOSPI", "as_of": "20261007",
+        "series": {"date": ["20260916", "20260917"], "close": [6700.0, 6724.34]}}),
+        encoding="utf-8")
+    monkeypatch.setattr(ps, "_cache_root", lambda: tmp_path)
+    closes, as_of = pi._kospi_series(today="20261007")
+    assert closes == [] and as_of == "20260917"
+    # 음성 대조: 신선하면 그대로 준다
+    closes, as_of = pi._kospi_series(today="20260918")
+    assert closes == [6700.0, 6724.34] and as_of == "20260917"

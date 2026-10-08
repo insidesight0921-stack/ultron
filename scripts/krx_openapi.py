@@ -601,11 +601,11 @@ def _to_float(value) -> Optional[float]:
         return None
 
 
-def vkospi_close(payload: dict, *, name: str = VKOSPI_INDEX_NAME) -> dict:
-    """응답 → VKOSPI 종가(순수). 반환: {value, date, found}
+def index_close(payload: dict, name: str) -> dict:
+    """응답 → 지수 하나의 종가(순수). 반환: {value, date, found, reason}
 
     **못 찾으면 값을 만들지 않는다.** 비슷한 이름으로 대체하면 다른 지수를
-    VKOSPI로 기록하게 된다.
+    그 이름으로 기록하게 된다. VKOSPI·코스피 모두 이 하나를 쓴다.
     """
     rows = rows_of(payload)
     if not rows:
@@ -622,6 +622,35 @@ def vkospi_close(payload: dict, *, name: str = VKOSPI_INDEX_NAME) -> dict:
                 "found": True, "reason": f"{FIELD_CLOSE} 값이 비어 있음"}
     return {"value": value, "date": str(row.get(FIELD_DATE) or ""),
             "found": True, "reason": ""}
+
+
+def vkospi_close(payload: dict, *, name: str = VKOSPI_INDEX_NAME) -> dict:
+    """응답 → VKOSPI 종가(순수). `index_close`의 이름 고정판."""
+    return index_close(payload, name)
+
+
+# ─── 코스피(종합) — FDR `KS11` 상류 결측의 메움 소스 (2026-10-08) ───
+#
+# FinanceDataReader `KS11`이 2026-09-17 장중부터 행을 주지 않아 KOSPI 캐시가
+# 3주 멈춰 있었다. 같은 KRX OPEN API의 `KOSPI 시리즈`(kospi_dd_trd)에 종합
+# 지수가 있으므로, 캐시 마지막 날 뒤의 빈 거래일을 하루씩 여기서 메운다.
+# 이름은 **정확일치**다 — 틀리면 값 없이 reason만 돌아오고 캐시는 안 바뀐다.
+KOSPI_SERVICE = "KOSPI 시리즈"
+KOSPI_INDEX_NAME = "코스피"
+
+
+def kospi_close(payload: dict, *, name: str = KOSPI_INDEX_NAME) -> dict:
+    """응답 → 코스피 종합지수 종가(순수)."""
+    return index_close(payload, name)
+
+
+def fetch_kospi(bas_dd: str) -> dict:
+    """하루치 코스피 종합지수 종가. 실패는 예외 대신 reason으로 돌려준다."""
+    payload = fetch(INDEX_ENDPOINTS[KOSPI_SERVICE], bas_dd)
+    if payload.get("error"):
+        return {"value": None, "date": bas_dd, "found": False,
+                "reason": payload["error"]}
+    return kospi_close(payload)
 
 
 def fetch_vkospi(bas_dd: str) -> dict:

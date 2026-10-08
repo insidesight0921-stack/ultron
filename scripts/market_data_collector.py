@@ -59,7 +59,8 @@ def _fetch_index_frame(start: str, end: str, index_name: str):
     if index_name == "KOSPI":
         import FinanceDataReader as fdr
 
-        return fdr.DataReader("KS11", start, end)
+        frame = fdr.DataReader("KS11", start, end)
+        return fill_kospi_tail(frame, end)
     if index_name == "VKOSPI":
         return _fetch_vkospi_frame(start, end)
     raise MarketCollectionError(f"알 수 없는 지수: {index_name}")
@@ -107,6 +108,129 @@ def _fetch_vkospi_frame(start: str, end: str):
 
     return pd.DataFrame({"종가": [v for _, v in rows]},
                         index=pd.to_datetime([d for d, _ in rows]))
+
+
+# ─── 상류 결측 메움과 신선도 (2026-10-08) ───────────────
+#
+# FDR `KS11`이 2026-09-17 장중부터 행을 주지 않았고, 수집기는 3주 동안 매일
+# "성공"을 찍었다. 요약의 `rows`가 362→350으로 하루 1씩 줄고 있었는데 —
+# 조회 창은 미끄러지는데 끝이 고정된 증상 — 그것을 읽는 코드가 없었다.
+# 세 가지를 바꾼다: ① 캐시 마지막 날 뒤의 평일을 KRX OPEN API로 하루씩
+# 메운다 ② 요약에 마지막 날짜와 묵은 평일 수를 **같이** 찍는다 ③ 묵은
+# 평일이 STALE_WARN_WEEKDAYS 이상이면 WARNING. 휴장일은 평일로 세므로
+# 연휴 뒤엔 한두 날 과장된다 — 그래서 문턱이 1이 아니라 3이다.
+STALE_WARN_WEEKDAYS = 3
+KRX_FILL_MAX_DAYS = 40      # 한 번에 KRX로 메우는 최대 평일 수(일 한도 보호)
+
+
+def weekdays_between(last: str, end: str) -> list[str]:
+    """`last` 다음 날부터 `end`까지의 평일(YYYYMMDD, 순수). 휴장일 포함."""
+    try:
+        a = datetime.strptime(normalize_as_of(last), "%Y%m%d")
+        b = datetime.strptime(normalize_as_of(end), "%Y%m%d")
+    except ValueError:
+        return []
+    out = []
+    d = a + timedelta(days=1)
+    while d <= b:
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y%m%d"))
+        d += timedelta(days=1)
+    return out
+
+
+def stale_weekdays(last: str | None, as_of: str) -> int | None:
+    """마지막 날짜가 기준일보다 몇 평일 뒤처졌나(순수). 모르면 None."""
+    if not last:
+        return None
+    return len(weekdays_between(last, as_of))
+
+
+def frame_last_date(frame: Any) -> str | None:
+    """프레임의 마지막 날짜(YYYYMMDD). 비어 있으면 None."""
+    if frame is None or len(frame) == 0:
+        return None
+    raw = frame.index[-1]
+    if hasattr(raw, "strftime"):
+        return raw.strftime("%Y%m%d")
+    try:
+        return datetime.fromisoformat(str(raw)).strftime("%Y%m%d")
+    except ValueError:
+        return None
+
+
+def fill_kospi_tail(frame: Any, end: str, *,
+                    fetch_day: Callable[[str], dict] | None = None,
+                    max_days: int = KRX_FILL_MAX_DAYS) -> Any:
+    """FDR 프레임의 마지막 날 뒤 평일을 KRX로 하루씩 메운다.
+
+    키가 없거나 KRX가 값을 안 주면 **프레임을 그대로 돌려준다** — 메우지
+    못한 것은 신선도 경고가 말한다. 빈 프레임은 메우지 않는다(어디서부터
+    메울지 모른다; 그건 FDR 장애이지 꼬리 결측이 아니다).
+    """
+    last = frame_last_date(frame)
+    if last is None:
+        return frame
+    missing = weekdays_between(last, end)
+    if not missing:
+        return frame
+    if fetch_day is None:
+        try:
+            import krx_openapi
+            if not krx_openapi._auth_key():
+                log.warning("KOSPI 꼬리 %d평일 결측 — %s 미설정이라 KRX로 메우지 못함",
+                            len(missing), krx_openapi.KEY_NAME)
+                return frame
+            fetch_day = krx_openapi.fetch_kospi
+        except ImportError:
+            return frame
+    rows: list[tuple[str, float]] = []
+    reasons: list[str] = []
+    for day in missing[-max_days:]:
+        got = fetch_day(day)
+        if got.get("value"):
+            rows.append((got.get("date") or day, float(got["value"])))
+        elif got.get("reason"):
+            reasons.append(f"{day}: {got['reason']}")
+    if not rows:
+        log.warning("KOSPI 꼬리 %d평일 결측 — KRX에서도 값 없음 (%s)",
+                    len(missing), "; ".join(reasons[:2]) or "이유 없음")
+        return frame
+    log.info("KOSPI 꼬리 %d평일 중 %d일을 KRX로 메움 (%s~%s)",
+             len(missing), len(rows), rows[0][0], rows[-1][0])
+    import pandas as pd
+
+    tail = pd.DataFrame({"Close": [v for _, v in rows]},
+                        index=pd.to_datetime([d for d, _ in rows]))
+    close_col = next((c for c in ("종가", "Close", "close") if c in frame.columns), None)
+    base = frame[[close_col]].rename(columns={close_col: "Close"}) if close_col else frame
+    return pd.concat([base, tail])
+
+
+def index_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """요약 한 줄(순수) — 행 수만이 아니라 **마지막 날짜와 묵은 평일 수**."""
+    dates = (payload.get("series") or {}).get("date") or []
+    last = str(dates[-1]) if dates else None
+    stale = stale_weekdays(last, payload.get("as_of", ""))
+    return {
+        "dataset": "market_index",
+        "name": payload["index"],
+        "as_of": payload["as_of"],
+        "rows": len(dates),
+        "last": last,
+        "stale_weekdays": stale,
+    }
+
+
+def warn_if_stale(summary: dict[str, Any],
+                  threshold: int = STALE_WARN_WEEKDAYS) -> bool:
+    """묵은 평일이 문턱 이상이면 WARNING을 찍고 True(순수 판정 + 로그)."""
+    stale = summary.get("stale_weekdays")
+    if stale is None or stale < threshold:
+        return False
+    log.warning("%s 지수 캐시가 %d평일 묵었다(마지막 %s, 기준 %s) — 상류 결측 의심",
+                summary.get("name"), stale, summary.get("last"), summary.get("as_of"))
+    return True
 
 
 def _fetch_ohlcv_frame(ticker: str, start: str, end: str):
@@ -696,8 +820,13 @@ def collect_market_index(
     start_s = (end - timedelta(days=int(days_n * 1.6) + 30)).strftime("%Y%m%d")
     frame = fetcher(start_s, end_s, index_n)
     payload = frame_to_payload(frame, index_name=index_n, as_of=end_s)
-    write_market_index_cache(payload, root=root)
-    return payload
+    target = write_market_index_cache(payload, root=root)
+    # 돌려주는 것은 **병합된 캐시**다 — 요약의 rows·last가 파일과 같은 것을
+    # 말해야 한다. 창 안의 행 수(362→350)가 줄어드는 것을 읽는 사람이 없었다.
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return payload
 
 
 def collect_all(*, root: Path | str = PATHS.shareable_root) -> list[dict[str, Any]]:
@@ -718,14 +847,9 @@ def collect_all_public(
     summaries: list[dict[str, Any]] = []
 
     for payload in collect_all(root=root_path):
-        summaries.append(
-            {
-                "dataset": "market_index",
-                "name": payload["index"],
-                "as_of": payload["as_of"],
-                "rows": len(payload["series"]["close"]),
-            }
-        )
+        summary = index_summary(payload)
+        warn_if_stale(summary)
+        summaries.append(summary)
 
     today = datetime.now().strftime("%Y%m%d")
     try:
@@ -801,31 +925,17 @@ def main() -> int:
             )
     elif args.dataset == "indices" or args.index == "all":
         results = collect_all()
-        summaries = [
-            {
-                "dataset": "market_index",
-                "name": payload["index"],
-                "as_of": payload["as_of"],
-                "rows": len(payload["series"]["close"]),
-                "latest_date": payload["series"]["date"][-1],
-                "latest_close": payload["series"]["close"][-1],
-            }
-            for payload in results
-        ]
+        summaries = [dict(index_summary(p), latest_close=p["series"]["close"][-1])
+                     for p in results]
+        for summary in summaries:
+            warn_if_stale(summary)
     else:
         default_days = 320 if args.index == "KOSPI" else 20
         results = [collect_market_index(args.index, days=args.days or default_days)]
-        summaries = [
-            {
-                "dataset": "market_index",
-                "name": payload["index"],
-                "as_of": payload["as_of"],
-                "rows": len(payload["series"]["close"]),
-                "latest_date": payload["series"]["date"][-1],
-                "latest_close": payload["series"]["close"][-1],
-            }
-            for payload in results
-        ]
+        summaries = [dict(index_summary(p), latest_close=p["series"]["close"][-1])
+                     for p in results]
+        for summary in summaries:
+            warn_if_stale(summary)
     print(json.dumps(summaries, ensure_ascii=False))
     return 0
 

@@ -366,3 +366,111 @@ def test_a_corrupt_prior_file_does_not_block_the_write(tmp_path):
     out = _write(tmp_path, ["20260901"], [46.0], "20260901")
     dates, _ = _read(out)
     assert dates == ["20260901"]
+
+
+# ─── 상류가 멈췄는데 3주간 "성공"을 찍었다 (2026-10-08) ────────
+
+
+def _frozen_frame(last="2026-09-17", n=5):
+    """FDR가 2026-09-17에서 멈춘 상황 — 마지막 n거래일만."""
+    days = pd.bdate_range(end=last, periods=n)
+    return pd.DataFrame({"Close": [6700.0 + i for i in range(n)]}, index=days)
+
+
+def test_weekdays_between_counts_only_weekdays_after_last():
+    assert collector.weekdays_between("20260917", "20260917") == []
+    assert collector.weekdays_between("20260917", "20260918") == ["20260918"]
+    # 금(18)·토·일·월(21): 평일만
+    assert collector.weekdays_between("20260917", "20260921") == ["20260918", "20260921"]
+    assert collector.weekdays_between("bad", "20260921") == []
+
+
+def test_the_summary_says_how_stale_the_series_is():
+    """행 수만 보면 모른다. 마지막 날짜와 묵은 평일 수를 같이 찍는다."""
+    payload = {"index": "KOSPI", "as_of": "20261007",
+               "series": {"date": ["20260916", "20260917"], "close": [1.0, 2.0]}}
+    s = collector.index_summary(payload)
+    assert s["last"] == "20260917" and s["rows"] == 2
+    assert s["stale_weekdays"] == 14                        # 09-18 ~ 10-07 평일
+
+
+def test_a_stale_summary_warns_and_a_fresh_one_does_not(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        assert collector.warn_if_stale({"name": "KOSPI", "as_of": "20261007",
+                                        "last": "20260917", "stale_weekdays": 14})
+        assert "14평일" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        # 음성 대조: 하루 뒤처진 것(휴장일·수집 시각)은 경고하지 않는다
+        assert not collector.warn_if_stale({"name": "KOSPI", "as_of": "20261007",
+                                            "last": "20261006", "stale_weekdays": 1})
+        assert caplog.text == ""
+
+
+def test_the_frozen_source_is_filled_from_krx_day_by_day():
+    calls = []
+
+    def fake_day(day):
+        calls.append(day)
+        return {"value": 7000.0 + len(calls), "date": day, "found": True, "reason": ""}
+
+    out = collector.fill_kospi_tail(_frozen_frame(), "20260923", fetch_day=fake_day)
+    assert calls == ["20260918", "20260921", "20260922", "20260923"]
+    payload = collector.frame_to_payload(out, index_name="KOSPI", as_of="20260923")
+    assert payload["series"]["date"][-4:] == calls
+    assert payload["series"]["close"][-1] == 7004.0
+    assert collector.index_summary(payload)["stale_weekdays"] == 0
+
+
+def test_a_holiday_in_the_tail_is_skipped_not_invented():
+    """음성 대조: KRX가 값을 안 주는 날(휴장)은 비워 둔다 — 직전 값으로 메우지 않는다."""
+    def fake_day(day):
+        if day == "20260921":
+            return {"value": None, "date": day, "found": False, "reason": "응답에 데이터 행이 없음"}
+        return {"value": 7000.0, "date": day, "found": True, "reason": ""}
+
+    out = collector.fill_kospi_tail(_frozen_frame(), "20260922", fetch_day=fake_day)
+    payload = collector.frame_to_payload(out, index_name="KOSPI", as_of="20260922")
+    assert "20260921" not in payload["series"]["date"]
+    assert payload["series"]["date"][-2:] == ["20260918", "20260922"]
+
+
+def test_when_krx_gives_nothing_the_frame_is_returned_unchanged(caplog):
+    import logging
+    frame = _frozen_frame()
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        out = collector.fill_kospi_tail(
+            frame, "20260923",
+            fetch_day=lambda d: {"value": None, "date": d, "found": False,
+                                 "reason": "'코스피' 지수를 찾지 못함"})
+    assert out is frame
+    assert "KRX에서도 값 없음" in caplog.text and "찾지 못함" in caplog.text
+
+
+def test_nothing_missing_means_no_krx_call():
+    out = collector.fill_kospi_tail(
+        _frozen_frame(last="2026-09-23"), "20260923",
+        fetch_day=lambda d: (_ for _ in ()).throw(AssertionError("불려선 안 된다")))
+    assert len(out) == 5
+
+
+def test_an_empty_frame_is_not_filled():
+    """빈 프레임은 꼬리 결측이 아니라 소스 장애다 — 어디서부터 메울지 모른다."""
+    out = collector.fill_kospi_tail(pd.DataFrame(), "20260923",
+                                    fetch_day=lambda d: {"value": 1.0, "date": d})
+    assert len(out) == 0
+
+
+def test_collect_market_index_returns_the_merged_cache(tmp_path):
+    """요약이 창 안의 행 수가 아니라 **파일**을 말한다."""
+    old = {"index": "KOSPI", "as_of": "20260917",
+           "series": {"date": ["20260915", "20260916", "20260917"],
+                      "close": [1.0, 2.0, 3.0]}}
+    collector.write_market_index_cache(old, root=tmp_path)
+    fresh = pd.DataFrame({"Close": [4.0]}, index=pd.to_datetime(["2026-09-18"]))
+    payload = collector.collect_market_index(
+        "KOSPI", days=5, as_of="20260918", root=tmp_path,
+        fetcher=lambda *a: fresh)
+    assert payload["series"]["date"] == ["20260915", "20260916", "20260917", "20260918"]
+    assert collector.index_summary(payload)["stale_weekdays"] == 0
