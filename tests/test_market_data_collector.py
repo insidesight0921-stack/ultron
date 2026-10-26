@@ -518,3 +518,48 @@ def test_flow_collection_does_not_leak_the_krx_login_id_to_stdout(capsys):
 
     collector.collect_flow_daily(backfill=chatty_backfill)
     assert "로그인 ID" not in capsys.readouterr().out
+
+
+# ─── VIX 이력이 08-28에 멈춘 채였다 (2026-10-26) ────
+
+
+def test_vix_is_collected_daily_through_the_merging_backfill():
+    calls = []
+
+    def fake_backfill(days):
+        calls.append(days)
+        return {"item": "vix", "n": 516, "range": ("20240930", "20261023")}
+
+    s = collector.collect_vix_daily(backfill=fake_backfill)
+    assert calls == [collector.VIX_DAILY_DAYS]
+    assert s["dataset"] == "vix" and s["last"] == "20261023" and s["rows"] == 516
+    assert s["stale_weekdays"] == collector.stale_weekdays("20261023", s["as_of"])
+
+
+def test_a_failing_vix_collection_does_not_break_the_public_run(monkeypatch, tmp_path, caplog):
+    """음성 대조: FRED 키가 없어도 외국인 순매수·티커맵은 그대로 돈다."""
+    import logging
+    monkeypatch.setattr(collector, "collect_all", lambda root: [])
+    monkeypatch.setattr(collector, "collect_ticker_map", lambda **k: {"005930": "삼성전자"})
+    monkeypatch.setattr(collector, "collect_factor_snapshot",
+                        lambda m, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+    monkeypatch.setattr(collector, "collect_universe",
+                        lambda m, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+    monkeypatch.setattr(collector, "collect_flow_daily",
+                        lambda **k: {"dataset": "flow", "last": None, "stale_weekdays": None})
+    monkeypatch.setattr(collector, "collect_vix_daily",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("FRED_API_KEY 없음")))
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        out = collector.collect_all_public(root=tmp_path)
+    assert any(s["dataset"] == "flow" for s in out)
+    assert not any(s["dataset"] == "vix" for s in out)
+    assert "VIX 이력 수집 건너뜀" in caplog.text and "FRED_API_KEY 없음" in caplog.text
+
+
+def test_vix_lagging_by_the_us_close_is_not_a_stale_warning(caplog):
+    """음성 대조: 미국 장 시차로 3평일 밀린 것은 경고하지 않는다(ops_probe 문턱 4와 같다)."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="market_data_collector"):
+        warned = collector.warn_if_stale({"name": "VIX", "stale_weekdays": 3, "last": "x"},
+                                         threshold=collector.VIX_STALE_WARN_WEEKDAYS)
+    assert not warned and caplog.text == ""

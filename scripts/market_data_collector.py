@@ -234,6 +234,31 @@ def collect_flow_daily(days: int = FLOW_DAILY_DAYS,
             "stale_weekdays": stale_weekdays(last, datetime.now().strftime("%Y%m%d"))}
 
 
+VIX_DAILY_DAYS = 20         # 일간 수집기가 VIX 이력을 덧대는 창(거래일)
+# 미국 장 마감 뒤에 FRED가 올리므로 한국 날짜로 늘 하루 이상 늦다 — ops_probe와 같은 문턱.
+VIX_STALE_WARN_WEEKDAYS = 4
+
+
+def collect_vix_daily(days: int = VIX_DAILY_DAYS,
+                      backfill: Callable[[int], dict] | None = None) -> dict[str, Any]:
+    """VIX 이력을 **매일** 덧댄다(2026-10-26).
+
+    `cache/vix`는 `vix_calibrate`를 손으로 돌린 2026-08-28에 멈춰 있었다.
+    대리 지표 화면은 FRED에서 그날 값만 받아 썼으므로 아무도 몰랐고,
+    나우캐스팅·위험 검정은 두 달 묵은 VIX로 판정하고 있었다. 외국인 순매수와
+    같은 처방 — 병합하는 소급 함수를 짧은 창으로 매일 부른다.
+    FRED 키가 없으면 그 함수가 실패하고, 여기서는 건너뛴다.
+    """
+    if backfill is None:
+        import collect_history
+        backfill = collect_history.backfill_vix
+    got = backfill(int(days))
+    first, last = (got.get("range") or (None, None))
+    return {"dataset": "vix", "name": "VIX", "as_of": datetime.now().strftime("%Y%m%d"),
+            "rows": got.get("n"), "last": last,
+            "stale_weekdays": stale_weekdays(last, datetime.now().strftime("%Y%m%d"))}
+
+
 def index_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """요약 한 줄(순수) — 행 수만이 아니라 **마지막 날짜와 묵은 평일 수**."""
     dates = (payload.get("series") or {}).get("date") or []
@@ -885,6 +910,13 @@ def collect_all_public(
     except Exception as exc:
         log.warning("외국인 순매수 이력 수집 건너뜀: %s", exc)
 
+    try:
+        summary = collect_vix_daily()
+        warn_if_stale(summary, threshold=VIX_STALE_WARN_WEEKDAYS)
+        summaries.append(summary)
+    except Exception as exc:
+        log.warning("VIX 이력 수집 건너뜀: %s", exc)
+
     today = datetime.now().strftime("%Y%m%d")
     try:
         mapping = collect_ticker_map(as_of=today, cache_dir=cache_dir)
@@ -934,7 +966,7 @@ def main() -> int:
     except ImportError:
         pass
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=("all", "indices", "ticker-map", "factors", "flow"))
+    parser.add_argument("--dataset", choices=("all", "indices", "ticker-map", "factors", "flow", "vix"))
     parser.add_argument("--index", choices=("KOSPI", "VKOSPI", "all"))
     parser.add_argument("--days", type=int)
     args = parser.parse_args()
@@ -947,6 +979,10 @@ def main() -> int:
     elif args.dataset == "flow":
         summary = collect_flow_daily(days=args.days or FLOW_DAILY_DAYS)
         warn_if_stale(summary)
+        summaries = [summary]
+    elif args.dataset == "vix":
+        summary = collect_vix_daily(days=args.days or VIX_DAILY_DAYS)
+        warn_if_stale(summary, threshold=VIX_STALE_WARN_WEEKDAYS)
         summaries = [summary]
     elif args.dataset == "factors":
         summaries = []
