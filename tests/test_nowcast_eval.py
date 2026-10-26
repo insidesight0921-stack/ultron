@@ -528,7 +528,7 @@ def test_a_thin_miss_is_only_unverified():
     rec = ne.validation_record({"VIX 밴드": _res(197, 54.8, 55.8, "음성 대조 미달")},
                                at="t")
     note = ne.indicator_note("VIX 밴드", rec)
-    assert note.startswith("미검증") and "예측력 없음" not in note
+    assert note.startswith("방향 미검증") and "예측력 없음" not in note
 
 
 def test_a_finding_is_named_as_verified():
@@ -546,3 +546,89 @@ def test_no_record_means_unmeasured_not_verified():
 def test_an_indicator_absent_from_the_record_is_unmeasured():
     rec = ne.validation_record({"X": _res(100, 50.0, 55.0, "음성 대조 미달")}, at="t")
     assert ne.indicator_note("Y", rec) == "미측정"
+
+
+# ─── 위험 검정: risk_off 뒤에 더 흔들렸나 (2026-10-26) ────
+
+
+def _risk_world(informative: bool, n: int = 600, seed: int = 7):
+    """조용한 구간(일 0.3%)과 거친 구간(일 3%)이 60일씩 번갈아 오는 시장.
+
+    informative면 지표가 거친 구간 **직전**에 risk_off로 바뀐다. 아니면 지표
+    상태가 시장과 무관한 다른 주기(37일)로 돈다.
+    """
+    import random
+    rng = random.Random(seed)
+    closes, price = [], 100.0
+    for i in range(n):
+        wild = (i // 60) % 2 == 1
+        price *= 1 + rng.gauss(0, 0.03 if wild else 0.003)
+        closes.append(price)
+    dates = [f"d{i:04d}" for i in range(n)]
+    preds = []
+    for i in range(n):
+        if informative:
+            wild_next = ((i + 10) // 60) % 2 == 1
+            preds.append((dates[i], ne.DOWN if wild_next else ne.UP))
+        else:
+            preds.append((dates[i], ne.DOWN if (i // 37) % 2 else ne.UP))
+    return preds, dates, closes
+
+
+def test_forward_risk_uses_only_the_days_after():
+    closes = [100, 100, 100, 50, 100]
+    vol, mdd = ne.forward_risk(closes, 0, horizon=3)
+    assert round(mdd, 6) == 50.0
+    assert ne.forward_risk(closes, 2, horizon=3) is None       # 창이 모자라면 None
+
+
+def test_an_indicator_that_precedes_turbulence_clears_the_risk_bar():
+    """양성 대조."""
+    r = ne.risk_by_state(*_risk_world(True))
+    assert r["vol_gap"] > 0 and r["vol_pct"] >= ne.RISK_BAR
+    assert r["verdict"] == "위험 정보 있음"
+
+
+def test_an_unrelated_cycle_is_not_risk_information():
+    """음성 대조: 지표에도 긴 연속 구간이 있지만 시장과 무관하면 통과하지 않는다."""
+    r = ne.risk_by_state(*_risk_world(False))
+    assert r["verdict"] == "위험 정보 없음"
+
+
+def test_risk_needs_both_states():
+    preds, dates, closes = _risk_world(True)
+    only_on = [(d, ne.UP) for d, _ in preds]
+    assert ne.risk_by_state(only_on, dates, closes)["verdict"] == "표본 부족"
+
+
+def test_the_note_carries_both_direction_and_risk():
+    rec = ne.validation_record(
+        {"외국인 순매수(5일)": _res(2162, 50.0, 54.7, "음성 대조 미달 — 정보 없음(표본 충분)")},
+        at="t",
+        risk={"외국인 순매수(5일)": {"n": 2180, "n_on": 1003, "n_off": 1177,
+                                  "vol_gap": 4.92, "vol_pct": 99.6, "mdd_gap": 1.08,
+                                  "mdd_pct": 97.5, "verdict": "위험 정보 있음"}})
+    note = ne.indicator_note("외국인 순매수(5일)", rec)
+    assert "방향 예측력 없음" in note
+    assert "위험 정보 있음" in note and "+4.9%p" in note
+
+
+def test_old_records_without_risk_keep_their_note():
+    rec = ne.validation_record({"VIX 밴드": _res(197, 54.8, 55.8, "음성 대조 미달")}, at="t")
+    assert "risk" not in rec
+    assert ne.indicator_note("VIX 밴드", rec) == "방향 미검증 · 197건"
+
+
+def test_risk_only_record_is_not_shown_as_unmeasured():
+    rec = {"tests": {}, "risk": {"VKOSPI 밴드": {"vol_gap": 51.6, "vol_pct": 100.0,
+                                                "verdict": "위험 정보 있음"}}}
+    assert ne.indicator_note("VKOSPI", rec).startswith("위험 정보 있음")
+
+
+def test_the_risk_note_shows_the_metric_that_carried_the_verdict():
+    """최대낙폭으로만 통과했으면 최대낙폭 백분위를 보인다 — 「있음」 옆에 낮은 숫자 금지."""
+    rec = {"tests": {}, "risk": {"VIX 밴드": {"vol_gap": 1.0, "vol_pct": 60.0,
+                                            "mdd_gap": 3.2, "mdd_pct": 99.8,
+                                            "verdict": "위험 정보 있음"}}}
+    note = ne.indicator_note("VIX", rec)
+    assert "최대낙폭 +3.2%p, 백분위 99.8" in note and "60.0" not in note

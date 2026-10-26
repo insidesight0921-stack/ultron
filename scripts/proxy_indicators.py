@@ -220,7 +220,12 @@ def format_snapshot(snap: dict, notes: dict | None = None) -> str:
     head = (f"📡 실시간 대리 지표 — {s['lean']} "
             f"({s['n_available']}/{s['n_total']} 확보)")
     if dead:
-        head += f"\n  ⚠️ 이 중 {len(dead)}개는 **예측력이 없다고 측정된 지표**입니다"
+        head += f"\n  ⚠️ 이 중 {len(dead)}개는 **다음 날 방향 예측력이 없다고 측정된 지표**입니다"
+    # 방향은 못 맞혀도 그 뒤 흔들림을 앞서 말하는 지표가 있다(2026-10-26 위험 검정).
+    risky = [n for n, note in notes.items() if "위험 정보 있음" in note]
+    if risky:
+        head += (f"\n  ℹ️ {', '.join(risky)}: risk_off 뒤 변동성이 실제로 컸다 — "
+                 "방향이 아니라 위험 크기로 읽는다")
     lines = [head]
     for i in snap["indicators"]:
         value = "—" if i["value"] is None else f"{i['value']}{i['unit']}"

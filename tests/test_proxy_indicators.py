@@ -379,3 +379,15 @@ def test_a_stale_kospi_cache_yields_no_closes_but_keeps_the_date(tmp_path, monke
     # 음성 대조: 신선하면 그대로 준다
     closes, as_of = pi._kospi_series(today="20260918")
     assert closes == [6700.0, 6724.34] and as_of == "20260917"
+
+
+def test_snapshot_names_the_indicators_that_carry_risk_information():
+    snap = {"summary": {"lean": "혼조", "n_available": 2, "n_total": 2, "missing": []},
+            "indicators": [pi.indicator("외국인 순매수(5일)", -1.0, "risk_off"),
+                           pi.indicator("VIX", 19.0, "neutral")]}
+    notes = {"외국인 순매수(5일)": "**방향 예측력 없음**(표본 2162건에서 기준선 미달) · 위험 정보 있음(…)",
+             "VIX": "방향 미검증 · 197건 · 위험 정보 없음(…)"}
+    out = pi.format_snapshot(snap, notes=notes)
+    assert "다음 날 방향 예측력이 없다고" in out
+    assert "ℹ️ 외국인 순매수(5일): risk_off 뒤 변동성이 실제로 컸다" in out
+    assert "VIX: risk_off" not in out

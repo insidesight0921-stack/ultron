@@ -601,7 +601,110 @@ def _fix(value, places: int = 6):
     return None if value is None else round(float(value), places)
 
 
-def validation_record(results: dict, *, at: str, base: Optional[float] = None) -> dict:
+# ─── 위험 검정: 방향이 아니라 「그 뒤에 얼마나 흔들렸나」 (2026-10-26) ───
+#
+# 위 검정은 다음 날 **방향**을 묻는다. 그런데 대리 지표는 위험 지표다 —
+# 외국인 순매수는 방향 적중 50.0%로 「예측력 없음」이었지만 9년치에서
+# 순매도 구간 뒤 20일 변동성이 +4.9%p 높았다(순환이동 백분위 99.6).
+# 방향 판정만 화면에 붙이면 쓸 수 있는 지표를 버린다.
+
+RISK_HORIZON = 20          # 이후 거래일
+RISK_TRIALS = 1000
+RISK_SEED = 20261026
+# 사전 등록: 지표 4종 × 지표값 2종(변동성·최대낙폭) → 본페로니 0.05/8
+RISK_BAR = 100 - 5 / 8     # 99.375
+
+
+def forward_risk(closes: list[float], i: int, horizon: int = RISK_HORIZON):
+    """i일 종가부터 horizon일 동안의 (연율 변동성 %, 최대낙폭 %) — 순수.
+
+    i일 **이후**만 쓴다. i일 지표로 i일 뒤를 보는 것이므로 미래 참조가 아니다.
+    """
+    if i + horizon >= len(closes):
+        return None
+    w = closes[i:i + horizon + 1]
+    if any(c <= 0 for c in w):
+        return None
+    rets = [math.log(w[k + 1] / w[k]) for k in range(horizon)]
+    mean = sum(rets) / horizon
+    vol = math.sqrt(sum((r - mean) ** 2 for r in rets) / horizon) * math.sqrt(252) * 100
+    peak, mdd = w[0], 0.0
+    for c in w:
+        peak = max(peak, c)
+        mdd = min(mdd, c / peak - 1)
+    return vol, -mdd * 100
+
+
+def _risk_gap(states: list, outcomes: list) -> Optional[float]:
+    on = [o for s, o in zip(states, outcomes) if s == UP]
+    off = [o for s, o in zip(states, outcomes) if s == DOWN]
+    if not on or not off:
+        return None
+    return sum(off) / len(off) - sum(on) / len(on)
+
+
+def risk_by_state(predictions: list[tuple], dates: list[str], closes: list[float], *,
+                  horizon: int = RISK_HORIZON, trials: int = RISK_TRIALS,
+                  seed: int = RISK_SEED) -> dict:
+    """risk_off 뒤가 risk_on 뒤보다 더 흔들렸나(순수).
+
+    **순환이동 순열.** 지표 상태는 며칠~몇 달씩 이어지고(200일선 기울기는 평균
+    85일) 20일 창도 겹친다 — 날을 하나씩 섞으면 그 연속성이 깨져 귀무가 너무
+    좁아진다. 상태열을 통째로 k칸 밀면 연속성은 남고 결과와의 정렬만 깨진다.
+    """
+    import random
+
+    idx = {d: i for i, d in enumerate(dates)}
+    states, vols, mdds = [], [], []
+    for d, s in predictions:
+        i = idx.get(d)
+        r = forward_risk(closes, i, horizon) if i is not None else None
+        if r is None:
+            continue
+        states.append(s)
+        vols.append(r[0])
+        mdds.append(r[1])
+    n_on = sum(1 for s in states if s == UP)
+    n_off = sum(1 for s in states if s == DOWN)
+    out = {"n": len(states), "n_on": n_on, "n_off": n_off}
+    if min(n_on, n_off) < MIN_PREDICTIONS or len(states) <= horizon * 4:
+        out["verdict"] = "표본 부족"
+        return out
+    rng = random.Random(seed)
+    shifts = [rng.randrange(horizon * 2, len(states) - horizon * 2) for _ in range(trials)]
+    for key, vals in (("vol", vols), ("mdd", mdds)):
+        obs = _risk_gap(states, vals)
+        null = [g for g in (_risk_gap(states[k:] + states[:k], vals) for k in shifts)
+                if g is not None]
+        out[f"{key}_gap"] = _fix(obs, 3)
+        out[f"{key}_pct"] = _fix(sum(1 for g in null if g < obs) / len(null) * 100, 1)
+    if out["vol_pct"] >= RISK_BAR or out["mdd_pct"] >= RISK_BAR:
+        out["verdict"] = "위험 정보 있음"
+    else:
+        out["verdict"] = "위험 정보 없음"
+    return out
+
+
+def risk_note(name: str, record: Optional[dict]) -> str:
+    """위험 검정 결과 한 마디(순수). 기록이 없으면 빈 문자열."""
+    r = ((record or {}).get("risk") or {}).get(test_name(name))
+    if not r or r.get("verdict") == "표본 부족" or r.get("vol_gap") is None:
+        return ""
+    # **판정을 만든 쪽을 보인다.** 최대낙폭으로만 통과했는데 변동성 백분위를
+    # 찍으면 「있음」 옆에 낮은 숫자가 붙는다(2026-10-26 검토).
+    key, label = ("vol", "변동성")
+    if (r.get("mdd_pct") or 0) > (r.get("vol_pct") or 0):
+        key, label = ("mdd", "최대낙폭")
+    unit = "%p"
+    detail = (f"risk_off 뒤 {RISK_HORIZON}일 {label} {r[f'{key}_gap']:+.1f}{unit}, "
+              f"백분위 {r[f'{key}_pct']}")
+    if r["verdict"] == "위험 정보 있음":
+        return f"위험 정보 있음({detail})"
+    return f"위험 정보 없음({detail})"
+
+
+def validation_record(results: dict, *, at: str, base: Optional[float] = None,
+                      risk: Optional[dict] = None) -> dict:
     """원장에 남길 한 건(순수). **대조군 행은 판정이 아니므로 뺀다.**"""
     tests = {}
     for name, r in (results or {}).items():
@@ -615,7 +718,10 @@ def validation_record(results: dict, *, at: str, base: Optional[float] = None) -
                        "percentile": _fix(r.get("percentile")),
                        "verdict": r.get("verdict")}
     findings = [k for k, v in tests.items() if v.get("verdict") == VERDICT_FINDING]
-    return {"at": at, "base_rate": _fix(base), "tests": tests, "findings": findings}
+    rec = {"at": at, "base_rate": _fix(base), "tests": tests, "findings": findings}
+    if risk:
+        rec["risk"] = risk
+    return rec
 
 
 def indicator_note(name: str, record: Optional[dict]) -> str:
@@ -627,15 +733,19 @@ def indicator_note(name: str, record: Optional[dict]) -> str:
     if not record:
         return "미측정"
     t = (record.get("tests") or {}).get(test_name(name))
+    risk = risk_note(name, record)
     if not t or not t.get("n"):
-        return "미측정"
+        return risk or "미측정"
     verdict = str(t.get("verdict") or "")
     n = t.get("n")
     if verdict == VERDICT_FINDING:
-        return f"검증됨 · {n}건"
-    if "정보 없음" in verdict:
-        return f"**예측력 없음**(표본 {n}건에서 기준선 미달)"
-    return f"미검증 · {n}건"
+        head = f"검증됨 · {n}건"
+    elif "정보 없음" in verdict:
+        # 「예측력」은 다음 날 방향이다 — 위험 정보와 섞어 읽지 않게 이름을 붙인다.
+        head = f"**방향 예측력 없음**(표본 {n}건에서 기준선 미달)"
+    else:
+        head = f"방향 미검증 · {n}건"
+    return f"{head} · {risk}" if risk else head
 
 
 def _cli() -> int:
@@ -681,6 +791,23 @@ def _cli() -> int:
                          else {"n": 0,
                                "verdict": f"캐시 없음 — `{hint}`로 소급 가능"})
     print(format_report(results, truth))
+
+    # 위험 검정(2026-10-26) — 같은 예측열, 다른 질문: 그 뒤 얼마나 흔들렸나.
+    risk = {}
+    for name, preds in (("코스피 200일선 기울기", slope), ("VKOSPI 밴드", vkospi),
+                        ("VIX 밴드", vix_preds), ("외국인 순매수(5일)", flow_preds)):
+        if preds:
+            risk[name] = risk_by_state(preds, dates, closes)
+    print()
+    print(f"━━━ 위험 검정: risk_off 뒤 {RISK_HORIZON}거래일이 risk_on 뒤보다 더 흔들렸나 "
+          f"(사전 등록 백분위 {RISK_BAR} 이상) ━━━")
+    for name, r in risk.items():
+        if r.get("vol_gap") is None:
+            print(f"  {name}: {r['verdict']} (on {r['n_on']} · off {r['n_off']})")
+            continue
+        print(f"  {name}: 변동성 {r['vol_gap']:+.2f}%p(백분위 {r['vol_pct']}) · "
+              f"최대낙폭 {r['mdd_gap']:+.2f}%p(백분위 {r['mdd_pct']}) → {r['verdict']} "
+              f"(on {r['n_on']} · off {r['n_off']})")
     if args.record:
         from datetime import datetime
         import finding_ledger as fl
@@ -690,7 +817,7 @@ def _cli() -> int:
         except Exception:                                   # noqa: BLE001
             ledger = (Path(__file__).resolve().parents[1] / "data" / "private" /
                       "state" / VALIDATION_FILE)
-        rec = validation_record(results, base=base_rate(truth),
+        rec = validation_record(results, base=base_rate(truth), risk=risk,
                                 at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
         _, added = fl.append(rec, ledger, ignore=("at",))
         print()
