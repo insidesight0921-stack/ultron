@@ -2597,6 +2597,9 @@ function sigaccCard(title, a) {
   const pct = v => (v === null || v === undefined) ? "—" : v + "%";
   const edge = a.avg_edge;
   const cls = edge === null ? "" : (edge > 0 ? "up" : (edge < 0 ? "down" : ""));
+  // 같은 날 매수 종목 − 약세 종목(2026-10-26). 베이스라인 edge에 섞인 시장 방향을 지운 값.
+  const sp = a.spread;
+  const spText = sp ? `${sp.mean > 0 ? "+" : ""}${sp.mean}%p (${sp.bull_wins}/${sp.days}일)` : "— (방향 섞인 날 없음)";
   return `<div class="slot">
     <div class="slot-name">${title}</div>
     <div class="slot-capital delta ${cls}">${edge === null ? "—" : (edge > 0 ? "+" : "") + edge + "%p"}</div>
@@ -2604,6 +2607,7 @@ function sigaccCard(title, a) {
       <span>표본</span><span>${a.n}건${sigaccDays(a)}</span>
       <span>적중률</span><span>${pct(a.hit_rate)}</span>
       <span>평균 수익률</span><span>${pct(a.avg_ret)}</span>
+      <span title="같은 날 매수 종목 수익률 − 경고·매도 종목 수익률">같은 날 차이</span><span>${spText}</span>
       <span>판정</span><span>${a.verdict}</span>
     </div>
   </div>`;

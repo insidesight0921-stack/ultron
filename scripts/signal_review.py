@@ -266,6 +266,36 @@ def within_day_percentile(rows: list[dict], horizon: int, *,
             "pct": round(pct, 1), "mixed_days": mixed_days}
 
 
+def same_day_spread(rows: list[dict], horizon: int) -> Optional[dict]:
+    """같은 날 **매수 종목 원수익률 − 경고·매도 종목 원수익률**(%p, 순수).
+
+    순열 백분위는 판정에는 맞지만 "얼마나"를 말하지 않는다. 2026-10-26에
+    액션별 edge(매도 +8.2 · 매수 −8.8)만 보고 "약세 신호가 맞는다"고 읽을 뻔했는데,
+    같은 날끼리 빼 보니 −0.56%p(30일 중 12일 우세)였다 — 10월 초 KOSPI −21%가
+    만든 숫자였다. 시장 방향은 같은 날 두 묶음에 똑같이 들어가므로 빼면 지워진다.
+
+    양수면 봇이 같은 날 오를 종목에 매수, 내릴 종목에 약세를 붙였다는 뜻이다.
+    방향이 섞인 날만 센다 — 한 방향뿐인 날은 뺄 상대가 없다. 기술 통계일 뿐
+    판정은 within_day_percentile이 한다(판정 기준을 둘로 늘리지 않는다).
+    """
+    by_day: dict[str, tuple[list[float], list[float]]] = {}
+    for r in rows:
+        v = r.get(f"ret_{horizon}d")
+        if v is None:
+            continue
+        bear = str(r.get("action") or "") in BEARISH
+        bull, bears = by_day.setdefault(str(r.get("day") or ""), ([], []))
+        (bears if bear else bull).append(-v if bear else v)   # 저장값은 방향정렬 → 원수익률
+    diffs = sorted(sum(b) / len(b) - sum(s) / len(s)
+                   for b, s in by_day.values() if b and s)
+    if not diffs:
+        return None
+    n = len(diffs)
+    median = diffs[n // 2] if n % 2 else (diffs[n // 2 - 1] + diffs[n // 2]) / 2
+    return {"days": n, "mean": round(sum(diffs) / n, 3), "median": round(median, 3),
+            "bull_wins": sum(1 for d in diffs if d > 0)}
+
+
 def _agg(rows: list[dict], horizon: int) -> dict:
     kept = [r for r in rows if r.get(f"ret_{horizon}d") is not None]
     vals = [r[f"ret_{horizon}d"] for r in kept]
@@ -297,6 +327,7 @@ def _agg(rows: list[dict], horizon: int) -> dict:
         "avg_ret": round(sum(vals) / n, 3) if n else None,
         "avg_edge": round(sum(edges) / len(edges), 3) if edges else None,
         "perm": perm,
+        "spread": same_day_spread(kept, horizon),
         "verdict": verdict,
     }
 
@@ -383,11 +414,18 @@ def format_summary(s: dict) -> str:
         lines.append(avail_line)
     lines += ["",
              f"전체 {t['n']}건 · 적중 {t['hit_rate']}% · 평균 {t['avg_ret']}% "
-             f"· 베이스라인 대비 {t['avg_edge']}%p → {t['verdict']}", ""]
-    lines.append("전략별")
+             f"· 베이스라인 대비 {t['avg_edge']}%p → {t['verdict']}"]
+    sp = t.get("spread")
+    if sp:
+        lines.append(f"같은 날 비교: 매수 종목이 경고·매도 종목보다 평균 {sp['mean']:+}%p "
+                     f"(중앙 {sp['median']:+}, 방향 섞인 {sp['days']}일 중 {sp['bull_wins']}일 우세)")
+        lines.append("   _시장 방향은 같은 날 두 묶음에 똑같이 들어가 빼면 지워진다 — 0 근처면 종목을 못 가려낸 것._")
+    lines += ["", "전략별"]
     for k, a in s["by_strategy"].items():
-        lines.append(f"  • {k}: {a['n']}건 · 적중 {a['hit_rate']}% · edge {a['avg_edge']}%p ({a['verdict']})")
-    lines.append("액션별")
+        sp = a.get("spread")
+        same = f" · 같은 날 {sp['mean']:+}%p/{sp['days']}일" if sp else ""
+        lines.append(f"  • {k}: {a['n']}건 · 적중 {a['hit_rate']}% · edge {a['avg_edge']}%p{same} ({a['verdict']})")
+    lines.append("액션별 _(한 방향만 모은 묶음이라 edge에 시장 방향이 그대로 섞인다 — 같은 날 비교로 읽는다)_")
     for k, a in s["by_action"].items():
         lines.append(f"  • {k}: {a['n']}건 · 적중 {a['hit_rate']}% · edge {a['avg_edge']}%p")
     hold = s.get("hold") or {}

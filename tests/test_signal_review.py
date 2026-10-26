@@ -616,3 +616,66 @@ def test_too_few_mixed_days_is_untestable_not_a_bad_score():
     s = sr.summarize(rows, horizon=1)
     assert s["total"]["perm"]["mixed_days"] == 2
     assert s["total"]["verdict"].startswith("검정 불가(방향 섞인 날 2일")
+
+
+# ─── 같은 날 비교: 매수 종목 − 약세 종목 원수익률 (2026-10-26) ────
+
+
+def test_same_day_spread_is_positive_when_the_bot_picks_direction_well():
+    rows = []
+    for d in range(1, 6):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[2.0, 1.0], bear_rets=[-1.0, -2.0])
+    sp = sr.same_day_spread(rows, 1)
+    assert sp == {"days": 5, "mean": 3.0, "median": 3.0, "bull_wins": 5}
+
+
+def test_same_day_spread_ignores_the_market_direction():
+    """음성 대조: 시장이 −10%로 무너져도 두 묶음이 같이 빠지면 차이는 0이다.
+
+    액션별 edge는 이 장에서 매도 +10 · 매수 −10으로 보인다(2026-10 실측과 같은 모양).
+    """
+    rows = []
+    for d in range(1, 6):
+        rows += _mixed_day(f"2026-10-{d:02d}", bull_rets=[-10.0], bear_rets=[-10.0])
+    s = sr.summarize(rows, horizon=1)
+    assert s["by_action"]["매도"]["avg_ret"] == 10.0
+    assert s["by_action"]["매수"]["avg_ret"] == -10.0
+    assert s["total"]["spread"]["mean"] == 0.0
+    assert s["total"]["spread"]["bull_wins"] == 0
+
+
+def test_same_day_spread_counts_only_mixed_days():
+    rows = (_mixed_day("2026-09-01", bull_rets=[1.0], bear_rets=[-1.0])
+            + _mixed_day("2026-09-02", bull_rets=[5.0], bear_rets=[])       # 뺄 상대 없음
+            + _mixed_day("2026-09-03", bull_rets=[], bear_rets=[-5.0]))
+    assert sr.same_day_spread(rows, 1)["days"] == 1
+
+
+def test_same_day_spread_is_none_for_a_single_direction_group():
+    rows = []
+    for d in range(1, 6):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[], bear_rets=[-2.0])
+    assert sr.same_day_spread(rows, 1) is None
+    assert sr.summarize(rows, horizon=1)["by_action"]["매도"]["spread"] is None
+
+
+def test_same_day_spread_does_not_change_the_verdict():
+    """판정 기준은 순열 백분위 하나다 — 차이 값은 설명용으로만 붙는다."""
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[2.0, 1.5, 1.0], bear_rets=[-2.0, -1.5, -1.0])
+    s = sr.summarize(rows, horizon=1)
+    without = dict(s["total"]); without.pop("spread")
+    assert without["verdict"].startswith("우위 있음")
+    assert set(without) == {"n", "days", "hit_rate", "avg_ret", "avg_edge", "perm", "verdict"}
+
+
+def test_format_summary_prints_the_same_day_comparison():
+    rows = []
+    for d in range(1, 9):
+        rows += _mixed_day(f"2026-09-{d:02d}", bull_rets=[1.0], bear_rets=[2.0])
+    text = sr.format_summary(sr.summarize(rows, horizon=1))
+    assert "같은 날 비교: 매수 종목이 경고·매도 종목보다 평균 -1.0%p" in text
+    assert "8일 중 0일 우세" in text
+    assert "같은 날 -1.0%p/8일" in text                       # 전략 줄에도
+    assert "시장 방향이 그대로 섞인다" in text                  # 액션별 경고문
