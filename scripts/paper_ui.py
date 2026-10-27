@@ -1184,6 +1184,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
          cursor:pointer; white-space:nowrap; }
   .tab:hover { color:var(--ink); }
   .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tabs.single { display:none; }
+  .tabs[data-group]:not(.shown) { display:none; }
+  .nav-main { display:flex; gap:4px; margin:0 0 6px; }
+  .nav-btn { appearance:none; background:none; border:1px solid transparent; border-radius:8px;
+             font:inherit; font-size:15px; color:var(--ink-2); padding:8px 16px; cursor:pointer; }
+  .nav-btn:hover { color:var(--ink); }
+  .nav-btn.active { background:var(--surface); border-color:var(--hairline); color:var(--ink); font-weight:600; }
+  .nav-badge { display:inline-block; min-width:18px; margin-left:6px; padding:0 5px; border-radius:9px;
+               background:var(--sell); color:#fff; font-size:11px; line-height:18px; text-align:center; }
+  .nav-badge[hidden] { display:none; }
+  .ops-strip { display:block; width:100%; text-align:left; appearance:none; font:inherit; font-size:13px;
+               border:1px solid var(--hairline); border-radius:var(--radius); background:var(--surface);
+               color:var(--ink-2); padding:10px 14px; margin-bottom:16px; cursor:pointer; }
+  .ops-strip.bad { border-color:var(--sell); color:var(--sell); font-weight:600; }
+  .link-btn { appearance:none; background:none; border:0; font:inherit; font-size:13px;
+              color:var(--accent); cursor:pointer; padding:0; }
   .tab-content { display:none; }
   .tab-content.active { display:block; }
 
@@ -1266,33 +1282,74 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <span class="status-pill"><span class="dot"></span><span id="asof">모의 운용 중</span></span>
   </header>
 
-  <section id="kpis" class="kpis"></section>
-
-  <h2>슬롯 배분</h2>
-  <div class="alloc" style="margin-bottom:12px;">
-    <div id="alloc-bar" class="alloc-bar"></div>
-    <div id="alloc-legend" class="alloc-legend"></div>
-  </div>
-  <div id="slots" class="grid grid-4" style="margin-bottom:28px;"></div>
-
-  <div class="tabs">
-    <button class="tab active" data-tab="tab-order">주문</button>
+  <!-- 2단 내비(2026-10-27) — 탭 13개를 같은 무게로 늘어놓으면 매일 볼 것과 가끔 볼 것이
+       섞인다. 위는 목적(개요·거래·봇·분석·운영), 아래는 그 안의 화면이다. 아래 버튼은 기존
+       `.tab[data-tab]` 그대로라 탭별 지연 로딩 리스너가 바뀌지 않는다. -->
+  <nav class="nav-main" id="nav-main">
+    <button class="nav-btn" data-group="g-home">개요</button>
+    <button class="nav-btn" data-group="g-trade">거래</button>
+    <button class="nav-btn" data-group="g-bot">봇</button>
+    <button class="nav-btn" data-group="g-analysis">분석</button>
+    <button class="nav-btn" data-group="g-ops">운영<span id="nav-ops-badge" class="nav-badge" hidden></span></button>
+  </nav>
+  <div class="tabs single" data-group="g-home"><button class="tab" data-tab="tab-home">개요</button></div>
+  <div class="tabs" data-group="g-trade">
+    <button class="tab" data-tab="tab-trades">거래 내역</button>
+    <button class="tab" data-tab="tab-order">주문</button>
     <button class="tab" data-tab="tab-chart">차트</button>
+  </div>
+  <div class="tabs" data-group="g-bot">
     <button class="tab" data-tab="tab-signals">키움봇 신호</button>
     <button class="tab" data-tab="tab-quant">콴텍봇</button>
     <button class="tab" data-tab="tab-ipo">IPO봇</button>
     <button class="tab" data-tab="tab-myquant">나만의 퀀트</button>
+  </div>
+  <div class="tabs" data-group="g-analysis">
     <button class="tab" data-tab="tab-strategy">전략 비교</button>
-    <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-perf">성과</button>
     <button class="tab" data-tab="tab-bench">벤치마크</button>
+    <button class="tab" data-tab="tab-signal-acc">신호 정확도</button>
     <button class="tab" data-tab="tab-phase-acc">국면 정확도</button>
     <button class="tab" data-tab="tab-failure">실패 원인</button>
-    <button class="tab" data-tab="tab-ops">운영</button>
+  </div>
+  <div class="tabs single" data-group="g-ops"><button class="tab" data-tab="tab-ops">운영</button></div>
+
+  <!-- 개요: 매일 보는 것 — 시스템 상태, 자산, 보유, 최근 체결 -->
+  <div id="tab-home" class="tab-content">
+    <button type="button" id="home-ops" class="ops-strip">시스템 상태 불러오는 중…</button>
+
+    <section id="kpis" class="kpis"></section>
+
+    <h2>슬롯 배분</h2>
+    <div class="alloc" style="margin-bottom:12px;">
+      <div id="alloc-bar" class="alloc-bar"></div>
+      <div id="alloc-legend" class="alloc-legend"></div>
+    </div>
+    <div id="slots" class="grid grid-4" style="margin-bottom:28px;"></div>
+
+    <div class="card flush">
+      <div class="card-head">
+        <h3>보유 포지션</h3>
+        <div class="chips" id="chips-pos" data-filter="pos"></div>
+      </div>
+      <div id="positions"><table><thead>
+        <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th>
+            <th class="num">평가금액</th><th class="num">평가손익</th><th class="num">청산선까지</th></tr>
+      </thead><tbody data-group="pos"></tbody></table></div>
+      <div class="card-foot" id="pos-foot">봇별로 묶어 표시</div>
+    </div>
+
+    <div class="card flush">
+      <div class="card-head">
+        <h3>최근 체결</h3>
+        <button type="button" class="link-btn" data-goto="tab-trades">전체 거래 내역 →</button>
+      </div>
+      <div><table><tbody id="recent-trades"><tr><td class="muted">불러오는 중…</td></tr></tbody></table></div>
+    </div>
   </div>
 
-  <!-- 탭 1: 주문 -->
-  <div id="tab-order" class="tab-content active">
+  <!-- 주문(수동) -->
+  <div id="tab-order" class="tab-content">
     <div class="card flush">
       <div class="card-head">
         <h3>주문</h3>
@@ -1333,19 +1390,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </form>
       </div>
     </div>
+  </div>
 
-    <div class="card flush">
-      <div class="card-head">
-        <h3>보유 포지션</h3>
-        <div class="chips" id="chips-pos" data-filter="pos"></div>
-      </div>
-      <div id="positions"><table><thead>
-        <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th>
-            <th class="num">평가금액</th><th class="num">평가손익</th><th class="num">청산선까지</th></tr>
-      </thead><tbody data-group="pos"></tbody></table></div>
-      <div class="card-foot" id="pos-foot">봇별로 묶어 표시</div>
-    </div>
-
+  <!-- 거래 내역 -->
+  <div id="tab-trades" class="tab-content">
     <div class="card flush">
       <div class="card-head">
         <h3>거래 내역</h3>
@@ -1764,14 +1812,36 @@ function toast(msg, isError) {
 function fmt(n) { return Number(n).toLocaleString("ko-KR"); }
 
 // ─── 탭 전환 ──────────────────────────────────────
+// 2단 내비(2026-10-27). 아래 줄 `.tab`을 누르면 그 탭이 속한 위 줄 묶음도 함께 켜진다 —
+// 다른 화면이 `.tab[data-tab=...]`.click()으로 넘어가도(신호 → 주문 폼) 위 줄이 맞게 바뀐다.
+// 묶음마다 마지막으로 본 탭을 기억하고, 주소 #에 남겨 새로고침해도 같은 화면에 머문다.
+const lastTabOf = {};
 document.querySelectorAll(".tab").forEach(btn => {
   btn.addEventListener("click", () => {
+    const bar = btn.closest(".tabs[data-group]");
+    const group = bar ? bar.dataset.group : null;
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
     btn.classList.add("active");
     $(btn.dataset.tab).classList.add("active");
+    document.querySelectorAll(".tabs[data-group]").forEach(b => b.classList.toggle("shown", b === bar));
+    document.querySelectorAll(".nav-btn").forEach(n => n.classList.toggle("active", n.dataset.group === group));
+    if (group) lastTabOf[group] = btn;
+    try { history.replaceState(null, "", "#" + btn.dataset.tab.replace(/^tab-/, "")); } catch (e) {}
   });
 });
+document.querySelectorAll(".nav-btn").forEach(n => n.addEventListener("click", () => {
+  const first = document.querySelector(`.tabs[data-group="${n.dataset.group}"] .tab`);
+  (lastTabOf[n.dataset.group] || first).click();
+}));
+document.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () =>
+  document.querySelector(`.tab[data-tab="${b.dataset.goto}"]`).click()));
+$("home-ops").addEventListener("click", () => document.querySelector(".tab[data-tab='tab-ops']").click());
+function openFromHash() {
+  const id = "tab-" + (location.hash || "").replace(/^#/, "");
+  const btn = document.querySelector(`.tab[data-tab="${CSS.escape(id)}"]`);
+  (btn || document.querySelector(".tab[data-tab='tab-home']")).click();
+}
 
 const SLOT_COLORS = ["var(--slot-1)", "var(--slot-2)", "var(--slot-3)", "var(--slot-4)"];
 let SLOT_ORDER = [];            // 화면 표시 순서(자본 큰 순)
@@ -1973,6 +2043,7 @@ async function loadTrades() {
   SLOT_ORDER.forEach(n => { counts[n] = 0; });
   trades.forEach(t => { counts[t.slot_name] = (counts[t.slot_name] || 0) + 1; });
   renderChips("chips-trd", counts, "건");
+  renderRecentTrades(trades);
 
   if (!trades.length) {
     tbody.innerHTML = `<tr><td colspan="8" class="muted">거래 내역 없음</td></tr>`;
@@ -1999,10 +2070,46 @@ async function loadTrades() {
 wireChips("chips-pos", "pos");
 wireChips("chips-trd", "trd");
 
+// 개요의 최근 체결 5건 — 거래 내역 탭과 같은 응답을 쓴다
+function renderRecentTrades(trades) {
+  const tb = $("recent-trades");
+  if (!trades.length) { tb.innerHTML = `<tr><td class="muted">거래 내역 없음</td></tr>`; return; }
+  tb.innerHTML = trades.slice(0, 5).map(t => `<tr>
+    <td class="muted">${(t.executed_at || "").slice(5, 16)}</td>
+    <td><span class="slot-tag"><i style="background:${SLOT_COLOR[t.slot_name] || "var(--muted)"}"></i>${t.slot_name}</span></td>
+    <td>${t.name || ""}<span class="ticker">${t.ticker}</span></td>
+    <td><span class="tag tag-${t.side}">${t.side === "buy" ? "매수" : "매도"}</span></td>
+    <td class="num">${fmt(t.quantity)}주 × ${fmt(Math.round(t.price))}</td>
+    <td class="num">${tradePnl(t)}</td></tr>`).join("");
+}
+
+// 개요 맨 위 한 줄 + 위 줄 「운영」 배지. 기록을 읽기만 한다(/api/ops와 같다).
+async function loadOpsStrip() {
+  const el = $("home-ops"), badge = $("nav-ops-badge");
+  try {
+    const d = await (await fetch("/api/ops")).json();
+    const r = d.record;
+    if (!r) { el.textContent = "운영 감시 기록이 없습니다 — 운영 탭에서 확인하세요"; el.classList.add("bad"); return; }
+    const failing = r.failing || [];
+    const ageMin = Math.round((Date.now() - new Date(r.at).getTime()) / 60000);
+    const stale = ageMin > 45;
+    el.classList.toggle("bad", failing.length > 0 || stale);
+    el.textContent = failing.length
+      ? `❌ ${failing.length}건 이상: ${failing.join(", ")} — 눌러서 운영 탭으로`
+      : stale ? `⚠️ 운영 감시가 ${ageMin}분째 조용합니다 — launchd ops-probe 확인`
+              : `✅ 시스템 정상 · ${r.n}개 검사 · ${ageMin}분 전`;
+    badge.hidden = !(failing.length || stale);
+    badge.textContent = failing.length || "!";
+  } catch (e) {
+    el.textContent = "시스템 상태를 읽지 못했습니다"; el.classList.add("bad");
+  }
+}
+
 async function reload() {
   const slots = await loadSlots();         // 슬롯 색·순서를 먼저 확정
   renderSlotCards(slots);                  // 시세 전에는 현금만 — 「평가 중…」
   const trades = loadTrades();
+  loadOpsStrip();
   await loadValuation();                   // 시세 조회(네이버, 수 초)
   renderSlotCards((window._valuation && window._valuation.slots) || slots);
   await Promise.all([loadPositions(), trades, loadKpis()]);
@@ -3193,6 +3300,9 @@ async function loadMyquantTags() {
 document.getElementById("btn-myquant-scan").addEventListener("click", runMyquantScan);
 document.querySelector(".tab[data-tab='tab-myquant']").addEventListener("click", loadMyquantTags);
 
+
+// 탭별 지연 로딩 리스너가 모두 붙은 뒤에 연다 — 먼저 열면 #ops로 들어와도 빈 화면이다.
+openFromHash();
 </script>
 </body>
 </html>"""
