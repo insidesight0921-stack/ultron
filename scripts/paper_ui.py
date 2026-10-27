@@ -352,7 +352,76 @@ async def api_positions(slot: str | None = None):
 
 @app.get("/api/paper/trades")
 async def api_trades(slot: str | None = None, limit: int = 100):
-    return JSONResponse(_list_trades(slot=slot, limit=limit))
+    """거래 내역 + 매도 행의 라운드트립 손익·품질 제외 사유(2026-10-27).
+
+    매도 기록엔 종목명이 비어 있는 경우가 많아 매수 기록에서 채운다. 주석을 붙이다
+    실패하면 원래 행을 그대로 돌려준다 — 거래 내역이 안 보이는 것보다 낫다.
+    """
+    trades = _list_trades(slot=slot, limit=limit)
+    try:
+        import paper_view as pv
+        import trade_analytics as ta
+
+        everything = _list_trades(limit=100000)
+        kept, excluded = ta.roundtrips_for_analysis(everything)
+        trades = pv.annotate_trades(trades, kept + excluded, excluded, pv.name_map(everything))
+    except Exception:  # noqa: BLE001
+        log.exception("거래 내역 주석 실패 — 원본으로 응답")
+    return JSONResponse(trades)
+
+
+def _load_bot_intraday_state() -> dict:
+    """봇의 장중 상태(피크·직전 폴링가)를 읽기만 한다. 없으면 빈 값."""
+    try:
+        d = json.loads(PATHS.private_state_file("intraday_peaks.json").read_text(encoding="utf-8"))
+        if "peaks" in d or "px" in d:
+            return {"peaks": d.get("peaks") or {}, "px": d.get("px") or {}}
+        return {"peaks": d, "px": {}}
+    except Exception:  # noqa: BLE001
+        return {"peaks": {}, "px": {}}
+
+
+def _valuation() -> dict:
+    """보유 포지션 시세 평가 + 슬롯별 현금·주식·합계(2026-10-27).
+
+    시세는 네이버 실시간(봇과 같은 소스) → 실패하면 봇이 마지막으로 폴링한 가격 →
+    그것도 없으면 장부가. 어느 쪽인지 행마다 `price_source`로 밝힌다.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import exit_rules
+    import paper_view as pv
+
+    slots = _list_slots()
+    positions = [p for p in _list_positions()
+                 if int(p.get("quantity") or 0) > 0 and float(p.get("avg_price") or 0) > 0]
+    state = _load_bot_intraday_state()
+    tickers = sorted({p["ticker"] for p in positions})
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        live = dict(zip(tickers, ex.map(_naver_realtime_price, tickers)))
+    rows = []
+    for p in positions:
+        price, source = live.get(p["ticker"]), "realtime"
+        if not price:
+            price, source = state["px"].get(p["ticker"]), "bot_poll"
+        if not price:
+            source = "book"
+        peak = state["peaks"].get(exit_rules.peak_key(p["slot_id"], p["ticker"], p["avg_price"]))
+        rows.append({**pv.position_view(p, float(price) if price else None, peak),
+                     "price_source": source})
+    return {"slots": pv.slot_equity(slots, rows), "positions": rows,
+            "win_rate": pv.win_rate(_get_performance())}
+
+
+@app.get("/api/paper/valuation")
+async def api_valuation():
+    import asyncio
+
+    try:
+        return JSONResponse(await asyncio.to_thread(_valuation))
+    except Exception as e:  # noqa: BLE001
+        log.exception("평가 조회 실패")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 def _naver_realtime_price(ticker: str):
@@ -1104,6 +1173,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .slot-share { font-size:12px; color:var(--muted); font-weight:400; margin-left:4px; }
   .slot-capital { font-size:19px; font-weight:600; letter-spacing:-.02em; margin-top:6px; }
   .slot-meta { font-size:12px; color:var(--muted); margin-top:6px; display:flex; gap:10px; }
+  .quality-group { margin-top:10px; border-top:1px solid var(--hairline); padding-top:10px; }
+  .quality-group summary { cursor:pointer; font-size:13px; }
   .slot-card { display:flex; justify-content:space-between; align-items:baseline; }
 
   .tabs { display:flex; gap:2px; border-bottom:1px solid var(--hairline);
@@ -1269,9 +1340,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div class="chips" id="chips-pos" data-filter="pos"></div>
       </div>
       <div id="positions"><table><thead>
-        <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">평가금액</th></tr>
+        <tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th>
+            <th class="num">평가금액</th><th class="num">평가손익</th><th class="num">청산선까지</th></tr>
       </thead><tbody data-group="pos"></tbody></table></div>
-      <div class="card-foot">봇별로 묶어 표시 · 평가금액은 평균가 기준 장부가입니다</div>
+      <div class="card-foot" id="pos-foot">봇별로 묶어 표시</div>
     </div>
 
     <div class="card flush">
@@ -1281,9 +1353,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
       <div id="trades"><table><thead>
         <tr><th>시각</th><th>봇</th><th>종목</th><th>방향</th>
-            <th class="num">수량</th><th class="num">단가</th><th class="num">수수료</th></tr>
+            <th class="num">수량</th><th class="num">단가</th><th class="num">수수료</th><th class="num">거래 손익</th></tr>
       </thead><tbody data-group="trd"></tbody></table></div>
-      <div class="card-foot">최신순 100건 · 칩을 누르면 해당 봇 거래만 남습니다</div>
+      <div class="card-foot">최신순 100건 · 칩을 누르면 해당 봇 거래만 남습니다 · 거래 손익은 매도 1건의 수수료 포함 손익(매수 평균가 대비)입니다 · <span class="muted">제외</span> 표시는 성과 집계에서 뺀 거래입니다(사유는 마우스를 올리면 보입니다)</div>
     </div>
   </div>
 
@@ -1723,53 +1795,75 @@ async function loadSlots() {
     sel.appendChild(opt);
   }
   if (prev) sel.value = prev;
+  window._slots = slots;
+  return slots;
+}
 
-  // 슬롯 카드
+// 슬롯 카드·배분 막대(2026-10-27) — `current_capital`은 **현금**이다. 보유 주식 평가액을
+// 더한 합계로 그린다. 현금만 그리면 주식을 많이 든 슬롯이 목표보다 모자라 보인다.
+function renderSlotCards(slots) {
+  const eq = s => Number(s.equity ?? s.current_capital ?? 0);
   $("slots").innerHTML = slots.map(s => `
     <div class="slot" style="--slot-color:${SLOT_COLOR[s.name]}">
-      <div class="slot-name">${s.name}<span class="slot-share">${(s.allocation_pct*100).toFixed(0)}%</span></div>
-      <div class="slot-capital">${won(s.current_capital)}</div>
-      <div class="slot-meta"><span>포지션 ${s.n_positions}</span><span>거래 ${s.n_trades}</span></div>
+      <div class="slot-name">${s.name}<span class="slot-share">목표 ${(s.allocation_pct*100).toFixed(0)}%</span></div>
+      <div class="slot-capital">${won(eq(s))}</div>
+      <div class="slot-meta">${s.equity === undefined ? "<span>평가 중…</span>" :
+        `<span>현금 ${won(s.cash)}</span>${s.stock ? `<span>주식 ${won(s.stock)}</span>` : ""}`}</div>
+      <div class="slot-meta"><span>보유 ${s.n_positions}종목</span><span>거래 ${s.n_trades}건</span></div>
     </div>`).join("");
 
-  // 배분 막대 — 목표 비율이 아니라 실제 자본 비중을 그린다
-  const total = slots.reduce((a, s) => a + Number(s.current_capital || 0), 0);
+  const total = slots.reduce((a, s) => a + eq(s), 0);
   $("alloc-bar").innerHTML = slots.map(s =>
-    `<span style="flex:${Math.max(Number(s.current_capital) || 0, 1)};background:${SLOT_COLOR[s.name]}"></span>`
+    `<span style="flex:${Math.max(eq(s), 1)};background:${SLOT_COLOR[s.name]}"></span>`
   ).join("");
   $("alloc-legend").innerHTML = slots.map(s => {
-    const share = total ? (Number(s.current_capital) / total * 100).toFixed(1) : "0.0";
+    const share = total ? (eq(s) / total * 100).toFixed(1) : "0.0";
     return `<span><i style="background:${SLOT_COLOR[s.name]}"></i>${s.name} ${share}%` +
            ` <span class="muted">(목표 ${(s.allocation_pct*100).toFixed(0)}%)</span></span>`;
   }).join("");
-  window._slots = slots;
-  return slots;
+}
+
+async function loadValuation() {
+  let v = null;
+  try {
+    const r = await fetch("/api/paper/valuation");
+    v = await r.json();
+    if (!r.ok || v.error) throw new Error(v.error || r.status);
+  } catch (e) {
+    v = null;
+    toast("시세 평가 실패 — 장부가로 표시합니다", true);
+  }
+  window._valuation = v;
+  return v;
 }
 
 async function loadKpis() {
   let perf = [];
   try { perf = await (await fetch("/api/performance")).json(); } catch (e) { perf = []; }
   if (!Array.isArray(perf)) perf = [];
-  const slots = window._slots || [];
-  const capital = slots.reduce((a, s) => a + Number(s.current_capital || 0), 0);
+  const v = window._valuation;
+  const slots = (v && v.slots) || window._slots || [];
+  const cash = slots.reduce((a, s) => a + Number(s.cash ?? s.current_capital ?? 0), 0);
+  const stock = slots.reduce((a, s) => a + Number(s.stock || 0), 0);
   const pnl = perf.reduce((a, s) => a + Number(s.total_pnl || 0), 0);
   const closed = perf.reduce((a, s) => a + Number(s.n_closed || 0), 0);
-  const wins = perf.reduce((a, s) =>
-    a + (s.win_rate === null ? 0 : Number(s.win_rate) / 100 * Number(s.n_closed || 0)), 0);
-  const winRate = closed ? (wins / closed * 100).toFixed(1) + "%" : "—";
+  const winRate = v && v.win_rate !== null && v.win_rate !== undefined ? v.win_rate + "%" : "—";
   const open = perf.reduce((a, s) => a + Number(s.n_open_positions || 0), 0);
   const openCost = perf.reduce((a, s) => a + Number(s.open_cost || 0), 0);
-  const cls = pnl > 0 ? "up" : (pnl < 0 ? "down" : "");
+  const priced = v ? v.positions.filter(p => p.pnl !== null) : [];
+  const upnl = priced.reduce((a, p) => a + p.pnl, 0);
+  const ubook = priced.reduce((a, p) => a + p.book, 0);
+  const cls = n => n > 0 ? "up" : (n < 0 ? "down" : "");
   $("kpis").innerHTML = `
-    <div class="kpi"><div class="kpi-label">슬롯 자본 합계</div>
-      <div class="kpi-value">${fmt(Math.round(capital))}<span class="unit">원</span></div>
-      <div class="kpi-meta">슬롯 ${slots.length}개</div></div>
+    <div class="kpi"><div class="kpi-label">총 평가자산</div>
+      <div class="kpi-value">${fmt(Math.round(cash + stock))}<span class="unit">원</span></div>
+      <div class="kpi-meta">${v ? `현금 ${won(cash)} · 주식 ${won(stock)}` : "시세 없음 — 현금만"}</div></div>
     <div class="kpi"><div class="kpi-label">실현손익</div>
-      <div class="kpi-value delta ${cls}">${signed(pnl)}<span class="unit">원</span></div>
-      <div class="kpi-meta">완결 ${closed}건</div></div>
-    <div class="kpi"><div class="kpi-label">승률</div>
-      <div class="kpi-value">${winRate}</div>
-      <div class="kpi-meta">완결 거래 기준</div></div>
+      <div class="kpi-value delta ${cls(pnl)}">${signed(pnl)}<span class="unit">원</span></div>
+      <div class="kpi-meta">완결 ${closed}건 · 승률 ${winRate}</div></div>
+    <div class="kpi"><div class="kpi-label">평가손익</div>
+      <div class="kpi-value delta ${cls(upnl)}">${priced.length ? signed(upnl) : "—"}<span class="unit">${priced.length ? "원" : ""}</span></div>
+      <div class="kpi-meta">${priced.length ? `보유분 ${ubook ? (upnl > 0 ? "+" : "") + (upnl / ubook * 100).toFixed(2) + "%" : ""} · 아직 팔지 않은 손익` : "보유 없음 또는 시세 없음"}</div></div>
     <div class="kpi"><div class="kpi-label">보유</div>
       <div class="kpi-value">${open}<span class="unit">종목</span></div>
       <div class="kpi-meta">매입원가 ${fmt(Math.round(openCost))}원</div></div>`;
@@ -1802,8 +1896,15 @@ function wireChips(barId, key) {
   });
 }
 
+// 보유 포지션(2026-10-27) — 현재가·평가손익·청산선까지 남은 거리. 시세는 /api/paper/valuation이
+// 봇과 같은 소스(네이버)로 붙인다. 청산선은 봇 규칙 그대로(손절선 또는 켜진 트레일링).
+const SOURCE_LABEL = {realtime: "", bot_poll: "봇 직전 폴링가", book: "시세 없음 — 장부가"};
+const pct = (n, digits = 2) => (n > 0 ? "+" : "") + Number(n).toFixed(digits) + "%";
+
 async function loadPositions() {
-  const positions = await (await fetch("/api/paper/positions")).json();
+  const v = window._valuation;
+  const positions = v ? v.positions
+    : (await (await fetch("/api/paper/positions")).json()).map(p => ({...p, value: p.quantity * p.avg_price, pnl: null}));
   const tbody = document.querySelector('tbody[data-group="pos"]');
   const counts = {};
   SLOT_ORDER.forEach(n => { counts[n] = 0; });
@@ -1814,25 +1915,55 @@ async function loadPositions() {
   let html = "";
   for (const slot of order) {
     const rows = positions.filter(p => p.slot_name === slot);
-    const amount = rows.reduce((a, p) => a + p.quantity * p.avg_price, 0);
     const color = SLOT_COLOR[slot] || "var(--muted)";
     if (!rows.length) {
-      html += `<tr class="group" data-slot="${slot}"><td colspan="4">
+      html += `<tr class="group" data-slot="${slot}"><td colspan="7">
         <span class="group-label"><i style="background:${color}"></i>${slot}
         <span class="count">보유 없음</span></span></td></tr>`;
       continue;
     }
-    html += `<tr class="group" data-slot="${slot}"><td colspan="3">
+    const value = rows.reduce((a, p) => a + Number(p.value || 0), 0);
+    const priced = rows.filter(p => p.pnl !== null);
+    const gpnl = priced.reduce((a, p) => a + p.pnl, 0);
+    const gbook = priced.reduce((a, p) => a + p.book, 0);
+    html += `<tr class="group" data-slot="${slot}"><td colspan="4">
       <span class="group-label"><i style="background:${color}"></i>${slot}
       <span class="count">${rows.length}종목</span></span></td>
-      <td class="num">${won(amount)}</td></tr>`;
-    html += rows.map(p => `<tr data-slot="${slot}">
+      <td class="num">${won(value)}</td>
+      <td class="num">${priced.length ? `<span class="delta ${gpnl > 0 ? "up" : gpnl < 0 ? "down" : ""}">${signed(gpnl)}원</span>
+        <span class="muted">${gbook ? pct(gpnl / gbook * 100) : ""}</span>` : ""}</td><td></td></tr>`;
+    html += rows.map(p => {
+      const has = p.pnl !== null;
+      const cls = !has ? "" : p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : "";
+      const note = SOURCE_LABEL[p.price_source] || "";
+      const near = has && p.room < 3;          // 청산선까지 3%p 안쪽이면 강조
+      return `<tr data-slot="${slot}">
       <td class="indent">${p.name || ""}<span class="ticker">${p.ticker}</span></td>
       <td class="num">${fmt(p.quantity)}</td>
       <td class="num">${fmt(Math.round(p.avg_price))}</td>
-      <td class="num">${won(p.quantity * p.avg_price)}</td></tr>`).join("");
+      <td class="num"${note ? ` title="${note}"` : ""}>${has ? fmt(Math.round(p.price)) : "—"}${note ? ` <span class="muted">*</span>` : ""}</td>
+      <td class="num">${won(p.value)}</td>
+      <td class="num">${has ? `<span class="delta ${cls}">${pct(p.pnl_pct)}</span> <span class="muted">${signed(p.pnl)}원</span>` : "—"}</td>
+      <td class="num" title="${has ? `${p.exit_kind} ${pct(p.exit_pct)} · 익절선 +${p.take_pct}%` : ""}">${has
+        ? `<span class="${near ? "delta down" : ""}">${p.room.toFixed(1)}%p</span> <span class="muted">${p.exit_kind}</span>` : "—"}</td></tr>`;
+    }).join("");
   }
-  tbody.innerHTML = html || `<tr><td colspan="4" class="muted">보유 포지션 없음</td></tr>`;
+  tbody.innerHTML = html || `<tr><td colspan="7" class="muted">보유 포지션 없음</td></tr>`;
+  const stale = positions.filter(p => p.price_source && p.price_source !== "realtime").length;
+  $("pos-foot").textContent = "봇별로 묶어 표시 · 현재가는 네이버 시세(봇과 같은 소스, 장 마감 뒤엔 종가) · " +
+    "청산선까지 = 지금 수익률에서 봇이 팔 수익률(손절선 −7% 또는 켜진 트레일링)까지 남은 %p" +
+    (stale ? ` · * ${stale}종목은 실시간 시세를 못 얻었습니다(마우스를 올리면 사유)` : "") +
+    (v ? "" : " · 시세 평가 실패 — 장부가로 표시");
+}
+
+// 매도 행의 그 거래 손익(2026-10-27). 성과 집계에서 뺀 거래는 숫자 옆에 「제외」를 붙이고
+// 사유를 title로 둔다 — 숫자를 숨기면 왜 집계와 합이 안 맞는지 알 수 없다.
+function tradePnl(t) {
+  if (t.side !== "sell" || t.rt_ret === undefined) return "";
+  const cls = t.rt_pnl > 0 ? "up" : (t.rt_pnl < 0 ? "down" : "");
+  const exc = t.excluded_reason
+    ? ` <span class="muted" title="${String(t.excluded_reason).replace(/"/g, "&quot;")}">제외</span>` : "";
+  return `<span class="delta ${cls}">${pct(t.rt_ret, 1)}</span> <span class="muted">${signed(t.rt_pnl)}원</span>${exc}`;
 }
 
 async function loadTrades() {
@@ -1844,7 +1975,7 @@ async function loadTrades() {
   renderChips("chips-trd", counts, "건");
 
   if (!trades.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">거래 내역 없음</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">거래 내역 없음</td></tr>`;
     return;
   }
   // 최신순 그대로 두고 봇은 색점으로 구분한다(시간 흐름이 우선).
@@ -1856,11 +1987,12 @@ async function loadTrades() {
       <td class="num">${fmt(t.quantity)}</td>
       <td class="num">${fmt(Math.round(t.price))}</td>
       <td class="num">${fmt(Math.round(t.fees))}</td>
+      <td class="num">${tradePnl(t)}</td>
     </tr>`).join("");
   // 거래가 없는 봇을 칩으로 고르면 빈 표 대신 안내를 보여준다
   html += SLOT_ORDER.filter(n => !counts[n]).map(n =>
     `<tr class="empty" data-slot="${n}" style="display:none">
-      <td colspan="7" class="muted">${n} 봇 거래가 아직 없습니다.</td></tr>`).join("");
+      <td colspan="8" class="muted">${n} 봇 거래가 아직 없습니다.</td></tr>`).join("");
   tbody.innerHTML = html;
 }
 
@@ -1868,8 +2000,12 @@ wireChips("chips-pos", "pos");
 wireChips("chips-trd", "trd");
 
 async function reload() {
-  await loadSlots();                       // 슬롯 색·순서를 먼저 확정
-  await Promise.all([loadPositions(), loadTrades(), loadKpis()]);
+  const slots = await loadSlots();         // 슬롯 색·순서를 먼저 확정
+  renderSlotCards(slots);                  // 시세 전에는 현금만 — 「평가 중…」
+  const trades = loadTrades();
+  await loadValuation();                   // 시세 조회(네이버, 수 초)
+  renderSlotCards((window._valuation && window._valuation.slots) || slots);
+  await Promise.all([loadPositions(), trades, loadKpis()]);
 }
 
 // ─── 현재가 + 매매 ─────────────────────────────────
@@ -2501,6 +2637,13 @@ function renderStratTable() {
   }).join("") : `<tr><td colspan="9" class="muted">해당 축에 거래가 없습니다.</td></tr>`;
 }
 
+const QUALITY_KIND = {
+  stale_price: {title: "오래된 가격",
+    why: "진입가가 며칠 전 종가와 원 단위까지 일치한 자동 매수 배치입니다."},
+  fill_out_of_range: {title: "체결가가 그날 가격 범위 밖",
+    why: "안전장치(2026-08-27) 이전 거래 중 매수가나 매도가가 그날 저가~고가(±0.5%)를 벗어나 실제로는 체결될 수 없었던 건입니다."},
+};
+
 function renderStratAttribution() {
   const a = stratData.attribution;
   const box = document.getElementById("strat-attr");
@@ -2508,28 +2651,54 @@ function renderStratAttribution() {
   const exc = stratData.excluded || {n: 0};
   const flg = stratData.flagged || {n: 0};
   if (exc.n) {
+    // 종류별로 묶어 접어 둔다(2026-10-27). 이전엔 앞 12건만, 설명도 「오래된 가격」 하나만
+    // 보여 체결가 범위 밖(fill_out_of_range) 15건이 왜 빠졌는지 화면에서 알 수 없었다.
+    const groups = {};
+    (exc.rows || []).forEach(r => { (groups[r.kind || "unknown"] ||= []).push(r); });
+    const sections = Object.entries(groups).map(([kind, rows]) => {
+      const info = QUALITY_KIND[kind] || {title: kind, why: ""};
+      const sum = rows.reduce((a, r) => a + r.pnl, 0);
+      return `<details class="quality-group">
+        <summary><b>${info.title}</b> ${rows.length}건 · ${signed(sum)}원</summary>
+        <p class="muted" style="margin:6px 0 8px;">${info.why}</p>
+        <table><thead><tr><th>종목</th><th>봇</th><th>매수 시각</th><th class="num">손익</th><th>사유</th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td>${r.name || r.ticker}<span class="ticker">${r.ticker}</span></td>
+          <td>${r.slot || ""}</td>
+          <td class="muted">${(r.buy_at || "").slice(0, 16)}</td>
+          <td class="num"><span class="delta ${r.pnl > 0 ? "up" : r.pnl < 0 ? "down" : ""}">${r.ret > 0 ? "+" : ""}${r.ret}%</span>
+            <span class="muted">${signed(r.pnl)}원</span></td>
+          <td class="muted">${r.reason || ""}</td></tr>`).join("")}</tbody></table>
+      </details>`;
+    }).join("");
     cards.push(`<div class="card">
-      <div class="slot-name">데이터 품질 제외 ${exc.n}건 · ${exc.pnl.toLocaleString()}원</div>
+      <div class="slot-name">데이터 품질 제외 ${exc.n}건 · ${signed(exc.pnl)}원</div>
       <p class="muted" style="margin-top:8px;">
-        진입가가 며칠 전 종가와 원 단위까지 일치한 자동 매수 배치입니다. 시장이 낸 손익이
-        아니라 <b>가격 오류가 만든 손익</b>이라 아래 표에서 뺐습니다.
-        <b>기록은 DB에 그대로 남아 있습니다.</b> 손실 배치와 수익 배치를 같은 기준으로
-        함께 뺐습니다 — 유리한 쪽만 고르면 그게 더 큰 왜곡입니다.
+        시장이 낸 손익이 아니라 <b>가격 기록 오류가 만든 손익</b>이라 아래 표에서 뺐습니다.
+        <b>기록은 DB에 그대로 남아 있습니다.</b> 손실 건과 수익 건을 같은 기준으로
+        함께 뺐습니다 — 유리한 쪽만 고르면 그게 더 큰 왜곡입니다. 종류를 누르면 건별 사유가 보입니다.
       </p>
-      <div class="stat-rows" style="margin-top:10px;">
-        ${(exc.rows || []).slice(0, 12).map(r => `<span>${r.name || r.ticker} · ${(r.buy_at||"").slice(0,16)}</span>` +
-          `<span>${r.ret > 0 ? "+" : ""}${r.ret}% · ${r.pnl.toLocaleString()}원</span>`).join("")}
-      </div>
+      ${sections}
     </div>`);
   }
   if (flg.n) {
     cards.push(`<div class="card" style="margin-top:20px;">
-      <div class="slot-name">체결 가정 편향 표시 ${flg.n}건 · ${flg.pnl.toLocaleString()}원</div>
+      <div class="slot-name">표시만 한 거래 ${flg.n}건 · ${signed(flg.pnl)}원</div>
       <p class="muted" style="margin-top:8px;">
-        장외 시각이나 개장 직후에 기록돼 <b>전 거래일 종가</b>가 진입가로 남은 건입니다.
-        판단은 실제였으므로 <b>집계에는 포함</b>했고 표시만 합니다. 앞으로는 대기 큐가
-        개장 시 실제 가격으로 다시 판단합니다.
+        의심스러운 점이 있지만 <b>집계에는 포함</b>한 건입니다. 장외·개장 직후 기록돼
+        <b>전 거래일 종가</b>가 진입가로 남은 건(판단은 실제였음)과, 안전장치 이후인데 체결가가
+        그날 범위를 벗어난 건입니다.
       </p>
+      <details class="quality-group"><summary>건별 사유 보기</summary>
+        <table style="margin-top:8px;"><thead><tr><th>종목</th><th>봇</th><th>매수 시각</th><th class="num">손익</th><th>사유</th></tr></thead>
+        <tbody>${(flg.rows || []).map(r => `<tr>
+          <td>${r.name || r.ticker}<span class="ticker">${r.ticker}</span></td>
+          <td>${r.slot || ""}</td>
+          <td class="muted">${(r.buy_at || "").slice(0, 16)}</td>
+          <td class="num"><span class="delta ${r.pnl > 0 ? "up" : r.pnl < 0 ? "down" : ""}">${r.ret > 0 ? "+" : ""}${r.ret}%</span>
+            <span class="muted">${signed(r.pnl)}원</span></td>
+          <td class="muted">${r.reason || ""}</td></tr>`).join("")}</tbody></table>
+      </details>
     </div>`);
   }
   const odd = stratData.outliers || [];
@@ -2820,11 +2989,14 @@ async function loadOps() {
         잰 때 ${r.at.replace("T", " ")} (${ageMin}분 전)${stale ? " — <b>감시 자체가 45분 넘게 조용합니다. launchd ops-probe를 확인하세요.</b>" : ""}
         <br>지금 다시 재려면(기록 없이): <code>${d.how}</code>
       </p>`;
-    wrap.innerHTML = `<div class="card"><table>
-      <thead><tr><th></th><th>검사</th><th>상태</th></tr></thead>
-      <tbody>${(r.checks || []).map(c => `<tr>
-        <td>${c.ok ? "✅" : "❌"}</td><td>${c.name}</td><td class="muted">${c.detail || ""}</td>
-      </tr>`).join("")}</tbody></table></div>`;
+    // 깨진 것만 펼친다(2026-10-27). 전부 정상인데 초록 행 30줄을 다 보이면 정작 볼 줄이 묻힌다.
+    const row = c => `<tr><td>${c.ok ? "✅" : "❌"}</td><td>${c.name}</td><td class="muted">${c.detail || ""}</td></tr>`;
+    const checks = r.checks || [];
+    const failing = checks.filter(c => !c.ok), passing = checks.filter(c => c.ok);
+    const head = `<thead><tr><th></th><th>검사</th><th>상태</th></tr></thead>`;
+    wrap.innerHTML = (failing.length ? `<div class="card"><table>${head}<tbody>${failing.map(row).join("")}</tbody></table></div>` : "") +
+      `<div class="card"><details><summary class="muted" style="cursor:pointer;">정상 ${passing.length}개 검사 보기</summary>
+        <table style="margin-top:8px;">${head}<tbody>${passing.map(row).join("")}</tbody></table></details></div>`;
     status.textContent = "";
   } catch (e) {
     status.textContent = "실패: " + e.message;

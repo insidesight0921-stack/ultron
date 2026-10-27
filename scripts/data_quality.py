@@ -101,7 +101,7 @@ def summary(dropped: list[dict]) -> dict:
             {"slot": r.get("slot"), "ticker": r.get("ticker"), "name": r.get("name"),
              "buy_at": r.get("buy_at"), "pnl": round(float(r.get("pnl") or 0)),
              "ret": round(float(r.get("ret") or 0) * 100, 1),
-             "reason": r.get("excluded_reason")}
+             "reason": r.get("excluded_reason"), "kind": r.get("excluded_kind")}
             for r in dropped
         ],
     }
