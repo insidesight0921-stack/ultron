@@ -134,3 +134,84 @@ def test_excluded_rows_carry_both_labels():
     _, dropped = dq.split([_rt()], [_rule()])
     assert dropped[0]["flag_kind"] == "stale_price"
     assert dropped[0]["excluded_kind"] == "stale_price"
+
+
+# ─── 체결가가 그날 범위 밖 (2026-10-26) ────
+
+
+def _fill_rt(buy_at="2026-07-28 09:17:18", sell_at="2026-07-28 09:17:40",
+        buy_price=614921.0, sell_price=529205.0, ticker="011070", slot="키움", pnl=-600000):
+    return {"slot": slot, "ticker": ticker, "name": "LG이노텍", "buy_at": buy_at,
+            "sell_at": sell_at, "buy_price": buy_price, "sell_price": sell_price, "pnl": pnl}
+
+
+def _bars(table):
+    return lambda ticker, day: table.get((ticker, day))
+
+
+BARS = _bars({("011070", "20260728"): (504000.0, 575000.0),
+              ("011070", "20260901"): (500000.0, 520000.0)})
+
+
+def test_a_fill_above_the_days_high_is_out_of_range():
+    """실측 사례: 07-28 LG이노텍 매수가 614,921 · 그날 고가 575,000."""
+    got = dq.fill_out_of_range(_fill_rt(), BARS)
+    assert len(got) == 1 and got[0].startswith("매수가 614,921원")
+
+
+def test_slippage_inside_the_tolerance_is_not_flagged():
+    rt = _fill_rt(buy_price=575000 * 1.004, sell_price=530000.0)
+    assert dq.fill_out_of_range(rt, BARS) == []
+
+
+def test_unknown_bars_are_not_called_normal():
+    """음성 대조: 일봉이 없으면 「정상」이 아니라 「검사 불가」(None)다."""
+    assert dq.fill_out_of_range(_fill_rt(ticker="999999"), BARS) is None
+
+
+def test_gains_and_losses_are_judged_alike():
+    """수익 건도 같은 기준으로 걸린다 — 손실만 골라 빼면 데이터를 고르는 것이 된다."""
+    win = _fill_rt(buy_price=480000.0, sell_price=560000.0, pnl=+800000)
+    assert dq.fill_out_of_range(win, BARS)
+
+
+def test_rules_exclude_before_the_safeguard_and_only_label_after():
+    before = _fill_rt()
+    after = _fill_rt(buy_at="2026-09-01 10:00:00", sell_at="2026-09-01 20:12:00",
+                buy_price=510000.0, sell_price=600000.0)
+    rules = dq.fill_rules([before, after], BARS, detected_at="2026-10-26")
+    assert [r["exclude"] for r in rules] == [True, False]
+    assert all(r["kind"] == dq.FILL_KIND for r in rules)
+
+
+def test_split_sells_of_one_buy_make_one_rule():
+    rules = dq.fill_rules([_fill_rt(), _fill_rt(sell_at="2026-07-28 09:27:40")], BARS,
+                          detected_at="2026-10-26")
+    assert len(rules) == 1
+
+
+def test_merge_replaces_a_label_only_rule_and_keeps_the_old_judgement():
+    old = {"slot": "키움", "ticker": "011070", "buy_at": "2026-07-28 09:17:18",
+           "kind": "fill_assumption", "exclude": False, "reason": "전 거래일 종가"}
+    new = dq.fill_rules([_fill_rt()], BARS, detected_at="2026-10-26")
+    merged, changes = dq.merge_rules([old], new)
+    assert len(merged) == 1 and merged[0]["kind"] == dq.FILL_KIND and merged[0]["exclude"]
+    assert merged[0]["supersedes"]["kind"] == "fill_assumption"
+    assert changes and changes[0].startswith("교체")
+
+
+def test_merge_leaves_an_existing_exclusion_alone_and_is_idempotent():
+    stale = {"slot": "키움", "ticker": "011070", "buy_at": "2026-07-28 09:17:18",
+             "kind": "stale_price", "exclude": True, "reason": "4거래일 전 종가"}
+    new = dq.fill_rules([_fill_rt()], BARS, detected_at="2026-10-26")
+    merged, changes = dq.merge_rules([stale], new)
+    assert merged == [stale] and changes == []
+    once, _ = dq.merge_rules([], new)
+    twice, changes2 = dq.merge_rules(once, new)
+    assert twice == once and changes2 == []
+
+
+def test_the_new_rule_actually_removes_the_roundtrip_from_totals():
+    rules, _ = dq.merge_rules([], dq.fill_rules([_fill_rt()], BARS, detected_at="2026-10-26"))
+    kept, dropped = dq.split([_fill_rt()], rules)
+    assert kept == [] and dropped[0]["excluded_kind"] == dq.FILL_KIND

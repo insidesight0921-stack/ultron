@@ -486,3 +486,17 @@ def test_format_edge_includes_tags_when_present():
     trades[0]["notes"] = "MQ[정배열]"
     out = ta.format_edge(ta.compute_roundtrips(trades))
     assert "태그별 성과" in out
+
+
+def test_roundtrips_carry_the_raw_fill_prices_without_fees():
+    """시세와 대조하려면 수수료가 섞이지 않은 체결가가 필요하다(2026-10-26)."""
+    trades = [
+        {"slot_name": "키움", "ticker": "A", "side": "buy", "quantity": 10, "price": 100.0,
+         "fees": 15.0, "executed_at": "2026-07-01 10:00:00"},
+        {"slot_name": "키움", "ticker": "A", "side": "buy", "quantity": 10, "price": 110.0,
+         "fees": 15.0, "executed_at": "2026-07-02 10:00:00"},
+        {"slot_name": "키움", "ticker": "A", "side": "sell", "quantity": 20, "price": 120.0,
+         "fees": 30.0, "executed_at": "2026-07-03 10:00:00"},
+    ]
+    rt = ta.compute_roundtrips(trades)[0]
+    assert rt["buy_price"] == 105.0 and rt["sell_price"] == 120.0

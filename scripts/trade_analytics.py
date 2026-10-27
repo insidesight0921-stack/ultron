@@ -58,7 +58,8 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
     """매수/매도 거래 → FIFO 완결 라운드트립 리스트(순수).
 
     trades: {slot_name, ticker, name, side, quantity, price, fees, notes, executed_at}.
-    반환 각 항목: slot, ticker, name, pnl, cost, ret, buy_at, sell_at, hold_days, reason.
+    반환 각 항목: slot, ticker, name, pnl, cost, ret, buy_at, sell_at, hold_days, reason,
+    buy_price(수수료 제외 가중평균 체결가), sell_price(체결가).
     """
     ordered = sorted(trades, key=lambda t: (t.get("executed_at") or "", t.get("id") or 0))
     queues: dict[tuple, deque] = defaultdict(deque)
@@ -75,12 +76,13 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
             queues[key].append([qty, price, fees / qty, t.get("executed_at"),
                                 t.get("name"), t.get("notes")])
         else:
-            remaining, cost, matched = qty, 0.0, 0
+            remaining, cost, matched, gross = qty, 0.0, 0, 0.0
             buy_at, name, buy_notes = None, t.get("name"), None
             while remaining > 0 and queues[key]:
                 bq, bp, bfpu, bdt, bname, bnotes = queues[key][0]
                 take = min(remaining, bq)
                 cost += take * bp + take * bfpu
+                gross += take * bp
                 remaining -= take
                 matched += take
                 buy_at = buy_at or bdt
@@ -102,6 +104,9 @@ def compute_roundtrips(trades: list[dict]) -> list[dict]:
                     "buy_at": buy_at, "sell_at": t.get("executed_at"),
                     "buy_notes": buy_notes,
                     "hold_days": hold, "reason": _classify_reason(t.get("notes")),
+                    # 체결가 그대로(2026-10-26). pnl·cost에는 수수료가 섞여 있어 역산하면
+                    # 시세와 대조할 때 수수료만큼 어긋난다 — data_quality.fill_out_of_range가 쓴다.
+                    "buy_price": gross / matched, "sell_price": price,
                 })
     return out
 

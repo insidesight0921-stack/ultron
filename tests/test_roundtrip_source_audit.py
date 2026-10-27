@@ -32,6 +32,9 @@ RAW_ALLOWED = {
     "slot_hard_stop.py",
     # 정의부와 그 자신을 호출하는 래퍼
     "trade_analytics.py",
+    # 제외 규칙을 **만드는** 쪽 — 규칙 적용 후를 보면 이미 뺀 건이 사라져 검사
+    # 보고가 실행마다 달라진다(--scan-fills, 2026-10-26). 집계는 하지 않는다.
+    "data_quality.py",
 }
 
 
