@@ -409,7 +409,13 @@ def _valuation() -> dict:
         peak = state["peaks"].get(exit_rules.peak_key(p["slot_id"], p["ticker"], p["avg_price"]))
         rows.append({**pv.position_view(p, float(price) if price else None, peak),
                      "price_source": source})
-    return {"slots": pv.slot_equity(slots, rows), "positions": rows,
+    seed = 0.0
+    try:
+        seed = float(_list_portfolios()[0]["seed_capital"]) * sum(
+            float(s.get("allocation_pct") or 0) for s in slots)
+    except Exception:  # noqa: BLE001
+        log.warning("시드 자본 조회 실패", exc_info=True)
+    return {"slots": pv.slot_equity(slots, rows), "positions": rows, "seed": round(seed),
             "win_rate": pv.win_rate(_get_performance())}
 
 
@@ -1198,6 +1204,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
                border:1px solid var(--hairline); border-radius:var(--radius); background:var(--surface);
                color:var(--ink-2); padding:10px 14px; margin-bottom:16px; cursor:pointer; }
   .ops-strip.bad { border-color:var(--sell); color:var(--sell); font-weight:600; }
+  .eq-chart { height:260px; }
+  .eq-stats { display:flex; gap:24px; flex-wrap:wrap; font-size:13px; color:var(--ink-2); margin-bottom:6px; }
+  .eq-stats b { font-size:17px; letter-spacing:-.01em; }
   .link-btn { appearance:none; background:none; border:0; font:inherit; font-size:13px;
               color:var(--accent); cursor:pointer; padding:0; }
   .tab-content { display:none; }
@@ -1326,6 +1335,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div id="alloc-legend" class="alloc-legend"></div>
     </div>
     <div id="slots" class="grid grid-4" style="margin-bottom:28px;"></div>
+
+    <div class="card flush">
+      <div class="card-head">
+        <h3>자산 곡선 · 코스피 대비</h3>
+        <button type="button" class="link-btn" data-goto="tab-bench">벤치마크 자세히 →</button>
+      </div>
+      <div class="card-body">
+        <div id="eq-stats" class="eq-stats"></div>
+        <div id="eq-chart" class="eq-chart"></div>
+        <p class="muted" id="eq-note" style="margin:8px 0 0; font-size:12px;"></p>
+      </div>
+    </div>
 
     <div class="card flush">
       <div class="card-head">
@@ -1673,6 +1694,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p class="muted" style="margin-top:10px;" id="bench-note"></p>
     </div>
     <div id="bench-grid" class="grid grid-auto" style="margin-bottom:20px;"></div>
+    <div class="card" style="margin-bottom:20px;"><div id="bench-chart" class="eq-chart"></div></div>
     <div class="card">
       <h3>실전 전환 기준 대조</h3>
       <table>
@@ -1771,9 +1793,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
       <p class="muted" style="margin-top:10px;">
         <b>거래당 샤프</b>는 완결 거래 1건을 한 관측치로 본 값입니다. 실전 전환 기준의
-        「샤프 1.0」은 <b>일간</b> 수익률 기준이라 서로 다른 수치이며, 일간 마크투마켓
-        곡선이 없어 아직 산출하지 않습니다. MDD도 거래 순서 기준이라 보유 중 평가손실은
-        반영되지 않아 실제보다 얕게 나옵니다. 두 값 모두 전환 판단에 쓰지 마세요.
+        「샤프 1.0」은 <b>일간</b> 수익률 기준이라 서로 다른 수치입니다. MDD도 거래 순서 기준이라
+        보유 중 평가손실은 반영되지 않아 실제보다 얕게 나옵니다. 두 값 모두 전환 판단에 쓰지 말고,
+        일간 자산곡선으로 잰 샤프·MDD는 <b>분석 › 벤치마크</b>에서 보세요.
       </p>
     </div>
     <div id="perf-grid" class="grid grid-auto" style="margin-bottom:20px;"></div>
@@ -1927,7 +1949,8 @@ async function loadKpis() {
   $("kpis").innerHTML = `
     <div class="kpi"><div class="kpi-label">총 평가자산</div>
       <div class="kpi-value">${fmt(Math.round(cash + stock))}<span class="unit">원</span></div>
-      <div class="kpi-meta">${v ? `현금 ${won(cash)} · 주식 ${won(stock)}` : "시세 없음 — 현금만"}</div></div>
+      <div class="kpi-meta">${v ? `현금 ${won(cash)} · 주식 ${won(stock)}` : "시세 없음 — 현금만"}</div>
+      ${v && v.seed ? `<div class="kpi-meta">시드 ${v.seed % 1e8 === 0 ? v.seed / 1e8 + "억원" : won(v.seed)} 대비 <span class="delta ${cls(cash + stock - v.seed)}">${pct((cash + stock) / v.seed * 100 - 100)}</span></div>` : ""}</div>
     <div class="kpi"><div class="kpi-label">실현손익</div>
       <div class="kpi-value delta ${cls(pnl)}">${signed(pnl)}<span class="unit">원</span></div>
       <div class="kpi-meta">완결 ${closed}건 · 승률 ${winRate}</div></div>
@@ -2105,11 +2128,56 @@ async function loadOpsStrip() {
   }
 }
 
+// 자산 곡선(2026-10-27). /api/benchmark(equity_curve)가 거래 기록을 하루 단위로 다시 세어 만든
+// 시드 기준 곡선이다 — 따로 기록을 쌓지 않는다. 두 선 모두 첫날을 0%로 맞춘 누적 수익률이다.
+// 원 단위로 그리면 코스피를 같은 축에 둘 수 없고, 축 둘은 눈속임이 되기 쉽다.
+function drawEquityChart(el, series) {
+  if (!el || typeof Plotly === "undefined") return;
+  if (!series || series.length < 2) { el.innerHTML = `<p class="muted">곡선을 그릴 거래일이 아직 없습니다.</p>`; return; }
+  const css = getComputedStyle(document.documentElement);
+  const tok = (n, fb) => (css.getPropertyValue(n) || "").trim() || fb;
+  const x = series.map(r => `${r.date.slice(0, 4)}-${r.date.slice(4, 6)}-${r.date.slice(6, 8)}`);
+  const rel = key => series.map(r => (r[key] / series[0][key] - 1) * 100);
+  const line = (y, name, color, width) => ({x, y, name, type: "scatter", mode: "lines",
+    line: {color, width}, hovertemplate: "%{x}<br>" + name + " %{y:.2f}%<extra></extra>"});
+  Plotly.newPlot(el, [
+    line(rel("bench"), "코스피", tok("--muted", "#888"), 1.5),
+    line(rel("port"), "내 계좌", tok("--accent", "#2b7bd8"), 2.5),
+  ], {
+    margin: {l: 44, r: 12, t: 8, b: 28}, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: {color: tok("--ink-2", "#555"), size: 12},
+    xaxis: {gridcolor: tok("--hairline", "#eee"), showline: false},
+    yaxis: {gridcolor: tok("--hairline", "#eee"), ticksuffix: "%", zeroline: true, zerolinecolor: tok("--muted", "#999")},
+    legend: {orientation: "h", x: 0, y: 1.12}, hovermode: "x unified",
+  }, {displayModeBar: false, responsive: true});
+}
+
+async function loadEquityCurve() {
+  const stats = $("eq-stats"), note = $("eq-note");
+  try {
+    const d = await (await fetch("/api/benchmark")).json();
+    if (d.error) throw new Error(d.error);
+    const n = v => v === null || v === undefined ? "—" : pct(v);
+    stats.innerHTML = `
+      <span>내 계좌 <b class="delta ${d.port_return > 0 ? "up" : "down"}">${n(d.port_return)}</b></span>
+      <span>코스피 <b>${n(d.bench_return)}</b></span>
+      <span>차이 <b class="delta ${d.excess_return > 0 ? "up" : "down"}">${d.excess_return === null ? "—" : (d.excess_return > 0 ? "+" : "") + d.excess_return + "%p"}</b></span>
+      <span>최대 낙폭 <b>${d.mdd === null ? "—" : "−" + d.mdd + "%"}</b> <span class="muted">코스피 −${d.bench_mdd}%</span></span>`;
+    drawEquityChart($("eq-chart"), d.series);
+    note.textContent = `${d.start}~${d.end} 종가 기준 ${d.n_days}거래일 · 시드 기준 · ` +
+      "곡선은 기록 그대로라 성과 집계에서 뺀 거래(가격 오류)도 들어 있습니다 — 그 매수도 실제로 현금을 줄였기 때문입니다" +
+      (d.usable ? "" : ` · 판정 보류: ${(d.reasons || []).join(" / ")}`);
+  } catch (e) {
+    stats.textContent = ""; note.textContent = "자산 곡선을 불러오지 못했습니다: " + e.message;
+  }
+}
+
 async function reload() {
   const slots = await loadSlots();         // 슬롯 색·순서를 먼저 확정
   renderSlotCards(slots);                  // 시세 전에는 현금만 — 「평가 중…」
   const trades = loadTrades();
   loadOpsStrip();
+  loadEquityCurve();
   await loadValuation();                   // 시세 조회(네이버, 수 초)
   renderSlotCards((window._valuation && window._valuation.slots) || slots);
   await Promise.all([loadPositions(), trades, loadKpis()]);
@@ -2988,6 +3056,7 @@ async function loadBenchmark() {
     if (!Number(rf)) parts.push("무위험수익률을 빼지 않은 샤프입니다(그만큼 후하게 나옵니다).");
     parts.push("완결 거래 순서가 아니라 <b>달력 위의 하루</b>를 단위로 센 값입니다. 보유 중 평가손실이 MDD에 반영됩니다.");
     note.innerHTML = parts.join("<br>");
+    drawEquityChart(document.getElementById("bench-chart"), d.series);
 
     const rows = d.verdict || [];
     tbody.innerHTML = rows.length ? rows.map(c => {
