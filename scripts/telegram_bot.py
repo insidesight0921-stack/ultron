@@ -27,6 +27,8 @@
 
 from __future__ import annotations
 import asyncio
+import concurrent.futures
+import functools
 import json
 import logging
 from typing import Optional
@@ -1411,6 +1413,29 @@ MODE_LOG_FILE = PATHS.private_state_dir / "mode_decisions.jsonl"
 REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 QUANT_REBALANCE_TIMEOUT = 600   # 초 — 캐시 없는 recommend가 최대 6분(수동 명령 360초)
+
+# 콴텍 계산 전용 스레드 1개. wait_for는 기다림만 끊고 스레드는 못 죽인다 — 공용
+# to_thread 풀에서 돌리면 멈춘 호출이 하루 하나씩 쌓여 결국 장중 손절 모니터의
+# 시세 조회까지 막는다. 여기서는 멈춘 호출이 있으면 새로 넣지 않는다.
+_QUANT_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="quant")
+_QUANT_INFLIGHT: "concurrent.futures.Future | None" = None
+
+
+class QuantBusy(RuntimeError):
+    """이전 콴텍 계산이 아직 끝나지 않았다(시간 초과 후에도 스레드는 돈다)."""
+
+
+async def _run_quant(fn, *args, **kwargs):
+    """콴텍 계산을 전용 스레드에서 시간 제한을 두고 돌린다."""
+    global _QUANT_INFLIGHT
+    if _QUANT_INFLIGHT is not None and not _QUANT_INFLIGHT.done():
+        raise QuantBusy("이전 콴텍 계산이 아직 멈춰 있습니다 — 봇 재시작이 필요할 수 있습니다")
+    fut = _QUANT_POOL.submit(functools.partial(fn, *args, **kwargs))
+    _QUANT_INFLIGHT = fut
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=QUANT_REBALANCE_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"콴텍 계산 {QUANT_REBALANCE_TIMEOUT}초 초과") from None
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
 # v3.59 — **디스크에도 저장한다.** 메모리에만 두면 재시작으로 사라지고,
 # 사용자가 버튼을 눌러도 "저장된 추천 종목이 없습니다"가 뜬다. 2026-07이 그렇게
@@ -1606,7 +1631,6 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
 
     results = po.revalidate_all(orders, prices, now.date())
     slot_ids = {s["name"]: s["id"] for s in await asyncio.to_thread(_pdb.list_slots)}
-    cycle_id = now.strftime("%Y%m%dT%H%M")
 
     for i, r in enumerate(results):
         if r["verdict"] != "fill":
@@ -1643,8 +1667,11 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
                     action="buy",
                     slot_id=int(slot_id),
                     actor_id="pending-queue",
-                    source_event_id=cycle_id,
-                    item_key=f"pending-{i}",
+                    # 주문 자체로 식별한다(사이클 시각·순번이 아니라). 체결 뒤 큐를 비우기
+                    # 전에 재시작되면 다음 사이클이 같은 주문을 다시 넣는데, 그때 같은
+                    # 식별자여야 private API가 중복으로 보고 재생한다(2026-10-28 리뷰).
+                    source_event_id=f"{o.get('slot')}|{o.get('signal_at')}",
+                    item_key=f"pending-{r['ticker']}",
                     ticker=r["ticker"],
                     name=r.get("name"),
                     quantity=int(r["qty"]),
@@ -2558,11 +2585,13 @@ async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        slots = await asyncio.to_thread(_pdb.list_slots)
+        # 쓰기가 private API로 가므로 읽기도 같은 쪽에서 한다 — 직접 DB를 읽으면
+        # 낡은 WAL 인덱스로 방금 산 파킹을 못 보고 또 살 수 있다(2026-10-28)
+        slots = await asyncio.to_thread(_list_runtime_paper_slots)
         slot = next((s for s in slots if s.get("name") == IDLE_CASH_SLOT), None)
         if slot is None:
             return
-        positions = await asyncio.to_thread(_pdb.list_positions, slot["id"])
+        positions = await asyncio.to_thread(_list_runtime_paper_positions, slot["id"])
         parked = next((p for p in positions
                        if str(p.get("ticker")) == idle_cash.PARK_TICKER), None)
         parked_qty = int(parked["quantity"]) if parked else 0
@@ -2625,7 +2654,7 @@ async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 slot_id=int(slot["id"]),
                 # 식별자가 빠져 있어 이 경로는 호출되면 TypeError로 죽었다(2026-10-28)
                 actor_id="idle-cash-policy",
-                source_event_id=_now_kst().strftime("%Y%m%dT%H%M"),
+                source_event_id=now.strftime("%Y%m%dT%H%M"),
                 item_key=f"park-{plan['action']}",
                 ticker=idle_cash.PARK_TICKER,
                 name=idle_cash.PARK_NAME,
@@ -3264,15 +3293,14 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 이 잡이 "이미 실행 중"으로 25일간 매일 건너뛰어졌고, 10월 추천은 10-26 재시작 뒤에야
     # 나갔다. 끊고 돌아오면 아직 실행 안 된 달이라 다음 검사(하루 뒤)에서 다시 시도한다.
     try:
-        text, _ = await asyncio.wait_for(
-            asyncio.to_thread(quant_run, "recommend"), timeout=QUANT_REBALANCE_TIMEOUT)
+        text, _ = await _run_quant(quant_run, "recommend")
     except Exception as e:
         log.exception("quant_run 실패")
         for uid in pending:
             try:
                 await ctx.bot.send_message(
                     chat_id=int(uid),
-                    text=f"⚠️ 월간 리밸런싱 추천 실패: {e or type(e).__name__} — 내일 다시 시도합니다",
+                    text=f"⚠️ 월간 리밸런싱 추천 실패: {str(e) or type(e).__name__} — 내일 다시 시도합니다",
                 )
             except Exception:
                 pass
@@ -3285,8 +3313,7 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 구조화된 추천 목록도 함께 가져옴 (paper 실행용) — v3.29
     try:
-        snap = await asyncio.wait_for(asyncio.to_thread(quant_snapshot),
-                                      timeout=QUANT_REBALANCE_TIMEOUT)
+        snap = await _run_quant(quant_snapshot)
         phase = snap.consensus_phase if snap else None
         if phase:  # v3.45 — 월별 국면 실측 캐시 축적(상관 분석용)
             try:
@@ -3302,10 +3329,12 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # **월간 리밸런싱은 콴텍봇의 진짜 판단이다 — 남긴다(2026-09-02).**
         # 예전에는 추천이 텔레그램으로만 나가고 종목·점수가 어디에도 남지
         # 않아 탭 B가 잴 원자료가 없었다.
-        recs = (await asyncio.wait_for(
-                    asyncio.to_thread(quant_recommend, phase, log_path=_bot_signal_path()),
-                    timeout=QUANT_REBALANCE_TIMEOUT)
+        recs = (await _run_quant(quant_recommend, phase, log_path=_bot_signal_path())
                 if phase else [])
+    except (TimeoutError, QuantBusy) as e:
+        # 빈 추천으로 푸시하면 그 달이 "보냄"으로 기록돼 다시 묻힌다 — 보내지 않고 내일 다시
+        log.warning("콴텍 추천 목록 계산 실패 — 푸시하지 않고 내일 다시 시도: %s", e)
+        return
     except Exception:
         recs = []
 
@@ -4563,8 +4592,8 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         return
     await update.message.reply_text("⏳ 콴텍봇 스캔 중... (수 분 소요)")
     try:
-        text, _ = await asyncio.to_thread(quant_run, "recommend")
-        snap = await asyncio.to_thread(quant_snapshot)
+        text, _ = await _run_quant(quant_run, "recommend")
+        snap = await _run_quant(quant_snapshot)
         phase = snap.consensus_phase if snap else None
         if phase:  # v3.45 — 월별 국면 실측 캐시 축적(상관 분석용)
             try:
@@ -4578,12 +4607,10 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
                             exc_info=True)
         # 강제 실행도 콴텍봇의 판단이다 — 같은 날은 원장에서 한 줄로 합쳐진다.
-        recs = (await asyncio.wait_for(
-                    asyncio.to_thread(quant_recommend, phase, log_path=_bot_signal_path()),
-                    timeout=QUANT_REBALANCE_TIMEOUT)
+        recs = (await _run_quant(quant_recommend, phase, log_path=_bot_signal_path())
                 if phase else [])
     except Exception as e:
-        await update.message.reply_text(f"❌ 콴텍봇 실패: {e}")
+        await update.message.reply_text(f"❌ 콴텍봇 실패: {str(e) or type(e).__name__}")
         log.exception("test_quant 실패")
         return
 

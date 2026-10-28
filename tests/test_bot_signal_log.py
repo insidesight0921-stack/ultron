@@ -186,7 +186,7 @@ def _calls_with_kw(path: Path, func_name: str, kw: str) -> list[bool]:
         name = _call_name(node)
         if name == func_name:
             out.append(any(k.arg == kw for k in node.keywords))
-        elif (name in ("to_thread", "run_in_executor", "partial")
+        elif (name in ("to_thread", "run_in_executor", "partial", "_run_quant")
               and node.args
               and getattr(node.args[0], "id", None) == func_name):
             out.append(any(k.arg == kw for k in node.keywords))
