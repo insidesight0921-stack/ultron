@@ -35,6 +35,8 @@ from typing import Iterable, Optional
 # TIGER 단기통안채. 계획서가 지정한 종목이다.
 PARK_TICKER = "157450"
 PARK_NAME = "TIGER 단기통안채"
+# 파킹은 이 슬롯에서만 한다. 사람 승인 없는 매수라 private 쓰기 쪽도 이 이름으로 묶는다.
+PARK_SLOT = "IPO"
 
 # 청약 D-5에 현금화한다. 실제 ETF 매도 대금은 T+2에 들어오고, 증거금은 청약일에
 # 필요하다. 영업일 기준 3일 + 여유 2일. paper_db는 즉시 반영하지만 **실전 제약을

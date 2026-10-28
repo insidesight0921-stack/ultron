@@ -15,7 +15,7 @@ from paper_trade_identity import (
     PaperTradeWriteIdentity,
     validate_paper_trade_write_identity,
 )
-from idle_cash import PARK_TICKER
+from idle_cash import PARK_SLOT, PARK_TICKER
 from private_data_api_client import PrivateDataClient
 from private_paper_write_contract import validate_paper_trade_write_intent
 from private_write_readiness import require_private_write_activation_permit
@@ -104,7 +104,8 @@ class PaperTradeWriteExecutor:
                     "intraday Paper sell requires policy approval only"
                 )
         elif caller_n == "telegram-idle-cash":
-            # 사람 승인 없이 **매수까지** 하는 유일한 경로라 종목을 여기서 묶는다(2026-10-28).
+            # 사람 승인 없이 **매수까지** 하는 유일한 경로라 종목·슬롯을 여기서 묶는다(2026-10-28,
+            # 슬롯은 execute의 _require_park_slot).
             # 호출하는 쪽만 믿으면 그 경로가 잘못 쓰일 때 아무 종목이나 살 수 있다.
             if str(ticker or "").strip() != PARK_TICKER:
                 raise ValueError("Idle-cash policy permits only the parking ETF")
@@ -120,6 +121,16 @@ class PaperTradeWriteExecutor:
                     "explicit user approval is required for this Paper caller"
                 )
         return caller_n, action_n
+
+    def _require_park_slot(self, slot_id: object) -> None:
+        """유휴 자본 파킹은 IPO 슬롯에서만 — 슬롯 번호는 이름을 몰라 API에서 찾는다."""
+        names = {int(s["id"]): s.get("name") for s in self.client.list_paper_slots()}
+        try:
+            name = names.get(int(slot_id))
+        except (TypeError, ValueError):
+            name = None
+        if name != PARK_SLOT:
+            raise ValueError("Idle-cash policy permits only the parking slot")
 
     @staticmethod
     def _raw_payload(
@@ -190,6 +201,8 @@ class PaperTradeWriteExecutor:
             policy_approved=policy_approved,
             ticker=ticker,
         )
+        if caller_n == "telegram-idle-cash":
+            self._require_park_slot(slot_id)
         operation = f"paper.{action_n}"
         identity = validate_paper_trade_write_identity(
             identity,

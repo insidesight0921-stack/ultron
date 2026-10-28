@@ -224,3 +224,21 @@ def enqueue(orders: list[dict], path=None) -> list[dict]:
 
 def clear(path=None) -> None:
     save([], path)
+
+
+def order_key(order: dict) -> tuple:
+    """주문 하나를 가리키는 키 — 같은 (슬롯, 종목)이라도 새 신호면 다른 주문이다."""
+    return (order.get("slot"), order.get("ticker"), order.get("signal_at"))
+
+
+def remove(processed: Iterable[dict], path=None) -> list[dict]:
+    """처리한 주문만 큐에서 뺀다(2026-10-28).
+
+    통째로 비우면(clear) 체결을 기다리는 사이 다른 경로가 넣은 주문까지 사라진다 —
+    장중 승인에서 시세를 못 받아 미룬 주문이 그렇게 흔적 없이 없어질 수 있었다.
+    같은 (슬롯, 종목)이 새 신호로 교체됐으면 그 새 주문은 남는다.
+    """
+    done = {order_key(o) for o in processed}
+    left = [o for o in load(path) if order_key(o) not in done]
+    save(left, path)
+    return left

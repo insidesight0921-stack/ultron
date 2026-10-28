@@ -327,9 +327,10 @@ def test_pending_queue_buy_goes_through_and_is_buy_only(consumer_stack):
 def test_idle_cash_parks_only_the_etf_with_policy_approval(consumer_stack):
     # 사람 승인 없이 매수까지 하는 유일한 경로 — 종목과 승인 방식을 consumer가 묶는다
     executor, _, writer, opener, _, slots = consumer_stack
-    slot_id = slots["콴텍"]
+    slot_id = slots["IPO"]
 
-    def park(event_id, *, ticker="157450", user_approved=False, policy_approved=True):
+    def park(event_id, *, ticker="157450", user_approved=False, policy_approved=True,
+             slot_id=slot_id):
         return executor.execute(
             caller="telegram-idle-cash", action="buy", slot_id=slot_id,
             identity=_identity(caller="telegram-idle-cash", slot_id=slot_id, event_id=event_id),
@@ -343,8 +344,12 @@ def test_idle_cash_parks_only_the_etf_with_policy_approval(consumer_stack):
         park("e2", policy_approved=False)
     with pytest.raises(PaperTradeApprovalRequired):
         park("e3", user_approved=True)
-    assert opener.calls == []
+    quant_before = _paper_state(writer.db_path, slots["콴텍"])
+    with pytest.raises(ValueError, match="parking slot"):
+        park("e5", slot_id=slots["콴텍"])              # 다른 슬롯 현금으로는 안 산다
+    assert [p for _, p in opener.calls if "/write/" in p] == []
     assert _paper_state(writer.db_path, slot_id) == before
+    assert _paper_state(writer.db_path, slots["콴텍"]) == quant_before
 
     assert park("e4").state == "applied"
     assert [(t, q) for t, q, _ in _paper_state(writer.db_path, slot_id)[1]] == [("157450", 10)]

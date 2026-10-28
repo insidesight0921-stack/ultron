@@ -228,11 +228,12 @@ def test_drain_respects_the_daily_loss_limit():
     assert "_slot_hard_stop_reason" in fn
 
 
-def test_drain_clears_the_queue_even_on_failure():
-    """남겨 두면 다음 사이클에 또 시도한다."""
+def test_drain_removes_processed_orders_even_on_failure():
+    """남겨 두면 다음 사이클에 또 시도한다. 다만 통째로 비우지는 않는다 — 처리한 것만."""
     src = (SCRIPTS / "telegram_bot.py").read_text(encoding="utf-8")
     fn = src[src.index("async def _drain_pending_orders"):src.index("async def intraday_monitor_job")]
-    assert ".clear)" in fn
+    assert "po.remove, orders)" in fn
+    assert ".clear)" not in fn
 
 
 def _buy_callbacks(src):
@@ -243,3 +244,24 @@ def _buy_callbacks(src):
     rest = src[quant_start + 10:]
     quant_end = quant_start + 10 + rest.index("\nasync def ")
     return kium, src[quant_start:quant_end]
+
+
+def test_remove_drops_only_processed_orders(tmp_path):
+    # 2026-10-28: 통째로 비우면 체결하는 사이 들어온 주문까지 사라졌다
+    path = tmp_path / "q.json"
+    t0 = datetime(2026, 10, 27, 16, 0)
+    a = po.make_order(slot="콴텍", ticker="1", name="A", signal_price=100, alloc=1000,
+                      signal_at=t0, source="s")
+    b = po.make_order(slot="콴텍", ticker="2", name="B", signal_price=100, alloc=1000,
+                      signal_at=t0, source="s")
+    po.enqueue([a, b], path)
+    processed = po.load(path)
+    newer_a = po.make_order(slot="콴텍", ticker="1", name="A", signal_price=101, alloc=1000,
+                            signal_at=datetime(2026, 10, 28, 10, 0), source="s")
+    late = po.make_order(slot="키움", ticker="3", name="C", signal_price=100, alloc=1000,
+                         signal_at=t0, source="s")
+    po.enqueue([newer_a, late], path)              # 체결 중에 들어온 주문
+
+    left = po.remove(processed, path)
+    assert sorted(o["ticker"] for o in left) == ["1", "3"]
+    assert next(o for o in left if o["ticker"] == "1")["signal_price"] == 101

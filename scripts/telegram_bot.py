@@ -28,7 +28,7 @@
 from __future__ import annotations
 import asyncio
 import concurrent.futures
-import functools
+import threading
 import json
 import logging
 from typing import Optional
@@ -1275,11 +1275,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"{mode_emoji}🌐 콴텍봇 거시 국면 분석 중... ({months}M)"
         )
         try:
-            answer, chunks = await asyncio.wait_for(
-                asyncio.to_thread(quant_run, **args),
-                timeout=timeout_q,
-            )
-        except asyncio.TimeoutError:
+            # 월간 잡과 같은 전용 경로 — 멈춘 호출이 공용 풀에 쌓이지 않게(2026-10-28)
+            answer, chunks = await _run_quant(quant_run, timeout=timeout_q, **args)
+        except QuantBusy:
+            await notice.edit_text("콴텍봇이 다른 계산을 하는 중입니다. 잠시 후 다시 시도해 주세요.")
+            return
+        except TimeoutError:
             log.warning(f"quant_bot 타임아웃 ({timeout_q}s)")
             await notice.edit_text(
                 f"콴텍봇 타임아웃 ({timeout_q}초). KRX 서버 응답이 느립니다.\n"
@@ -1414,28 +1415,44 @@ REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
 QUANT_REBALANCE_TIMEOUT = 600   # 초 — 캐시 없는 recommend가 최대 6분(수동 명령 360초)
 
-# 콴텍 계산 전용 스레드 1개. wait_for는 기다림만 끊고 스레드는 못 죽인다 — 공용
-# to_thread 풀에서 돌리면 멈춘 호출이 하루 하나씩 쌓여 결국 장중 손절 모니터의
-# 시세 조회까지 막는다. 여기서는 멈춘 호출이 있으면 새로 넣지 않는다.
-_QUANT_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="quant")
+# 콴텍 계산은 한 번에 하나만, 데몬 스레드에서 돈다. wait_for는 기다림만 끊고 스레드는
+# 못 죽인다 — 공용 to_thread 풀에서 돌리면 멈춘 호출이 하루 하나씩 쌓여 결국 장중 손절
+# 모니터의 시세 조회까지 막는다. 그래서 앞 호출이 안 끝났으면 새로 넣지 않는다.
+# 데몬이어야 멈춘 스레드가 봇 재시작(종료)을 붙잡지 않는다(풀 워커는 종료 때 join된다).
 _QUANT_INFLIGHT: "concurrent.futures.Future | None" = None
 
 
 class QuantBusy(RuntimeError):
-    """이전 콴텍 계산이 아직 끝나지 않았다(시간 초과 후에도 스레드는 돈다)."""
+    """앞선 콴텍 계산이 아직 끝나지 않았다(진행 중이거나, 시간 초과 뒤에도 도는 중)."""
 
 
-async def _run_quant(fn, *args, **kwargs):
-    """콴텍 계산을 전용 스레드에서 시간 제한을 두고 돌린다."""
+def _start_quant_thread(fn, args, kwargs) -> "concurrent.futures.Future":
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+
+    def _work():
+        if not fut.set_running_or_notify_cancel():
+            return
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001 — 결과로 넘긴다
+            fut.set_exception(exc)
+
+    threading.Thread(target=_work, name="quant", daemon=True).start()
+    return fut
+
+
+async def _run_quant(fn, *args, timeout: float | None = None, **kwargs):
+    """콴텍 계산을 한 번에 하나만, 시간 제한을 두고 돌린다."""
     global _QUANT_INFLIGHT
     if _QUANT_INFLIGHT is not None and not _QUANT_INFLIGHT.done():
-        raise QuantBusy("이전 콴텍 계산이 아직 멈춰 있습니다 — 봇 재시작이 필요할 수 있습니다")
-    fut = _QUANT_POOL.submit(functools.partial(fn, *args, **kwargs))
+        raise QuantBusy("앞선 콴텍 계산이 아직 끝나지 않았습니다")
+    fut = _start_quant_thread(fn, args, kwargs)
     _QUANT_INFLIGHT = fut
+    limit = QUANT_REBALANCE_TIMEOUT if timeout is None else timeout
     try:
-        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=QUANT_REBALANCE_TIMEOUT)
+        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=limit)
     except asyncio.TimeoutError:
-        raise TimeoutError(f"콴텍 계산 {QUANT_REBALANCE_TIMEOUT}초 초과") from None
+        raise TimeoutError(f"콴텍 계산 {limit}초 초과") from None
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
 # v3.59 — **디스크에도 저장한다.** 메모리에만 두면 재시작으로 사라지고,
 # 사용자가 버튼을 눌러도 "저장된 추천 종목이 없습니다"가 뜬다. 2026-07이 그렇게
@@ -1630,9 +1647,10 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
     prices: dict = dict(zip(tickers, fetched))
 
     results = po.revalidate_all(orders, prices, now.date())
-    slot_ids = {s["name"]: s["id"] for s in await asyncio.to_thread(_pdb.list_slots)}
+    slot_ids = {s["name"]: s["id"]
+                for s in await asyncio.to_thread(_list_runtime_paper_slots)}
 
-    for i, r in enumerate(results):
+    for r in results:
         if r["verdict"] != "fill":
             log.info("대기 주문 취소 %s — %s", r.get("ticker"), r["reason"])
             continue
@@ -1670,8 +1688,8 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
                     # 주문 자체로 식별한다(사이클 시각·순번이 아니라). 체결 뒤 큐를 비우기
                     # 전에 재시작되면 다음 사이클이 같은 주문을 다시 넣는데, 그때 같은
                     # 식별자여야 private API가 중복으로 보고 재생한다(2026-10-28 리뷰).
-                    source_event_id=f"{o.get('slot')}|{o.get('signal_at')}",
-                    item_key=f"pending-{r['ticker']}",
+                    source_event_id="|".join(map(str, po.order_key(o))),
+                    item_key="pending-order",
                     ticker=r["ticker"],
                     name=r.get("name"),
                     quantity=int(r["qty"]),
@@ -1685,8 +1703,9 @@ async def _drain_pending_orders(ctx: ContextTypes.DEFAULT_TYPE, now) -> list[str
             r["reason"] = f"체결 실패: {exc}"
             log.warning("대기 주문 체결 실패 %s: %s", r.get("ticker"), exc)
 
-    # 처리한 것은 성공·실패와 무관하게 큐에서 비운다 — 남겨 두면 다음 사이클에 또 시도한다
-    await asyncio.to_thread(po.clear)
+    # 처리한 것은 성공·실패와 무관하게 큐에서 뺀다 — 남겨 두면 다음 사이클에 또 시도한다.
+    # 통째로 비우지 않는다: 체결하는 사이 다른 경로가 넣은 주문까지 지워진다.
+    await asyncio.to_thread(po.remove, orders)
     text = po.format_results(results)
     return [text] if text else []
 
@@ -2561,7 +2580,7 @@ async def indicator_log_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("지표 시계열 %s — %s/%s 확보", day, got, total)
 
 
-IDLE_CASH_SLOT = "IPO"
+IDLE_CASH_SLOT = idle_cash.PARK_SLOT
 IDLE_CASH_INTERVAL_SEC = 60 * 60 * 4     # 장중 4시간 간격(하루 2회 남짓)
 
 
@@ -3294,6 +3313,11 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 나갔다. 끊고 돌아오면 아직 실행 안 된 달이라 다음 검사(하루 뒤)에서 다시 시도한다.
     try:
         text, _ = await _run_quant(quant_run, "recommend")
+    except QuantBusy:
+        # 다른 콴텍 계산(/test_quant 등)이 도는 중 — 조용히 내일 다시. 실패 알림을 보내면
+        # 멀쩡한데도 "멈췄다"로 읽힌다.
+        log.info("콴텍 계산이 진행 중이라 월간 푸시를 내일로 미룹니다")
+        return
     except Exception as e:
         log.exception("quant_run 실패")
         for uid in pending:
@@ -3329,20 +3353,21 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # **월간 리밸런싱은 콴텍봇의 진짜 판단이다 — 남긴다(2026-09-02).**
         # 예전에는 추천이 텔레그램으로만 나가고 종목·점수가 어디에도 남지
         # 않아 탭 B가 잴 원자료가 없었다.
-        recs = (await _run_quant(quant_recommend, phase, log_path=_bot_signal_path())
-                if phase else [])
-    except (TimeoutError, QuantBusy) as e:
-        # 빈 추천으로 푸시하면 그 달이 "보냄"으로 기록돼 다시 묻힌다 — 보내지 않고 내일 다시
-        log.warning("콴텍 추천 목록 계산 실패 — 푸시하지 않고 내일 다시 시도: %s", e)
-        return
+        if not phase:
+            # 추천이 비면 기존 보유가 전부 "퇴출"로 계산된다 — 국면을 모르면 보내지 않는다
+            raise RuntimeError("국면 판정 없음")
+        recs = await _run_quant(quant_recommend, phase, log_path=_bot_signal_path())
     except Exception:
-        recs = []
+        # 빈 추천으로 푸시하면 그 달이 "보냄"으로 기록돼 묻힌다 — 승인해도 살 게 없다.
+        # 시간 초과든 KRX 오류든 보내지 않고 내일 다시 시도한다(2026-10-28 리뷰).
+        log.warning("콴텍 추천 목록 계산 실패 — 푸시하지 않고 내일 다시 시도", exc_info=True)
+        return
 
     # ── diff 계산 (기존 포지션 vs 새 추천) ─────────────────────────────
     try:
-        _all_slots = _pdb.list_slots()
+        _all_slots = _list_runtime_paper_slots()
         _qslot = next((s for s in _all_slots if "콴텍" in s.get("name", "")), None)
-        _qpos = _pdb.list_positions(slot=int(_qslot["id"])) if _qslot else []
+        _qpos = _list_runtime_paper_positions(slot=int(_qslot["id"])) if _qslot else []
     except Exception:
         _qpos = []
 
