@@ -19,8 +19,14 @@ from private_write_contract import normalize_idempotency_key
 
 _REQUEST_NAMESPACE = uuid.UUID("2bb4eeeb-fd2d-5d93-b8c8-3cd672243f53")
 _APPROVAL_NAMESPACE = uuid.UUID("4687931c-ecf3-543e-8c6e-da9bd9394e93")
+# 2026-10-28: telegram-pending 추가. 장외 승인분을 개장 후 체결하는 대기 큐가 이 목록에
+# 없어서 private 쓰기 경로로 바뀐 뒤 한 번도 체결되지 않았다(10-27 콴텍 10월 진입 8건 전부
+# "caller is not allowed"로 취소 — 콴텍 슬롯이 한 종목도 없이 남았다).
+# 2026-10-28: telegram-idle-cash 추가. IPO 슬롯 유휴 자본을 단기통안채에 파킹하는 자동
+# 경로다 — 사람 승인 없이 사고판다. 그래서 consumer가 종목(157450)·승인 방식을 묶는다.
 PAPER_IDENTITY_CALLERS = frozenset(
-    {"paper-ui", "telegram-intraday", "telegram-kium", "telegram-quant"}
+    {"paper-ui", "telegram-intraday", "telegram-kium", "telegram-quant", "telegram-pending",
+     "telegram-idle-cash"}
 )
 
 
@@ -190,6 +196,8 @@ def build_paper_trade_write_identity(
         raise ValueError("Paper trade write operation is not allowed")
     if caller_n == "telegram-intraday" and operation_n != "paper.sell":
         raise ValueError("Telegram intraday policy permits Paper sells only")
+    if caller_n == "telegram-pending" and operation_n != "paper.buy":
+        raise ValueError("Telegram pending queue permits Paper buys only")
     slot_id_n = normalize_paper_slot_id(slot_id)
     actor_hash = _digest(
         _coordinate(actor_id, field_name="actor_id"),

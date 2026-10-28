@@ -1410,6 +1410,7 @@ NEWLINE = chr(10)
 MODE_LOG_FILE = PATHS.private_state_dir / "mode_decisions.jsonl"
 REBALANCE_FLAG_DIR = PATHS.private_state_dir
 REBALANCE_FLAG_FILE = REBALANCE_FLAG_DIR / "quant_rebalance_last.json"
+QUANT_REBALANCE_TIMEOUT = 600   # 초 — 캐시 없는 recommend가 최대 6분(수동 명령 360초)
 # 월간 리밸런싱 승인 대기 (user_id → StockRecommendation list) v3.29
 # v3.59 — **디스크에도 저장한다.** 메모리에만 두면 재시작으로 사라지고,
 # 사용자가 버튼을 눌러도 "저장된 추천 종목이 없습니다"가 뜬다. 2026-07이 그렇게
@@ -2622,6 +2623,10 @@ async def idle_cash_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 caller="telegram-idle-cash",
                 action=plan["action"],
                 slot_id=int(slot["id"]),
+                # 식별자가 빠져 있어 이 경로는 호출되면 TypeError로 죽었다(2026-10-28)
+                actor_id="idle-cash-policy",
+                source_event_id=_now_kst().strftime("%Y%m%dT%H%M"),
+                item_key=f"park-{plan['action']}",
                 ticker=idle_cash.PARK_TICKER,
                 name=idle_cash.PARK_NAME,
                 quantity=plan["qty"],
@@ -3255,15 +3260,19 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info(f"💼 콴텍봇 월간 리밸런싱 푸시 — {month_key}, pending {len(pending)}명")
 
     # 무거운 호출이라 한 번만 실행해 모든 user에 같은 결과 푸시
+    # 시간 제한을 둔다(2026-10-28). 10-01 14:11 첫 호출이 KRX 응답 없이 멈춘 채 끝나지 않아
+    # 이 잡이 "이미 실행 중"으로 25일간 매일 건너뛰어졌고, 10월 추천은 10-26 재시작 뒤에야
+    # 나갔다. 끊고 돌아오면 아직 실행 안 된 달이라 다음 검사(하루 뒤)에서 다시 시도한다.
     try:
-        text, _ = await asyncio.to_thread(quant_run, "recommend")
+        text, _ = await asyncio.wait_for(
+            asyncio.to_thread(quant_run, "recommend"), timeout=QUANT_REBALANCE_TIMEOUT)
     except Exception as e:
         log.exception("quant_run 실패")
         for uid in pending:
             try:
                 await ctx.bot.send_message(
                     chat_id=int(uid),
-                    text=f"⚠️ 월간 리밸런싱 추천 실패: {e}",
+                    text=f"⚠️ 월간 리밸런싱 추천 실패: {e or type(e).__name__} — 내일 다시 시도합니다",
                 )
             except Exception:
                 pass
@@ -3276,7 +3285,8 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 구조화된 추천 목록도 함께 가져옴 (paper 실행용) — v3.29
     try:
-        snap = await asyncio.to_thread(quant_snapshot)
+        snap = await asyncio.wait_for(asyncio.to_thread(quant_snapshot),
+                                      timeout=QUANT_REBALANCE_TIMEOUT)
         phase = snap.consensus_phase if snap else None
         if phase:  # v3.45 — 월별 국면 실측 캐시 축적(상관 분석용)
             try:
@@ -3292,8 +3302,9 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # **월간 리밸런싱은 콴텍봇의 진짜 판단이다 — 남긴다(2026-09-02).**
         # 예전에는 추천이 텔레그램으로만 나가고 종목·점수가 어디에도 남지
         # 않아 탭 B가 잴 원자료가 없었다.
-        recs = (await asyncio.to_thread(quant_recommend, phase,
-                                        log_path=_bot_signal_path())
+        recs = (await asyncio.wait_for(
+                    asyncio.to_thread(quant_recommend, phase, log_path=_bot_signal_path()),
+                    timeout=QUANT_REBALANCE_TIMEOUT)
                 if phase else [])
     except Exception:
         recs = []
@@ -4567,8 +4578,9 @@ async def cmd_test_quant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 log.warning("국면 캐시 기록 실패 — 탭 C 측정이 밀립니다",
                             exc_info=True)
         # 강제 실행도 콴텍봇의 판단이다 — 같은 날은 원장에서 한 줄로 합쳐진다.
-        recs = (await asyncio.to_thread(quant_recommend, phase,
-                                        log_path=_bot_signal_path())
+        recs = (await asyncio.wait_for(
+                    asyncio.to_thread(quant_recommend, phase, log_path=_bot_signal_path()),
+                    timeout=QUANT_REBALANCE_TIMEOUT)
                 if phase else [])
     except Exception as e:
         await update.message.reply_text(f"❌ 콴텍봇 실패: {e}")

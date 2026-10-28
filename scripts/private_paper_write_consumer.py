@@ -15,6 +15,7 @@ from paper_trade_identity import (
     PaperTradeWriteIdentity,
     validate_paper_trade_write_identity,
 )
+from idle_cash import PARK_TICKER
 from private_data_api_client import PrivateDataClient
 from private_paper_write_contract import validate_paper_trade_write_intent
 from private_write_readiness import require_private_write_activation_permit
@@ -86,6 +87,7 @@ class PaperTradeWriteExecutor:
         action: object,
         user_approved: bool,
         policy_approved: bool,
+        ticker: object = None,
     ) -> tuple[str, str]:
         self._require_enabled()
         caller_n = str(caller or "").strip().lower()
@@ -101,10 +103,22 @@ class PaperTradeWriteExecutor:
                 raise PaperTradeApprovalRequired(
                     "intraday Paper sell requires policy approval only"
                 )
-        elif user_approved is not True or policy_approved is True:
-            raise PaperTradeApprovalRequired(
-                "explicit user approval is required for this Paper caller"
-            )
+        elif caller_n == "telegram-idle-cash":
+            # 사람 승인 없이 **매수까지** 하는 유일한 경로라 종목을 여기서 묶는다(2026-10-28).
+            # 호출하는 쪽만 믿으면 그 경로가 잘못 쓰일 때 아무 종목이나 살 수 있다.
+            if str(ticker or "").strip() != PARK_TICKER:
+                raise ValueError("Idle-cash policy permits only the parking ETF")
+            if policy_approved is not True or user_approved is True:
+                raise PaperTradeApprovalRequired(
+                    "idle-cash Paper write requires policy approval only"
+                )
+        else:
+            if caller_n == "telegram-pending" and action_n != "buy":
+                raise ValueError("Telegram pending queue permits Paper buys only")
+            if user_approved is not True or policy_approved is True:
+                raise PaperTradeApprovalRequired(
+                    "explicit user approval is required for this Paper caller"
+                )
         return caller_n, action_n
 
     @staticmethod
@@ -174,6 +188,7 @@ class PaperTradeWriteExecutor:
             action=action,
             user_approved=user_approved,
             policy_approved=policy_approved,
+            ticker=ticker,
         )
         operation = f"paper.{action_n}"
         identity = validate_paper_trade_write_identity(

@@ -305,6 +305,51 @@ def test_full_buy_flow_and_applied_replay(consumer_stack):
     ) == 1
 
 
+def test_pending_queue_buy_goes_through_and_is_buy_only(consumer_stack):
+    # 2026-10-27: 대기 큐가 허용 목록에 없어 장외 승인분 8건이 전부 취소됐다
+    executor, _, writer, _, _, slots = consumer_stack
+    slot_id = slots["콴텍"]
+    done = _execute(executor, identity=_identity(caller="telegram-pending", slot_id=slot_id),
+                    slot_id=slot_id, caller="telegram-pending")
+    assert done.state == "applied"
+    assert len(_paper_state(writer.db_path, slot_id)[2]) == 1
+
+    with pytest.raises(ValueError, match="buys only"):
+        _execute(executor, identity=_identity(caller="telegram-pending", slot_id=slot_id,
+                                              event_id="event-2"),
+                 slot_id=slot_id, caller="telegram-pending", action="sell")
+    with pytest.raises(PaperTradeApprovalRequired):
+        _execute(executor, identity=_identity(caller="telegram-pending", slot_id=slot_id,
+                                              event_id="event-3"),
+                 slot_id=slot_id, caller="telegram-pending", user_approved=False)
+
+
+def test_idle_cash_parks_only_the_etf_with_policy_approval(consumer_stack):
+    # 사람 승인 없이 매수까지 하는 유일한 경로 — 종목과 승인 방식을 consumer가 묶는다
+    executor, _, writer, opener, _, slots = consumer_stack
+    slot_id = slots["콴텍"]
+
+    def park(event_id, *, ticker="157450", user_approved=False, policy_approved=True):
+        return executor.execute(
+            caller="telegram-idle-cash", action="buy", slot_id=slot_id,
+            identity=_identity(caller="telegram-idle-cash", slot_id=slot_id, event_id=event_id),
+            user_approved=user_approved, policy_approved=policy_approved,
+            ticker=ticker, name="TIGER 단기통안채", quantity=10, price=100_000)
+
+    before = _paper_state(writer.db_path, slot_id)
+    with pytest.raises(ValueError, match="parking ETF"):
+        park("e1", ticker="005930")
+    with pytest.raises(PaperTradeApprovalRequired):
+        park("e2", policy_approved=False)
+    with pytest.raises(PaperTradeApprovalRequired):
+        park("e3", user_approved=True)
+    assert opener.calls == []
+    assert _paper_state(writer.db_path, slot_id) == before
+
+    assert park("e4").state == "applied"
+    assert [(t, q) for t, q, _ in _paper_state(writer.db_path, slot_id)[1]] == [("157450", 10)]
+
+
 @pytest.mark.parametrize("partial_state", ["pending", "approved"])
 def test_executor_resumes_partial_request(consumer_stack, partial_state):
     executor, client, writer, _, _, slots = consumer_stack

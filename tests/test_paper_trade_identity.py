@@ -256,6 +256,7 @@ def test_paper_identity_is_domain_separated_from_existing_telegram_identity():
         {"item_key": "bad\nitem"},
         {"item_key": "x" * 201},
         {"caller": "telegram-intraday", "operation": "paper.buy"},
+        {"caller": "telegram-pending", "operation": "paper.sell"},
     ],
 )
 def test_invalid_or_policy_forbidden_identity_input_is_rejected(overrides):
@@ -293,11 +294,20 @@ def test_identity_caller_allowlist_matches_future_runtime_policies():
         for policy in PAPER_DIRECT_WRITER_INVENTORY
         if policy.target_mode == "private-client"
     }
-    normalized = {
-        "paper-ui" if owner == "paper-ui" else
-        "telegram-intraday" if owner == "telegram-intraday-monitor" else
-        "telegram-kium" if owner == "telegram-kium-callback" else
-        "telegram-quant"
-        for owner in target_callers
+    # 예전엔 모르는 owner를 전부 telegram-quant로 접어 세서, 목록에서 빠진 대기 큐
+    # (telegram-pending)가 드러나지 않았다(2026-10-28). 이름을 하나씩 맞춘다.
+    owner_to_caller = {
+        "paper-ui": "paper-ui",
+        "telegram-intraday-monitor": "telegram-intraday",
+        "telegram-kium-callback": "telegram-kium",
+        "telegram-quant-callback": "telegram-quant",
+        "telegram-pending-drain": "telegram-pending",
+        "telegram-idle-cash-direct": "telegram-idle-cash",
     }
-    assert normalized == PAPER_IDENTITY_CALLERS
+    assert target_callers == set(owner_to_caller)
+    assert {owner_to_caller[o] for o in target_callers} == PAPER_IDENTITY_CALLERS
+
+
+def test_pending_queue_identity_is_buy_only():
+    # 장외 승인분을 개장 후 체결하는 대기 큐 (2026-10-28)
+    assert _identity(caller="telegram-pending", operation="paper.buy")
