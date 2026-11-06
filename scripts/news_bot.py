@@ -129,6 +129,12 @@ def _parse_rss(xml_text: str) -> list[dict]:
     return items
 
 
+def _clean(text: str) -> str:
+    """HTML 엔티티(&nbsp; 등) 해제 + 공백 정리. v3.47"""
+    import html
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
 def _fetch_rss_raw(source: Source, limit: int) -> list[Article]:
     xml = _http_get(source.url)
     if not xml:
@@ -136,8 +142,8 @@ def _fetch_rss_raw(source: Source, limit: int) -> list[Article]:
     out = []
     for d in _parse_rss(xml)[:limit]:
         if d.get("link"):
-            out.append(Article(source.name, d["title"], d["link"],
-                               d.get("summary", "")[:400], source.lang))
+            out.append(Article(source.name, _clean(d["title"]), d["link"],
+                               _clean(d.get("summary", ""))[:400], source.lang))
     return out
 
 
@@ -172,7 +178,7 @@ def _fetch_scrape_raw(source: Source, limit: int) -> list[Article]:
     return out
 
 
-def _summarize_via_llm(articles: list[Article]) -> None:
+def _summarize_via_llm(articles: list[Article], topic: str = "IT/AI") -> None:
     """기사 묶음을 한 번의 LLM 호출로 3줄 요약. 각 article.summary3 채움.
 
     실패 시 raw_summary로 graceful fallback. 외부 호출 — 테스트는 monkeypatch.
@@ -184,7 +190,7 @@ def _summarize_via_llm(articles: list[Article]) -> None:
         for i, a in enumerate(articles)
     )
     prompt = (
-        "다음 IT/AI 기사들을 각각 한국어 3줄 이내로 핵심만 요약해라. "
+        f"다음 {topic} 기사들을 각각 한국어 3줄 이내로 핵심만 요약해라. "
         "영문 기사는 한국어로 번역 요약. 형식은 정확히 '번호. 요약' 한 줄씩.\n\n"
         + numbered
     )
@@ -271,10 +277,10 @@ def collect(sources: Optional[list[Source]] = None,
     return out
 
 
-def format_digest(articles: list[Article]) -> str:
+def format_digest(articles: list[Article], title: str = "IT/AI 뉴스 다이제스트") -> str:
     if not articles:
         return ""
-    lines = [f"📰 *IT/AI 뉴스 다이제스트* ({datetime.now():%m/%d %H:%M})\n"]
+    lines = [f"📰 *{title}* ({datetime.now():%m/%d %H:%M})\n"]
     by_src: dict[str, list[Article]] = {}
     for a in articles:
         by_src.setdefault(a.source, []).append(a)
@@ -308,6 +314,74 @@ def run(sources: Optional[list[Source]] = None,
     if use_dedup and updated is not None:
         save_seen(updated)
     return format_digest(articles), articles
+
+
+# ─── v3.47 키워드 뉴스 (예: 하나은행) ─────────────────
+
+KEYWORD_DEFAULT_LIMIT = 3      # 키워드 뉴스 1회 발송 건수
+KEYWORD_FETCH_POOL = 30        # dedup 전 후보 수
+KEYWORD_DUP_THRESHOLD = 0.4    # 제목 유사도(바이그램 겹침) 이상이면 같은 사건으로 봄
+
+
+def _title_key(title: str, query: str) -> set[str]:
+    """' - 언론사' 꼬리와 검색어를 뺀 제목의 글자 2-gram 집합."""
+    t = re.sub(r"\s+-\s+[^-]+$", "", title).replace(query, "")
+    t = re.sub(r"[^0-9A-Za-z가-힣]", "", t)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def _is_near_dup(a: str, b: str, query: str) -> bool:
+    ka, kb = _title_key(a, query), _title_key(b, query)
+    if not ka or not kb:
+        return False
+    return len(ka & kb) / min(len(ka), len(kb)) >= KEYWORD_DUP_THRESHOLD
+
+
+def pick_distinct(articles: list[Article], query: str, limit: int) -> tuple[list[Article], list[Article]]:
+    """같은 사건을 다룬 기사(다른 언론사 중복)는 1건만 남겨 limit건 선택.
+    반환: (선택, 중복으로 건너뛴 기사)."""
+    picked: list[Article] = []
+    skipped: list[Article] = []
+    for a in articles:
+        if len(picked) >= limit:
+            break
+        if any(_is_near_dup(a.title, p.title, query) for p in picked):
+            skipped.append(a)
+        else:
+            picked.append(a)
+    return picked, skipped
+
+
+def keyword_source(query: str) -> Source:
+    """구글 뉴스 RSS 검색(최근 1일, 한국어) 소스."""
+    from urllib.parse import quote
+    url = (f"https://news.google.com/rss/search?q={quote(query)}+when:1d"
+           f"&hl=ko&gl=KR&ceid=KR:ko")
+    return Source(f"구글뉴스 '{query}'", "rss", url, "ko")
+
+
+def run_keyword(query: str = "하나은행",
+                limit: int = KEYWORD_DEFAULT_LIMIT,
+                summarize: bool = False,
+                use_dedup: bool = True) -> tuple[str, list[Article]]:
+    """키워드 기사 최신 limit건 → (메시지, 기사리스트). 이미 보낸 기사는 제외."""
+    articles = _fetch_rss_raw(keyword_source(query), KEYWORD_FETCH_POOL)
+    seen = load_seen() if use_dedup else []
+    if use_dedup:
+        articles, _ = filter_unseen(articles, seen)
+    articles, skipped = pick_distinct(articles, query, limit)
+    if not articles:
+        return "", []
+    # 구글 뉴스 RSS 설명은 '제목 + 언론사'뿐이라 본문이 없다.
+    # 제목만으로 LLM 요약을 만들면 근거 없는 내용이 섞이므로 기본은 요약 생략, 설명도 비움.
+    for a in articles:
+        a.raw_summary = ""
+    if summarize:
+        _summarize_via_llm(articles, topic=f"'{query}' 관련")
+    if use_dedup:
+        # 보낸 기사 + 같은 사건 중복 기사까지 기록 (내일 같은 사건 재발송 방지)
+        save_seen(list(seen) + [a.link for a in articles + skipped])
+    return format_digest(articles, title=f"{query} 뉴스 {len(articles)}건"), articles
 
 
 # ─── CLI (진단) ─────────────────────────────────────

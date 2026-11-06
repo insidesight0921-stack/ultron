@@ -2940,6 +2940,10 @@ def _run_action(action: str) -> str:
     """예약 액션 키 → 실제 봇 실행 결과 메시지."""
     if action == "news":
         return news_run()[0] or "신규 기사 없음"
+    if action == "hana_news":  # v3.47 키워드 뉴스(하나은행 3건)
+        from news_bot import run_keyword
+
+        return run_keyword("하나은행", 3)[0] or "신규 하나은행 기사 없음"
     if action == "signal":
         return signal_bot.run()[0] or "현재 actionable 신호 없음"
     if action == "ipo":

@@ -34,6 +34,7 @@ ACTION_LABELS = {
     "ipo": "공모주 스캔",
     "quant": "거시 국면 진단",
     "performance": "주간 성과 리포트",
+    "hana_news": "하나은행 뉴스 3건",  # v3.47 키워드 뉴스
 }
 
 WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
