@@ -242,7 +242,7 @@ def test_explicit_and_policy_approval_modes_block_before_http(consumer_stack):
             policy_approved=False,
             name=None,
         )
-    with pytest.raises(ValueError, match="sells only"):
+    with pytest.raises(ValueError, match="does not permit paper.buy"):
         executor.execute(
             caller="telegram-intraday",
             action="buy",
@@ -314,7 +314,7 @@ def test_pending_queue_buy_goes_through_and_is_buy_only(consumer_stack):
     assert done.state == "applied"
     assert len(_paper_state(writer.db_path, slot_id)[2]) == 1
 
-    with pytest.raises(ValueError, match="buys only"):
+    with pytest.raises(ValueError, match="does not permit paper.sell"):
         _execute(executor, identity=_identity(caller="telegram-pending", slot_id=slot_id,
                                               event_id="event-2"),
                  slot_id=slot_id, caller="telegram-pending", action="sell")

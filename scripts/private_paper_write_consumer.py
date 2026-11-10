@@ -11,13 +11,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from paper_trade_identity import (
-    PAPER_IDENTITY_CALLERS,
     PaperTradeWriteIdentity,
     validate_paper_trade_write_identity,
 )
 from idle_cash import PARK_SLOT, PARK_TICKER
 from private_data_api_client import PrivateDataClient
 from private_paper_write_contract import validate_paper_trade_write_intent
+from private_paper_write_readiness import (
+    PAPER_PARK_APPROVAL_MODE,
+    PAPER_POLICY_APPROVAL_MODES,
+    paper_caller_policy,
+)
 from private_write_readiness import require_private_write_activation_permit
 
 
@@ -92,34 +96,29 @@ class PaperTradeWriteExecutor:
         self._require_enabled()
         caller_n = str(caller or "").strip().lower()
         action_n = str(action or "").strip().lower()
-        if caller_n not in PAPER_IDENTITY_CALLERS:
+        # 규칙은 활성화 번들이 증명하는 표 하나에서 읽는다(2026-11-10) — 호출자별 if 분기를
+        # 여기 따로 두면 그 표와 어긋난다(10-28에 실제로 어긋났다).
+        policy = paper_caller_policy(caller_n)
+        if policy is None:
             raise ValueError("Paper write caller is not allowed")
         if action_n not in {"buy", "sell"}:
             raise ValueError("Paper trade action is not allowed")
-        if caller_n == "telegram-intraday":
-            if action_n != "sell":
-                raise ValueError("Telegram intraday policy permits Paper sells only")
+        if f"paper.{action_n}" not in policy.operations:
+            raise ValueError(f"Paper caller {caller_n} does not permit paper.{action_n}")
+        if policy.approval_mode in PAPER_POLICY_APPROVAL_MODES:
             if policy_approved is not True or user_approved is True:
                 raise PaperTradeApprovalRequired(
-                    "intraday Paper sell requires policy approval only"
+                    f"{caller_n} Paper write requires policy approval only"
                 )
-        elif caller_n == "telegram-idle-cash":
-            # 사람 승인 없이 **매수까지** 하는 유일한 경로라 종목·슬롯을 여기서 묶는다(2026-10-28,
-            # 슬롯은 execute의 _require_park_slot).
-            # 호출하는 쪽만 믿으면 그 경로가 잘못 쓰일 때 아무 종목이나 살 수 있다.
+        elif user_approved is not True or policy_approved is True:
+            raise PaperTradeApprovalRequired(
+                "explicit user approval is required for this Paper caller"
+            )
+        if policy.approval_mode == PAPER_PARK_APPROVAL_MODE:
+            # 사람 승인 없이 **매수까지** 하는 파킹은 종목·슬롯을 여기서 묶는다(슬롯은
+            # execute의 _require_park_slot). 호출하는 쪽만 믿으면 아무 종목이나 살 수 있다.
             if str(ticker or "").strip() != PARK_TICKER:
                 raise ValueError("Idle-cash policy permits only the parking ETF")
-            if policy_approved is not True or user_approved is True:
-                raise PaperTradeApprovalRequired(
-                    "idle-cash Paper write requires policy approval only"
-                )
-        else:
-            if caller_n == "telegram-pending" and action_n != "buy":
-                raise ValueError("Telegram pending queue permits Paper buys only")
-            if user_approved is not True or policy_approved is True:
-                raise PaperTradeApprovalRequired(
-                    "explicit user approval is required for this Paper caller"
-                )
         return caller_n, action_n
 
     def _require_park_slot(self, slot_id: object) -> None:
@@ -201,7 +200,7 @@ class PaperTradeWriteExecutor:
             policy_approved=policy_approved,
             ticker=ticker,
         )
-        if caller_n == "telegram-idle-cash":
+        if paper_caller_policy(caller_n).approval_mode == PAPER_PARK_APPROVAL_MODE:
             self._require_park_slot(slot_id)
         operation = f"paper.{action_n}"
         identity = validate_paper_trade_write_identity(

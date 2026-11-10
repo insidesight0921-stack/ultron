@@ -66,9 +66,7 @@ def test_age_of_a_broken_manifest_is_unknown_not_zero(tmp_path):
     assert pr.manifest_age(m) is None
 
 
-def test_evidence_carries_the_new_manifest_into_both_stacks(tmp_path):
-    """재발급은 **백업 경로만** 바꾼다 — 정책을 조용히 바꾸는 통로가 되면 안 된다."""
-    payload = {
+_FULL_PAYLOAD = {
         "api_writer_enabled": True, "client_writes_enabled": True,
         "consumer_executor_enabled": True, "user_approval_required": True,
         "direct_db_fallback_disabled": True, "rollback_verified": True,
@@ -88,7 +86,12 @@ def test_evidence_carries_the_new_manifest_into_both_stacks(tmp_path):
                   "paper_ui_direct_writes_disabled": True,
                   "telegram_direct_writes_disabled": True,
                   "operator_cli_rollback_only": True},
-    }
+}
+
+
+def test_evidence_carries_the_new_manifest_into_both_stacks(tmp_path):
+    """재발급은 **백업 경로만** 바꾼다 — 정책을 조용히 바꾸는 통로가 되면 안 된다."""
+    payload = json.loads(json.dumps(_FULL_PAYLOAD))
     manifest = tmp_path / "새백업" / "manifest.json"
     manifest.parent.mkdir()
     manifest.write_text("{}", encoding="utf-8")
@@ -100,6 +103,41 @@ def test_evidence_carries_the_new_manifest_into_both_stacks(tmp_path):
     assert (assistant.private_write_evidence.database_path
             != paper.private_write_evidence.database_path)
     assert paper.caller_policies[0].approval_mode == "explicit-user"
+
+
+def _policy_payload(policies):
+    return {"paper": {"caller_policies": [
+        {"caller": c, "operations": list(ops), "approval_mode": m} for c, ops, m in policies]}}
+
+
+def test_policy_diff_names_what_the_code_table_adds_and_drops():
+    # 2026-11-10: 대기 큐·유휴 자본을 consumer만 열고 번들 표엔 빠뜨렸다
+    from private_paper_write_readiness import PAPER_TARGET_CALLER_POLICIES
+    code = [(p.caller, p.operations, p.approval_mode) for p in PAPER_TARGET_CALLER_POLICIES]
+    old = [c for c in code if c[0] not in {"telegram-pending", "telegram-idle-cash"}]
+    added, removed = pr.policy_diff(_policy_payload(old + [("gone", ("paper.buy",), "x")]))
+    assert {a[0] for a in added} == {"telegram-pending", "telegram-idle-cash"}
+    assert [r[0] for r in removed] == ["gone"]
+    assert pr.policy_diff(_policy_payload(code)) == ([], [])
+
+
+def test_reissue_refuses_a_policy_change_unless_adopted(monkeypatch, tmp_path):
+    """기본 재발급이 정책을 조용히 바꾸면 안 된다 — 다르면 멈추고 플래그를 요구한다."""
+    bundle = tmp_path / "b.json"
+    bundle.write_text(json.dumps(_policy_payload([("paper-ui", ("paper.buy",), "explicit-user")])),
+                      encoding="utf-8")
+    monkeypatch.setattr(pr, "bundle_path", lambda: bundle)
+    monkeypatch.setattr(pr, "latest_manifest", lambda root: tmp_path / "m.json")
+    monkeypatch.setattr(pr, "manifest_age", lambda m: timedelta(hours=1))
+    with pytest.raises(pr.ReissueError, match="adopt-code-policies"):
+        pr.reissue(do_backup=False)
+
+
+def test_adopted_evidence_carries_the_code_table(tmp_path):
+    from private_paper_write_readiness import PAPER_TARGET_CALLER_POLICIES
+    payload = json.loads(json.dumps(_FULL_PAYLOAD))
+    _, paper = pr.build_evidence(payload, tmp_path / "m.json", adopt_code_policies=True)
+    assert paper.caller_policies == PAPER_TARGET_CALLER_POLICIES
 
 
 # ─── 검증 경로 (2026-08-28) ──────────────────────────

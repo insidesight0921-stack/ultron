@@ -19,6 +19,12 @@
     python3 scripts/private_write_reissue.py --check      # 진단만 (아무것도 안 바꿈)
     python3 scripts/private_write_reissue.py --backup     # 새 백업 + 재발급 + 검증
     python3 scripts/private_write_reissue.py              # 최신 백업으로 재발급만
+    python3 scripts/private_write_reissue.py --backup --adopt-code-policies
+                                                          # 코드의 호출자 정책표로 바꿔 재발급
+
+**정책 변경은 명시적으로만 (2026-11-10).** 기본 재발급은 번들의 호출자 정책을 그대로
+옮긴다. 코드의 정책표(`PAPER_TARGET_CALLER_POLICIES`)를 바꿨다면 `--adopt-code-policies`
+로만 새 표를 싣는다 — 무엇이 더해지고 빠지는지 출력하고, 나머지 값은 그대로 옮긴다.
 """
 from __future__ import annotations
 
@@ -41,6 +47,7 @@ from private_paper_write_candidate import (  # noqa: E402
     generate_paper_write_activation_candidate,
 )
 from private_paper_write_readiness import (  # noqa: E402
+    PAPER_TARGET_CALLER_POLICIES,
     PaperCallerPolicy,
     PaperWriteReadinessEvidence,
 )
@@ -128,7 +135,29 @@ def _private_evidence(payload: dict, *, writer_owner: str, database_path: Path,
     )
 
 
-def build_evidence(payload: dict, manifest: Path):
+def _policy_key(policy: PaperCallerPolicy) -> tuple:
+    return (policy.caller, tuple(policy.operations), policy.approval_mode)
+
+
+def bundle_policies(payload: dict) -> tuple[PaperCallerPolicy, ...]:
+    return tuple(
+        PaperCallerPolicy(
+            caller=str(item["caller"]),
+            operations=tuple(item["operations"]),
+            approval_mode=str(item["approval_mode"]),
+        )
+        for item in payload["paper"]["caller_policies"]
+    )
+
+
+def policy_diff(payload: dict) -> tuple[list[tuple], list[tuple]]:
+    """(코드에만 있는 정책, 번들에만 있는 정책)(순수)."""
+    have = {_policy_key(p) for p in bundle_policies(payload)}
+    want = {_policy_key(p) for p in PAPER_TARGET_CALLER_POLICIES}
+    return sorted(want - have), sorted(have - want)
+
+
+def build_evidence(payload: dict, manifest: Path, *, adopt_code_policies: bool = False):
     schedule = payload["schedule"]
     paper = payload["paper"]
 
@@ -150,14 +179,8 @@ def build_evidence(payload: dict, manifest: Path):
     paper_private = _private_evidence(
         payload, writer_owner=str(paper["writer_owner"]),
         database_path=PATHS.paper_db, manifest=manifest)
-    policies = tuple(
-        PaperCallerPolicy(
-            caller=str(item["caller"]),
-            operations=tuple(item["operations"]),
-            approval_mode=str(item["approval_mode"]),
-        )
-        for item in paper["caller_policies"]
-    )
+    policies = (PAPER_TARGET_CALLER_POLICIES if adopt_code_policies
+                else bundle_policies(payload))
     paper_evidence = PaperWriteReadinessEvidence(
         private_write_evidence=paper_private,
         caller_policies=policies,
@@ -192,13 +215,24 @@ def check() -> int:
     except ReissueError as exc:
         print(f"최신 백업:   {exc}")
 
+    added, removed = policy_diff(payload)
+    if added or removed:
+        print("\n호출자 정책:  ❌ 번들과 코드가 다름 — 재시작하면 Paper 쓰기가 올라오지 않는다")
+        for item in added:
+            print(f"  + {item}")
+        for item in removed:
+            print(f"  - {item}")
+    else:
+        print("\n호출자 정책:  ✅ 번들 = 코드")
     assistant, _ = build_evidence(payload, pinned.resolve())
     report = assess_private_write_readiness(assistant.private_write_evidence)
-    print(f"\n준비 상태:   "
+    print(f"준비 상태:   "
           f"{'✅ ready' if report.ready else '❌ ' + ', '.join(report.failed_codes)}")
     if not report.ready:
         print("\n재발급하려면: python3 scripts/private_write_reissue.py --backup")
-    return 0 if report.ready else 1
+    if added or removed:
+        print("정책 반영:   python3 scripts/private_write_reissue.py --backup --adopt-code-policies")
+    return 0 if report.ready and not (added or removed) else 1
 
 
 # ─── 재발급 ──────────────────────────────────────────
@@ -232,7 +266,7 @@ def verify(candidate: Path, *, private_root: Path | None = None) -> None:
         raise ReissueError("검증 실패: Paper 쓰기가 꺼진 번들")
 
 
-def reissue(*, do_backup: bool) -> int:
+def reissue(*, do_backup: bool, adopt_code_policies: bool = False) -> int:
     os.umask(0o077)
     path = bundle_path()
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -249,7 +283,20 @@ def reissue(*, do_backup: bool) -> int:
         raise ReissueError(
             f"가장 최근 백업도 한도를 넘었다 — --backup 으로 새로 뜨고 다시 실행")
 
-    assistant, paper = build_evidence(payload, manifest)
+    added, removed = policy_diff(payload)
+    if adopt_code_policies:
+        print("②-1 호출자 정책을 코드 표로 바꾼다:")
+        for item in added:
+            print(f"   + {item}")
+        for item in removed:
+            print(f"   - {item}")
+        if not (added or removed):
+            print("   (차이 없음)")
+    elif added or removed:
+        raise ReissueError("번들과 코드의 호출자 정책이 다르다 — 의도한 변경이면 "
+                           "--adopt-code-policies 로 다시 실행")
+    assistant, paper = build_evidence(payload, manifest,
+                                      adopt_code_policies=adopt_code_policies)
 
     staging = Path(tempfile.mkdtemp(prefix="ultron-write-reissue-"))
     try:
@@ -295,6 +342,8 @@ def main() -> int:
                         help="진단만 한다 (아무것도 바꾸지 않음)")
     parser.add_argument("--backup", action="store_true",
                         help="재발급 전에 새 백업을 만든다")
+    parser.add_argument("--adopt-code-policies", action="store_true",
+                        help="번들의 호출자 정책을 코드의 정책표로 바꿔 싣는다")
     args = parser.parse_args()
     try:
         import telegram_notify
@@ -304,7 +353,9 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️ .env 로딩 실패: {exc}", file=sys.stderr)
     try:
-        return check() if args.check else reissue(do_backup=args.backup)
+        return (check() if args.check
+                else reissue(do_backup=args.backup,
+                             adopt_code_policies=args.adopt_code_policies))
     except ReissueError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2

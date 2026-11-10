@@ -25,6 +25,8 @@ PAPER_LEGACY_RUNTIME_WRITERS = (
     "telegram-intraday-direct",
     "telegram-kium-direct",
     "telegram-quant-direct",
+    "telegram-pending-direct",
+    "telegram-idle-cash-direct",
 )
 PAPER_OPERATOR_ROLLBACK_OWNER = "operator-cli-rollback-only"
 

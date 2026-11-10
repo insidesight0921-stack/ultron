@@ -18,6 +18,10 @@ PAPER_API_OWNER = "private-data-api"
 PAPER_REQUIRED_TABLES = frozenset({"portfolios", "slots", "positions", "trades"})
 PAPER_EXPLICIT_APPROVAL_MODE = "explicit-user"
 PAPER_POLICY_APPROVAL_MODE = "policy-auto-sell-only"
+# 사람 승인 없이 사고팔되, 종목·슬롯이 고정된 파킹만(idle_cash.PARK_TICKER/PARK_SLOT).
+# 그 제한은 consumer가 이 모드 이름을 보고 건다.
+PAPER_PARK_APPROVAL_MODE = "policy-auto-park-only"
+PAPER_POLICY_APPROVAL_MODES = frozenset({PAPER_POLICY_APPROVAL_MODE, PAPER_PARK_APPROVAL_MODE})
 
 
 @dataclass(frozen=True, order=True)
@@ -58,7 +62,27 @@ PAPER_TARGET_CALLER_POLICIES = (
         operations=("paper.buy", "paper.sell"),
         approval_mode=PAPER_EXPLICIT_APPROVAL_MODE,
     ),
+    # 2026-11-10: 아래 둘은 10-28에 consumer만 열고 여기(활성화 번들이 증명하는 표)에는
+    # 없었다. 이 표가 **유일한 규칙표**다 — identity·consumer가 여기서 읽는다.
+    # 장외 승인분을 개장 후 체결하는 대기 큐 — 승인은 장외에 사람이 이미 했다
+    PaperCallerPolicy(
+        caller="telegram-pending",
+        operations=("paper.buy",),
+        approval_mode=PAPER_EXPLICIT_APPROVAL_MODE,
+    ),
+    # IPO 슬롯 유휴 자본 파킹(TIGER 단기통안채) — 사람 승인 없음
+    PaperCallerPolicy(
+        caller="telegram-idle-cash",
+        operations=("paper.buy", "paper.sell"),
+        approval_mode=PAPER_PARK_APPROVAL_MODE,
+    ),
 )
+
+
+def paper_caller_policy(caller: object) -> PaperCallerPolicy | None:
+    """호출자 이름 → 정책(없으면 None)."""
+    name = str(caller or "").strip().lower()
+    return next((p for p in PAPER_TARGET_CALLER_POLICIES if p.caller == name), None)
 
 
 class PaperWriteReadinessError(RuntimeError):
