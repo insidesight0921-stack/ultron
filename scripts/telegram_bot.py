@@ -1420,6 +1420,7 @@ QUANT_REBALANCE_TIMEOUT = 600   # 초 — 캐시 없는 recommend가 최대 6분
 # 모니터의 시세 조회까지 막는다. 그래서 앞 호출이 안 끝났으면 새로 넣지 않는다.
 # 데몬이어야 멈춘 스레드가 봇 재시작(종료)을 붙잡지 않는다(풀 워커는 종료 때 join된다).
 _QUANT_INFLIGHT: "concurrent.futures.Future | None" = None
+_QUANT_STARTED = 0.0   # time.monotonic() — 멈춘 계산이 얼마나 됐는지 알리려고
 
 
 class QuantBusy(RuntimeError):
@@ -1443,11 +1444,12 @@ def _start_quant_thread(fn, args, kwargs) -> "concurrent.futures.Future":
 
 async def _run_quant(fn, *args, timeout: float | None = None, **kwargs):
     """콴텍 계산을 한 번에 하나만, 시간 제한을 두고 돌린다."""
-    global _QUANT_INFLIGHT
+    global _QUANT_INFLIGHT, _QUANT_STARTED
     if _QUANT_INFLIGHT is not None and not _QUANT_INFLIGHT.done():
         raise QuantBusy("앞선 콴텍 계산이 아직 끝나지 않았습니다")
     fut = _start_quant_thread(fn, args, kwargs)
     _QUANT_INFLIGHT = fut
+    _QUANT_STARTED = time.monotonic()
     limit = QUANT_REBALANCE_TIMEOUT if timeout is None else timeout
     try:
         return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=limit)
@@ -3318,9 +3320,23 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         text, _ = await _run_quant(quant_run, "recommend")
     except QuantBusy:
-        # 다른 콴텍 계산(/test_quant 등)이 도는 중 — 조용히 내일 다시. 실패 알림을 보내면
-        # 멀쩡한데도 "멈췄다"로 읽힌다.
-        log.info("콴텍 계산이 진행 중이라 월간 푸시를 내일로 미룹니다")
+        # 다른 콴텍 계산(/test_quant 등)이 도는 중 — 내일 다시. 다만 제한 시간을 넘겨서도
+        # 돌고 있으면 멈춘 것이다: 스레드는 재시작 전엔 안 풀리고 그동안 매일 여기서
+        # 막힌다. 조용히 넘기면 10월처럼 몇 주를 모른다(2026-11-10 리뷰) — 알린다.
+        stuck_min = (time.monotonic() - _QUANT_STARTED) / 60
+        if stuck_min * 60 <= QUANT_REBALANCE_TIMEOUT:
+            log.info("콴텍 계산이 진행 중이라 월간 푸시를 내일로 미룹니다")
+            return
+        log.warning("콴텍 계산이 %.0f분째 끝나지 않아 월간 푸시를 못 합니다", stuck_min)
+        for uid in pending:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=int(uid),
+                    text=(f"⚠️ 콴텍 계산이 {stuck_min:.0f}분째 멈춰 있어 월간 리밸런싱 추천을 "
+                          "보내지 못했습니다 — 봇을 재시작해 주세요"),
+                )
+            except Exception:
+                pass
         return
     except Exception as e:
         log.exception("quant_run 실패")
@@ -3369,9 +3385,11 @@ async def quant_monthly_rebalance(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ── diff 계산 (기존 포지션 vs 새 추천) ─────────────────────────────
     try:
-        _all_slots = _list_runtime_paper_slots()
+        # private API 호출이라 이벤트 루프를 막지 않게 스레드에서
+        _all_slots = await asyncio.to_thread(_list_runtime_paper_slots)
         _qslot = next((s for s in _all_slots if "콴텍" in s.get("name", "")), None)
-        _qpos = _list_runtime_paper_positions(slot=int(_qslot["id"])) if _qslot else []
+        _qpos = (await asyncio.to_thread(_list_runtime_paper_positions, slot=int(_qslot["id"]))
+                 if _qslot else [])
     except Exception:
         _qpos = []
 

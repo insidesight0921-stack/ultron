@@ -1099,13 +1099,18 @@ def recommend_top_n(
             df = cached
         else:
             import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            # with 블록으로 쓰면 빠져나갈 때 shutdown(wait=True)가 멈춘 fetch를 끝까지
+            # 기다려 3초 제한이 무의미해진다(2026-11-10 리뷰) — 기다리지 않고 버린다.
+            ex = _cf.ThreadPoolExecutor(max_workers=1)
+            try:
                 fut = ex.submit(fetch_ohlcv_cached, ticker, start_date, end_date)
                 try:
                     df = fut.result(timeout=3)   # miss면 3초만 대기
                 except _cf.TimeoutError:
                     log.debug(f"{ticker} ohlcv timeout (3s) — skip")
                     return None
+            finally:
+                ex.shutdown(wait=False)
         if df is None or len(df) < momentum_lookback + 1:
             return None
         close = None
